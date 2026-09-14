@@ -47,24 +47,50 @@ before people arrive.
 
 ## Running an exercise
 
-**Facilitator** — open the URL, choose *Run an exercise*, load your inject
-sheet. You get a four-character room code. Share it. When people have joined,
-press *Begin*.
+**Facilitator** — open `/host`, load your inject sheet, check the settings, press
+*Open the room*. Each business unit gets its own four-character code.
+
+**A code is a seat.** One business unit sends one person on one device. The first
+device to use a code holds that unit's seat; a second device on the same code is
+refused rather than quietly added. If a unit refreshes, drops its connection or
+swaps device, it re-enters its own code and takes the seat back — its answers and
+points come with it. You can also release a seat from the *Seats* panel if a unit
+needs to start clean.
+
+**Projector** — press *Project* (or `P`) to open `/screen` in a second tab and put
+that on the room's display. It shows the condition, the question, the option
+shapes, a clock readable from the back of the room, and the join codes. It never
+shows your controls, your notes or anyone's score.
 
 Each inject moves through four phases, and every device follows:
 
 | Phase | What happens |
 |---|---|
-| Briefing | Scenario appears on all devices. Read it aloud. No questions yet. |
-| Open | Questions unlock, only for the units they're addressed to. You see who's still outstanding, by name. |
-| Reveal | Every answer appears at once, on your screen and theirs. This is the discussion. |
-| Score | Set quality and decision per question, stamp the decision time. |
+| Waiting | Join codes on screen, seats filling |
+| Brief | Scenario on all devices, read aloud, no questions yet |
+| Answer | Questions unlock for the targeted units only, clock running |
+| Discuss | Answers revealed; the key stays hidden until you press for it |
+
+Revealing answers and revealing the key are two separate presses. Nothing about
+the key is sent to any device until the second one, so it can't be found by
+inspecting the page.
 
 Scores and notes never leave your machine. They're kept in your browser's local
 storage and go into the CSV at the end.
 
-**Participants** — open the same URL, *Join an exercise*, enter the code, name,
-and unit. They can edit and resend until you reveal, after which answers lock.
+**Keyboard** — `Space` advances the phase, `R` reveals, `K` releases the key,
+`←`/`→` move between injects, `C` opens the seats panel, `P` opens the projector.
+
+**Participants** — open the root URL and enter the unit's code. The code decides
+the unit, so nobody can pick the wrong one. Optionally name whoever is at the
+device. Answers can be changed until the window closes.
+
+**Answer shapes** — every option carries one of four shapes and colours, the same
+on the phone, your screen and the projector. You can ask *"siapa yang pilih
+segitiga?"* out loud and the whole room knows which option you mean.
+
+**Themes** — light and dark, switchable in the header on every surface, remembered
+per device. Dark is the sensible choice for a dim room with a projector.
 
 ---
 
@@ -80,7 +106,7 @@ One row per question. First row must be the headers.
 | Siklus | | Groups injects into phases |
 | Question | yes | |
 | Answer | | Model answer, `A.`/`B.` options, or comma-separated keywords |
-| Window | | Decision window in minutes |
+| Window | | Answering time for that inject, in minutes |
 
 Indonesian header names are recognised too (Kondisi, Pertanyaan, Jawaban,
 Tahap, Waktu).
@@ -100,7 +126,7 @@ anything else as a model answer. For choices, mark the correct one with `*` or
 - **Rooms are in memory**, snapshotted to `rooms.json` every 30s and restored on
   restart. They expire 12 hours after last activity.
 - **A refresh is safe** on both sides. The facilitator resumes from local
-  storage; participants rejoin with their existing answers intact.
+  storage; a unit's device rejoins its own seat with its answers intact.
 - **A dropped connection** shows "Reconnecting" in the header and retries with
   backoff. It doesn't fail silently.
 - **Set `SNAPSHOT_PATH`** to a mounted volume if your host has ephemeral disk
@@ -110,6 +136,9 @@ anything else as a model answer. For choices, mark the correct one with `*` or
 
 There's no authentication. Anyone with the URL and a four-character code can
 join and read the scenario and every answer.
+
+One seat per unit narrows this — only the first guesser gets in — but it does
+not close it. That first guesser still reads the scenario and every answer.
 
 That's fine for an internal exercise on a URL you haven't published. It is not
 fine if the injects name real systems and the answers document where controls

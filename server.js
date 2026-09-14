@@ -119,26 +119,36 @@ function armReveal(room) {
     if (!r || r.state.phase !== "open") return;
     r.state = { ...r.state, phase: "revealed", keyShown: false };
     toRoom(r.id, { t: "state", ...r.state });
-    toRoom(r.id, { t: "roster", people: Object.values(r.people) }, true);
+    toRoom(r.id, { t: "roster", people: roster(r) }, true);
     markSnapshot();
   }, fireIn));
 }
 
-function toRoom(roomId, msg, hostOnly = false) {
+/* staffOnly covers the facilitator and the projector view: both need the roster,
+   participants must never see it. */
+function toRoom(roomId, msg, staffOnly = false) {
   const raw = JSON.stringify(msg);
   for (const [ws, s] of sockets) {
     if (s.roomId !== roomId) continue;
-    if (hostOnly && !s.isHost) continue;
+    if (staffOnly && !s.isHost && !s.isScreen) continue;
     if (ws.readyState === 1) ws.send(raw);
   }
 }
+
+/* A unit's seat is held while some socket is bound to its pid. */
+const seatHolder = (room, peran) => Object.values(room.people).find((p) => p.peran === peran);
+const pidLive = (pid) => { for (const s of sockets.values()) if (s.pid === pid) return true; return false; };
+
+/* Roster as the facilitator and projector see it: one entry per unit, with
+   whether that unit's device is actually connected right now. */
+const roster = (room) => Object.values(room.people).map((p) => ({ ...p, live: pidLive(p.pid) }));
 
 /* Coalesce roster pushes: a burst of answers becomes one update. */
 const dirty = new Set();
 setInterval(() => {
   for (const id of dirty) {
     const room = rooms.get(id);
-    if (room) toRoom(id, { t: "roster", people: Object.values(room.people) }, true);
+    if (room) toRoom(id, { t: "roster", people: roster(room) }, true);
   }
   dirty.clear();
 }, 1200);
@@ -158,6 +168,22 @@ function deckFor(room, peran) {
           // never send which option is correct
           choices: (q.choices || []).map((c) => ({ text: c.text })),
         })),
+    })),
+  };
+}
+
+/* The projector gets every unit's questions but never the correct flags —
+   the key reaches it through sendKey, at the same moment as the phones. */
+function screenDeck(room) {
+  return {
+    roles: room.deck.roles,
+    injects: room.deck.injects.map((i) => ({
+      id: i.id, siklus: i.siklus, condition: i.condition, roles: i.roles,
+      limit: limitFor(room, i.id),
+      questions: i.questions.map((q) => ({
+        qid: q.qid, peran: q.peran, text: q.text, type: q.type,
+        choices: (q.choices || []).map((c) => ({ text: c.text })),
+      })),
     })),
   };
 }
@@ -234,7 +260,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: byId.id, isHost: true });
         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
           settings: byId.settings, times: byId.times || {}, state: byId.state });
-        send(ws, { t: "roster", people: Object.values(byId.people) });
+        send(ws, { t: "roster", people: roster(byId) });
         break;
       }
 
@@ -247,29 +273,53 @@ wss.on("connection", (ws) => {
         break;
       }
 
-      /* ---- a code tells us both the room and the unit ---- */
+      /* ---- a code tells us the room, the unit, and whether its seat is free ---- */
       case "peek": {
         const hit = codeIndex.get(String(m.code || "").toUpperCase());
-        if (!hit || !rooms.get(hit.roomId)) return send(ws, { t: "nosuch" });
-        send(ws, { t: "codeok", peran: hit.peran });
+        const room = hit && rooms.get(hit.roomId);
+        if (!room) return send(ws, { t: "nosuch" });
+        const held = seatHolder(room, hit.peran);
+        send(ws, { t: "codeok", peran: hit.peran,
+          taken: !!held,
+          holder: held ? held.name : "",
+          sinceMs: held ? Date.now() - (held.claimedAt || 0) : 0,
+          live: held ? pidLive(held.pid) : false });
         break;
       }
 
+      /* ---- one seat per business unit ----
+         The code is a seat, not a password. The first device to use it holds
+         the unit; a second device is refused rather than quietly added, and
+         can take the seat over — which is how a unit that refreshed, dropped
+         its socket or swapped device gets back in with its answers intact. */
       case "join": {
         const code = String(m.code || "").toUpperCase();
         const hit = codeIndex.get(code);
         const room = hit && rooms.get(hit.roomId);
         if (!room) return send(ws, { t: "nosuch" });
         room.touched = Date.now();
-        const pid = m.pid && room.people[m.pid]
-          ? m.pid
-          : `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-        room.people[pid] = {
-          pid, code, peran: hit.peran,
-          name: (m.name || "").trim() || hit.peran,
-          answers: room.people[pid]?.answers || {},
-          total: room.people[pid]?.total || 0,
-        };
+
+        const held = seatHolder(room, hit.peran);
+        if (held && !m.takeover) {
+          return send(ws, { t: "seattaken", peran: hit.peran, name: held.name,
+            sinceMs: Date.now() - (held.claimedAt || 0), live: pidLive(held.pid) });
+        }
+
+        let pid;
+        if (held) {
+          pid = held.pid;                       // same seat, same answers, same points
+          for (const [sock, s] of sockets) {
+            if (s.pid === pid && sock !== ws) { send(sock, { t: "evicted" }); sockets.set(sock, {}); }
+          }
+          held.name = (m.name || "").trim() || held.name;
+          held.claimedAt = Date.now();
+        } else {
+          pid = `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+          room.people[pid] = { pid, code, peran: hit.peran,
+            name: (m.name || "").trim() || hit.peran,
+            answers: {}, total: 0, claimedAt: Date.now() };
+        }
+
         sockets.set(ws, { roomId: room.id, pid });
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
@@ -282,13 +332,42 @@ wss.on("connection", (ws) => {
 
       case "rejoin": {
         const room = byId;
-        if (!room || !room.people[m.pid]) return send(ws, { t: "gone" });
-        const me = room.people[m.pid];
+        const me = room?.people[m.pid];
+        if (!room || !me) return send(ws, { t: "gone" });
+        /* Someone took this seat over while we were away. Don't let the old
+           device silently reappear alongside the new one. */
+        if (m.seat && me.claimedAt && Number(m.seat) !== me.claimedAt) return send(ws, { t: "evicted" });
         sockets.set(ws, { roomId: room.id, pid: m.pid });
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
           settings: room.settings, me });
         if (room.state.keyShown) sendKey(room);
+        markDirty(room.id);
+        break;
+      }
+
+      /* ---- the projector view attaches read-only ---- */
+      case "watch": {
+        if (!byId) return send(ws, { t: "gone" });
+        sockets.set(ws, { roomId: byId.id, isScreen: true });
+        send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
+          settings: byId.settings, state: byId.state, codes: byId.codes });
+        send(ws, { t: "roster", people: roster(byId) });
+        if (byId.state.keyShown) sendKey(byId);
+        break;
+      }
+
+      /* ---- facilitator frees a unit's seat ---- */
+      case "release": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        const held = seatHolder(byId, m.peran);
+        if (!held) return;
+        for (const [sock, s] of sockets) {
+          if (s.pid === held.pid) { send(sock, { t: "evicted" }); sockets.set(sock, {}); }
+        }
+        delete byId.people[held.pid];
+        toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
+        markSnapshot();
         break;
       }
 

@@ -1,49 +1,125 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 
 /* ------------------------------------------------------------------ *
- * TTX Live
+ * TTX Live — b19
  *
- * Each business unit joins with its own code, so the code decides the
- * unit. Multiple choice is scored on correctness and speed; essay
- * questions fall through to facilitator scoring.
+ * Three surfaces off one socket:
+ *   /        participants, one device per business unit
+ *   /host    the facilitator
+ *   /screen  the projector, read-only
+ *
+ * A join code is a SEAT, not a password. One business unit sends one
+ * device; a second device on the same code is refused and offered a
+ * take-over, which is how a unit that refreshed or dropped gets back in
+ * without losing its answers.
+ *
+ * Multiple choice is scored on correctness and speed, server-side.
+ * Essay questions fall through to facilitator scoring.
  * ------------------------------------------------------------------ */
 
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
-const V = "v3";
-const BUILD = "b18";  // shown in the corner so you can confirm what is deployed
+const V = "v4";
+const BUILD = "b19";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
+const K_THEME = "ttx:theme";
 
-/* The facilitator lives at /host. Participants never see a link to it. */
 const isHostRoute = () =>
   /^\/host\/?$/i.test(location.pathname) || /^#\/?host$/i.test(location.hash);
+const isScreenRoute = () => /^\/screen\/?$/i.test(location.pathname);
+const screenRoom = () =>
+  (location.hash || "").replace(/^#/, "").trim() ||
+  new URLSearchParams(location.search).get("room") || "";
 
-const ROLE_COLORS = ["#2E5EAA", "#B5442E", "#5A7A2E", "#7A4B8F", "#B07A16", "#2A7A72", "#8F3A5C", "#43506B"];
+/* Four fixed shapes. The same shape, colour and letter appear on the phone,
+   the host screen and the projector, so the facilitator can call an option
+   out loud — "siapa yang pilih segitiga?" — and the room knows what he means. */
+const SHAPES = {
+  triangle: "M12 3l9.5 17H2.5z",
+  diamond: "M12 2l10 10-10 10L2 12z",
+  circle: "M12 2a10 10 0 100 20 10 10 0 000-20z",
+  square: "M3.5 3.5h17v17h-17z",
+};
+const OPT_SHAPES = ["triangle", "diamond", "circle", "square"];
+const OPT_VAR = ["var(--oA)", "var(--oB)", "var(--oC)", "var(--oD)"];
+const optOf = (i) => {
+  const k = ((i % 4) + 4) % 4;
+  return { shape: OPT_SHAPES[k], name: OPT_SHAPES[k], c: OPT_VAR[k], ltr: String.fromCharCode(65 + i) };
+};
+const Glyph = ({ shape, size = 16 }) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
+    <path d={SHAPES[shape] || SHAPES.circle} />
+  </svg>
+);
+
+const UNIT_VARS = ["var(--u1)", "var(--u2)", "var(--u3)", "var(--u4)", "var(--u5)", "var(--u6)"];
+const SKIP_WORDS = /^(&|dan|and|of|the|de|dari)$/i;
+function monogram(s) {
+  const w = String(s || "").split(/[\s/]+/).filter((x) => /[A-Za-z0-9]/.test(x) && !SKIP_WORDS.test(x));
+  if (!w.length) return "??";
+  if (w.length >= 2) return (w[0][0] + w[1][0]).toUpperCase();
+  return w[0].slice(0, 2).toUpperCase();
+}
+
 const SCORE_LABELS = ["Not addressed", "Partial", "Adequate", "Strong"];
 const DECISION_OPTS = [
-  { k: "reached", label: "Decided", color: "#2A7A72" },
-  { k: "deferred", label: "Deferred", color: "#B07A16" },
-  { k: "none", label: "No decision", color: "#B5442E" },
-  { k: "na", label: "N/A", color: "#6B7671" },
+  { k: "reached", label: "Decided", color: "var(--live)" },
+  { k: "deferred", label: "Deferred", color: "var(--warn)" },
+  { k: "none", label: "No decision", color: "var(--wrong)" },
+  { k: "na", label: "N/A", color: "var(--faint)" },
 ];
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const rand = (n = 4) => Array.from({ length: n }, () => ALPHABET[Math.floor(Math.random() * 32)]).join("");
-const fmt = (s) => `${String(Math.floor((s || 0) / 60)).padStart(2, "0")}:${String(Math.floor(s || 0) % 60).padStart(2, "0")}`;
+const fmt = (s) => `${Math.floor((s || 0) / 60)}:${String(Math.floor(s || 0) % 60).padStart(2, "0")}`;
+const fmtAgo = (ms) => {
+  const m = Math.floor((ms || 0) / 60000);
+  if (m < 1) return "less than a minute";
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h`;
+};
+const ordinal = (n) => (n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th");
 
-/* Wipe every key from any previous build, not just the current one. */
 function nukeAll() {
   try {
     Object.keys(localStorage)
-      .filter((k) => k.startsWith("ttx:"))
+      .filter((k) => k.startsWith("ttx:") && k !== K_THEME)
       .forEach((k) => localStorage.removeItem(k));
   } catch (e) { /* private mode */ }
 }
 const lsGet = (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode */ } };
 const lsDel = (k) => { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } };
+
+/* ---------------------------- theme ---------------------------- */
+
+function readTheme() {
+  try {
+    const v = localStorage.getItem(K_THEME);
+    if (v === "light" || v === "dark" || v === "auto") return v;
+  } catch (e) { /* private mode */ }
+  return "auto";
+}
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === "auto") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", mode);
+  try { localStorage.setItem(K_THEME, mode); } catch (e) { /* private mode */ }
+}
+function ThemeToggle({ compact }) {
+  const [mode, setMode] = useState(readTheme);
+  useEffect(() => { applyTheme(mode); }, [mode]);
+  return (
+    <div className={`themes ${compact ? "compact" : ""}`} role="group" aria-label="Theme">
+      {[["light", "Light"], ["dark", "Dark"], ["auto", "Auto"]].map(([k, label]) => (
+        <button key={k} aria-pressed={mode === k} title={`${label} theme`}
+          onClick={() => setMode(k)}>{compact ? label[0] : label}</button>
+      ))}
+    </div>
+  );
+}
 
 /* ---------------------------- transport ---------------------------- */
 
@@ -232,11 +308,11 @@ function buildModel(rows) {
 }
 
 const SAMPLE = [
-  { "Inject No.": "1", Siklus: "Siklus 1 - Detection", Window: "10", Condition: "At 02:14 the SOC monitoring tool raises a burst of failed authentications against the core banking admin portal, originating from an internal subnet assigned to a third-party maintenance vendor. The on-call analyst has not yet escalated.", Peran: "SOC, IT Operations", Question: "What is your first action in the next 15 minutes?", Answer: "A. Wait for a second alert before acting\n*B. Verify the alert, disable the vendor account, notify the IR lead\nC. Call the vendor and ask what they are doing\nD. Open a ticket and hand over at shift change" },
+  { "Inject No.": "1", Siklus: "Siklus 1 - Detection", Window: "2", Condition: "At 02:14 the SOC monitoring tool raises a burst of failed authentications against the core banking admin portal, originating from an internal subnet assigned to a third-party maintenance vendor. The on-call analyst has not yet escalated.", Peran: "SOC, IT Operations", Question: "What is your first action in the next 15 minutes?", Answer: "A. Wait for a second alert before acting\n*B. Verify the alert, disable the vendor account, notify the IR lead\nC. Call the vendor and ask what they are doing\nD. Open a ticket and hand over at shift change" },
   { "Inject No.": "", Siklus: "", Condition: "", Peran: "Vendor Management", Question: "Do you have current after-hours contact details and a contractual notification window for this vendor?", Answer: "A. No, we would have to wait for business hours\n*B. Yes, both are in the contract register and reachable now\nC. We have a contact but no defined window" },
-  { "Inject No.": "2", Siklus: "Siklus 1 - Detection", Window: "8", Condition: "Thirty minutes later the vendor account is confirmed compromised. Logs show successful access to a database holding customer identity documents. The volume of records touched is not yet known.", Peran: "Risk Management", Question: "Has this crossed your threshold for declaring a major incident?", Answer: "A. Not yet, wait for the record count\n*B. Yes, declare immediately on confirmed unauthorised access to customer data\nC. Escalate to the CISO for a decision" },
-  { "Inject No.": "", Siklus: "", Condition: "", Peran: "Legal & Compliance", Question: "What regulatory notification clock has now started?", Answer: "*A. The clock started at confirmation of unauthorised access to personal data\nB. It starts once the record count is final\nC. It starts when the board is briefed" },
-  { "Inject No.": "3", Siklus: "Siklus 2 - Response", Window: "12", Condition: "A journalist emails corporate communications at 08:40 asking to confirm a data breach affecting customer identity documents. They cite a post on a criminal forum and want a response within two hours.", Peran: "Corporate Communications, Legal & Compliance", Question: "What goes in the first response?", Answer: "A. A full account of what happened so far\n*B. A holding statement, legally reviewed, from one named spokesperson\nC. No response until the investigation closes" },
+  { "Inject No.": "2", Siklus: "Siklus 1 - Detection", Window: "1.5", Condition: "Thirty minutes later the vendor account is confirmed compromised. Logs show successful access to a database holding customer identity documents. The volume of records touched is not yet known.", Peran: "Risk Management", Question: "Has this crossed your threshold for declaring a major incident?", Answer: "A. Not yet, wait for the record count\n*B. Yes, declare immediately on confirmed unauthorised access to customer data\nC. Escalate to the CISO for a decision\nD. Log it as a security event and review at the weekly forum" },
+  { "Inject No.": "", Siklus: "", Condition: "", Peran: "Hukum & Kepatuhan", Question: "What regulatory notification clock has now started?", Answer: "*A. The clock started at confirmation of unauthorised access to personal data\nB. It starts once the record count is final\nC. It starts when the board is briefed" },
+  { "Inject No.": "3", Siklus: "Siklus 2 - Response", Window: "2", Condition: "A journalist emails corporate communications at 08:40 asking to confirm a data breach affecting customer identity documents. They cite a post on a criminal forum and want a response within two hours.", Peran: "Corporate Communications, Hukum & Kepatuhan", Question: "What goes in the first response?", Answer: "A. A full account of what happened so far\n*B. A holding statement, legally reviewed, from one named spokesperson\nC. No response until the investigation closes" },
   { "Inject No.": "", Siklus: "", Condition: "", Peran: "Executive", Question: "Do you notify the board now or wait for confirmed scope?", Answer: "*A. Now, covering what is known, what is not, and decisions taken\nB. Wait until scope is confirmed\nC. Delegate to the CISO at the next scheduled meeting" },
 ];
 
@@ -255,7 +331,7 @@ class Boundary extends React.Component {
           rather than your device — send this message to whoever runs the exercise.
         </p>
         <pre>{String(this.state.err?.message || this.state.err)}</pre>
-        <button className="primary" onClick={() => { nukeAll(); location.reload(); }}>
+        <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>
           Clear and start fresh
         </button>
       </div>
@@ -266,23 +342,99 @@ class Boundary extends React.Component {
 /* ================================================================== */
 
 export default function App() {
-  const [host, setHost] = useState(isHostRoute());
+  const [route, setRoute] = useState(() =>
+    isScreenRoute() ? "screen" : isHostRoute() ? "host" : "participant");
   useEffect(() => {
-    const onPop = () => setHost(isHostRoute());
+    const onPop = () => setRoute(isScreenRoute() ? "screen" : isHostRoute() ? "host" : "participant");
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  const leaveHost = () => { history.pushState({}, "", "/"); setHost(false); };
+  const leaveHost = () => { history.pushState({}, "", "/"); setRoute("participant"); };
 
   return (
     <div className="ttx">
       <style>{CSS}</style>
       <Boundary>
-        {host ? <Host onExit={leaveHost} /> : <Participant />}
+        {route === "screen" ? <Screen />
+          : route === "host" ? <Host onExit={leaveHost} />
+            : <Participant />}
       </Boundary>
     </div>
   );
 }
+
+/* --------------------------- shared pieces --------------------------- */
+
+function Ring({ openedAt, limit, size = "s72", cap }) {
+  const [left, setLeft] = useState(limit);
+  useEffect(() => {
+    const tick = () => setLeft(Math.max(0, limit - (Date.now() - (openedAt || Date.now())) / 1000));
+    tick();
+    const iv = setInterval(tick, 200);
+    return () => clearInterval(iv);
+  }, [openedAt, limit]);
+  const CIRC = 2 * Math.PI * 52;
+  const frac = limit ? Math.max(0, left / limit) : 0;
+  const cls = left <= 0 ? "done" : left <= 10 ? "urgent" : frac <= 0.34 ? "warn" : "";
+  return (
+    <div className={`ring ${size} ${cls}`}>
+      <svg viewBox="0 0 120 120">
+        <circle className="rtrack" cx="60" cy="60" r="52" />
+        <circle className="rfill" cx="60" cy="60" r="52"
+          style={{ strokeDasharray: `${CIRC * frac} ${CIRC}` }} />
+      </svg>
+      <span className="rnum">{fmt(Math.ceil(left))}</span>
+      {cap && <span className="rcap">{cap}</span>}
+    </div>
+  );
+}
+
+const Crest = ({ peran, idx, size }) => (
+  <span className="crest" style={{
+    background: UNIT_VARS[(idx < 0 ? 0 : idx) % 6],
+    ...(size ? { width: size, height: size, fontSize: Math.round(size * 0.42) } : {}),
+  }}>{monogram(peran)}</span>
+);
+
+function Bar({ left, right, onExit, exitLabel = "Exit", conn, theme = true }) {
+  return (
+    <header className="bar striped">
+      <div className="brand">{left}</div>
+      <div className="barright">
+        {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
+        {right}
+        {theme && <ThemeToggle compact />}
+        <span className="build">{BUILD}</span>
+        {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel}</button>}
+      </div>
+    </header>
+  );
+}
+
+const PHASES = [
+  { k: "lobby", label: "Waiting" },
+  { k: "briefing", label: "Brief" },
+  { k: "open", label: "Answer" },
+  { k: "revealed", label: "Discuss" },
+];
+function PhaseSteps({ phase, onPick }) {
+  const at = PHASES.findIndex((p) => p.k === phase);
+  return (
+    <div className="phases" role="group" aria-label="Phase">
+      {PHASES.map((p, i) => (
+        <button key={p.k} className={i === at ? "on" : i < at ? "past" : ""}
+          onClick={() => onPick(p.k)}>{p.label}</button>
+      ))}
+    </div>
+  );
+}
+
+const Check = ({ label, checked, onChange, hint }) => (
+  <label className="chk span2">
+    <input type="checkbox" checked={!!checked} onChange={(e) => onChange(e.target.checked)} />
+    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
+  </label>
+);
 
 /* ============================== HOST ============================== */
 
@@ -293,7 +445,7 @@ function Host({ onExit }) {
   const [draftCodes, setDraftCodes] = useState({});
   const [settings, setSettings] = useState({
     mode: "auto", timeLimit: 60, points: 1000,
-    speedBonus: true, showNames: true, showUnits: true, leaderboard: true,
+    speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
   });
   const [times, setTimes] = useState({});
   const [model, setModel] = useState(null);
@@ -371,11 +523,7 @@ function Host({ onExit }) {
     send({ t: "state", roomId, activeIdx, phase });
   }, [roomId, screen, activeIdx, phase, send]);
 
-  const roleColor = useCallback((p) => {
-    if (!model) return "#43506B";
-    const i = model.roles.indexOf(p);
-    return ROLE_COLORS[(i < 0 ? model.roles.length : i) % ROLE_COLORS.length];
-  }, [model]);
+  const roleIdx = useCallback((p) => (model ? model.roles.indexOf(p) : -1), [model]);
 
   function loadRows(rows, name) {
     const built = buildModel(rows);
@@ -406,8 +554,7 @@ function Host({ onExit }) {
   };
 
   const setInjectTime = (id, v) => {
-    const next = { ...times, [id]: v };
-    setTimes(next);
+    setTimes((t) => ({ ...t, [id]: v }));
     if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
   };
   const limitOf = (id) => {
@@ -416,8 +563,7 @@ function Host({ onExit }) {
   };
 
   const patchSettings = (patch) => {
-    const next = { ...settings, ...patch };
-    setSettings(next);
+    setSettings((s) => ({ ...s, ...patch }));
     if (roomId) send({ t: "settings", roomId, settings: patch });
   };
 
@@ -433,18 +579,61 @@ function Host({ onExit }) {
   const inject = model?.injects[activeIdx];
   const unitOf = (peran) => {
     if (settings.showUnits) return peran;
-    const i = model?.roles.indexOf(peran) ?? -1;
+    const i = roleIdx(peran);
     return `Unit ${i < 0 ? "?" : String.fromCharCode(65 + i)}`;
   };
-  const label = (p) => (settings.showNames ? p.name : unitOf(p.peran));
+  const seatOf = (peran) => people.find((p) => p.peran === peran);
+  const openProjector = useCallback(() => {
+    if (roomId) window.open(`/screen#${roomId}`, "_blank", "noopener");
+  }, [roomId]);
+
+  /* ---- keyboard: the room is watching, don't hunt for buttons ---- */
+  const goNext = useCallback(() => {
+    if (!model) return;
+    setConfirmNext(false); echo.current = "";
+    setActiveIdx((i) => Math.min(model.injects.length - 1, i + 1));
+    setPhase("briefing");
+  }, [model]);
+  const goPrev = useCallback(() => {
+    setConfirmNext(false); echo.current = "";
+    setActiveIdx((i) => Math.max(0, i - 1));
+    setPhase("briefing");
+  }, []);
+  const advance = useCallback(() => {
+    echo.current = "";
+    if (phase === "lobby") setPhase("briefing");
+    else if (phase === "briefing") { setOpenedAt(Date.now()); setPhase("open"); }
+    else if (phase === "open") setPhase("revealed");
+    else goNext();
+  }, [phase, goNext]);
+
+  useEffect(() => {
+    if (screen !== "run") return;
+    const onKey = (e) => {
+      if (e.target.closest && e.target.closest("input, textarea, select")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = String(e.key).toLowerCase();
+      if (e.key === " ") { e.preventDefault(); advance(); }
+      else if (k === "r" && phase === "open") { echo.current = ""; setPhase("revealed"); }
+      else if (k === "k" && phase === "revealed" && !keyShown) send({ t: "showkey", roomId });
+      else if (k === "c") setRoomOpen((v) => !v);
+      else if (k === "p") openProjector();
+      else if (e.key === "ArrowRight") goNext();
+      else if (e.key === "ArrowLeft") goPrev();
+      else if (e.key === "Escape") setRoomOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector]);
 
   /* ---- setup ---- */
   if (screen === "setup") {
     return (
       <>
-        <Bar left="Facilitator setup" onExit={onExit} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Back" conn={status} />
         <main className="load">
           <div className="loadinner">
+            <p className="eyebrow">Facilitator</p>
             <h1>Load your inject sheet</h1>
             <p className="lede">
               One row per question, with <b>Inject No.</b>, <b>Condition</b>, <b>Peran</b>,{" "}
@@ -460,7 +649,7 @@ function Host({ onExit }) {
               onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}>
               <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden
                 onChange={(e) => handleFile(e.target.files[0])} />
-              <button className="primary" onClick={() => fileRef.current?.click()}>Choose a file</button>
+              <button className="btn" onClick={() => fileRef.current?.click()}>Choose a file</button>
               <span className="or">or drop it here</span>
             </div>
             {parseError && <div className="err">{parseError}</div>}
@@ -477,13 +666,14 @@ function Host({ onExit }) {
   if (screen === "config") {
     return (
       <>
-        <Bar left="Before you start" onExit={() => setScreen("setup")} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">Before you start</b>}
+          onExit={() => setScreen("setup")} exitLabel="Back" conn={status} />
         <main className="load">
           <div className="loadinner wide">
             <h1>Before you start</h1>
 
             {warnings.length > 0 && (
-              <details className="warn open" open>
+              <details className="warn" open>
                 <summary>{warnings.length} thing{warnings.length > 1 ? "s" : ""} to check</summary>
                 <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
               </details>
@@ -491,10 +681,15 @@ function Host({ onExit }) {
 
             <h3>Scoring</h3>
             <div className="setgrid">
-              <Toggle label="Mode"
-                value={settings.mode}
-                opts={[["auto", "Auto (multiple choice)"], ["manual", "Manual (you score)"]]}
-                onChange={(v) => patchSettings({ mode: v })} />
+              <div className="fld span2">
+                <span>Mode</span>
+                <div className="seg2">
+                  {[["auto", "Auto (multiple choice)"], ["manual", "Manual (you score)"]].map(([v, l]) => (
+                    <button key={v} className={settings.mode === v ? "on" : ""}
+                      onClick={() => patchSettings({ mode: v })}>{l}</button>
+                  ))}
+                </div>
+              </div>
               <p className="hint span2">
                 Auto scores multiple-choice answers by correctness and speed. Manual keeps
                 answers unscored so you grade them after the discussion. Questions with no
@@ -525,9 +720,9 @@ function Host({ onExit }) {
                 </>
               )}
 
-              <Check label="Show device names" checked={settings.showNames}
+              <Check label="Show operator names" checked={settings.showNames}
                 onChange={(v) => patchSettings({ showNames: v })}
-                hint="Off hides who was operating the device." />
+                hint="Off hides who is sitting at each unit's device." />
               <Check label="Show unit names" checked={settings.showUnits}
                 onChange={(v) => patchSettings({ showUnits: v })}
                 hint="Off replaces every Peran with a neutral label on your screen. Useful when you're projecting and don't want the room to see which unit gave which answer." />
@@ -544,9 +739,7 @@ function Host({ onExit }) {
                 <ul className="codelist">
                   {model.injects.map((i) => (
                     <li key={i.id}>
-                      <span className="cname">
-                        <b className="mono">{i.id}</b> {i.siklus}
-                      </span>
+                      <span className="cname"><b className="mono">{i.id}</b> {i.siklus}</span>
                       <input className="cinput narrow" type="number" min="0" step="5"
                         placeholder={String(settings.timeLimit)}
                         value={times[i.id] ?? ""}
@@ -558,19 +751,20 @@ function Host({ onExit }) {
               </>
             )}
 
-            <h3>Join codes</h3>
+            <h3>Seats</h3>
             <p className="hint">
-              One code per unit. Entering the code puts that device in that unit, so nobody
-              picks the wrong one. Edit any code, or generate a new one.
+              One seat per business unit. The code decides the unit, and the first device to
+              use it holds the seat — a second device on the same code is refused. Edit any
+              code, or generate a new one.
             </p>
             <ul className="codelist">
-              {model.roles.map((r) => (
+              {model.roles.map((r, i) => (
                 <li key={r}>
-                  <span className="dot" style={{ background: roleColor(r) }} />
+                  <Crest peran={r} idx={i} />
                   <span className="cname">{r}</span>
                   <input className="cinput" maxLength={8} value={draftCodes[r] || ""}
                     onChange={(e) => setDraftCodes((d) => ({ ...d, [r]: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") }))} />
-                  <button className="ghost" onClick={() => setDraftCodes((d) => ({ ...d, [r]: rand(4) }))}>
+                  <button className="btn quiet" onClick={() => setDraftCodes((d) => ({ ...d, [r]: rand(4) }))}>
                     Random
                   </button>
                 </li>
@@ -588,7 +782,7 @@ function Host({ onExit }) {
               </>
             )}
             {denied && <div className="err">That passcode was not accepted.</div>}
-            <button className="primary big" onClick={start}
+            <button className="btn wide" onClick={start}
               disabled={keyRequired && !keyIn}>Open the room</button>
           </div>
         </main>
@@ -598,7 +792,7 @@ function Host({ onExit }) {
 
   /* ---- report ---- */
   if (screen === "report") {
-    return <Report {...{ model, scores, notes, people, settings, roleColor, fileName, label, unitOf }}
+    return <Report {...{ model, scores, notes, people, settings, roleIdx, fileName, unitOf }}
       onBack={() => setScreen("run")} onEnd={endSession} />;
   }
 
@@ -606,25 +800,24 @@ function Host({ onExit }) {
   if (!model || !inject) {
     return (
       <>
-        <Bar left="Facilitator setup" onExit={onExit} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Back" conn={status} />
         <div className="crash">
           <h1>This session is no longer on the server</h1>
           <p className="muted">It may have expired, or the service restarted without a volume.</p>
-          <button className="primary" onClick={() => { nukeAll(); location.reload(); }}>Start fresh</button>
+          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>Start fresh</button>
         </div>
       </>
     );
   }
 
   const answeredBy = (q) => people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
-  const expected = inject.roles.reduce((a, r) => a + people.filter((p) => p.peran === r).length, 0);
-  const joinedHere = people.filter((p) => inject.roles.includes(p.peran));
-  const allIn = joinedHere.length > 0 && inject.questions.every((q) =>
-    people.filter((p) => p.peran === q.peran).every((p) => p.answers?.[q.qid]));
+  const seatsHere = inject.roles.map(seatOf).filter(Boolean);
+  const allIn = seatsHere.length === inject.roles.length && seatsHere.length > 0 &&
+    inject.questions.every((q) => seatOf(q.peran)?.answers?.[q.qid]);
 
   return (
     <>
-      <Bar dark conn={status} onExit={onExit}
+      <Bar conn={status} onExit={onExit}
         left={<>
           <span className="crumb">{inject.siklus}</span>
           <b className="injno">Inject {inject.id}</b>
@@ -635,25 +828,25 @@ function Host({ onExit }) {
           }} />
         </>}
         right={<>
-          <span className="vis">
-            <button className={`ghost pill ${settings.showUnits ? "" : "off"}`}
-              title={settings.showUnits ? "Hide unit names" : "Show unit names"}
-              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Units</button>
-            <button className={`ghost pill ${settings.showNames ? "" : "off"}`}
-              title={settings.showNames ? "Hide device names" : "Show device names"}
-              onClick={() => patchSettings({ showNames: !settings.showNames })}>Names</button>
-          </span>
-          <button className="ghost" onClick={() => setRoomOpen(true)}>
-            Codes · {people.length}
+          <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
+            title={settings.showUnits ? "Hide unit names" : "Show unit names"}
+            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Units</button>
+          <button className={`btn quiet pill ${settings.showNames ? "" : "off"}`}
+            title={settings.showNames ? "Hide operator names" : "Show operator names"}
+            onClick={() => patchSettings({ showNames: !settings.showNames })}>Names</button>
+          <button className="btn quiet" onClick={() => setRoomOpen(true)}>
+            Seats · {people.length}/{model.roles.length}
           </button>
-          <button className="ghost" onClick={() => setScreen("report")}>Report</button>
+          <button className="btn quiet" onClick={openProjector} title="Open the projector view">Project</button>
+          <button className="btn quiet" onClick={() => setScreen("report")}>Report</button>
         </>} />
 
       {roomOpen && (
-        <RoomPanel {...{ codes, people, model, roleColor, label, unitOf, settings }}
+        <RoomPanel {...{ codes, model, settings, unitOf, seatOf }}
           onSetting={patchSettings}
+          onRelease={(peran) => send({ t: "release", roomId, peran })}
           onClose={() => setRoomOpen(false)}
-          onLobby={() => { setPhase("lobby"); setRoomOpen(false); }} />
+          onLobby={() => { echo.current = ""; setPhase("lobby"); setRoomOpen(false); }} />
       )}
 
       <main className="run">
@@ -662,20 +855,15 @@ function Host({ onExit }) {
             {model.injects.map((inj, i) => {
               const head = i === 0 || model.injects[i - 1].siklus !== inj.siklus;
               const state = i < activeIdx ? "done" : i === activeIdx ? "now" : "next";
-              const words = (inj.condition || "").split(/\s+/).slice(0, 5).join(" ");
+              const words = (inj.condition || "").split(/\s+/).slice(0, 6).join(" ");
               return (
                 <React.Fragment key={inj.id}>
                   {head && <li className="tlhead">{inj.siklus}</li>}
                   <li className={`tlrow ${state}`}>
-                    <button onClick={() => { setActiveIdx(i); setPhase("briefing"); }}>
+                    <button onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
                       <span className="tldot" aria-hidden="true" />
                       <span className="tlno">{inj.id}</span>
                       <span className="tltext">{words}{words ? "…" : "—"}</span>
-                      <span className="tlunits">
-                        {inj.roles.slice(0, 5).map((r) => (
-                          <i key={r} style={{ background: roleColor(r) }} title={r} />
-                        ))}
-                      </span>
                     </button>
                   </li>
                 </React.Fragment>
@@ -690,22 +878,24 @@ function Host({ onExit }) {
 
         <section className="stage">
           {phase === "lobby" ? (
-            <Lobby {...{ codes, people, model, roleColor, unitOf }} showNames={settings.showNames}
-              onBegin={() => setPhase("briefing")} injectId={inject.id} />
+            <Lobby {...{ codes, people, model, unitOf, seatOf }} showNames={settings.showNames}
+              onBegin={() => { echo.current = ""; setPhase("briefing"); }} injectId={inject.id} />
           ) : (
             <>
               {inject.condition
-                ? <blockquote className="scenario">{inject.condition}</blockquote>
+                ? <blockquote className="scenario"><span className="eyebrow">Condition</span>{inject.condition}</blockquote>
                 : <div className="empty">No scenario text for this inject. Brief the room from your notes.</div>}
 
               <div className="callon">
                 <span>Asking</span>
-                {inject.roles.map((r) => <span key={r} className="chip" style={{ "--c": roleColor(r) }}>{unitOf(r)}</span>)}
+                {inject.roles.map((r) => (
+                  <span key={r} className="chip"><Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}</span>
+                ))}
               </div>
 
               <div className="actbar">
                 {phase === "briefing" && (<>
-                  <span className="amsg">Scenario is on every device. Read it aloud.</span>
+                  <span className="msg">On every device now. Read it aloud, then open the window.</span>
                   {settings.mode === "auto" && (
                     <span className="inlinetime">
                       <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
@@ -714,65 +904,61 @@ function Host({ onExit }) {
                       <span className="unit">sec</span>
                     </span>
                   )}
-                  <button className="primary" onClick={() => {
+                  <button className="btn" onClick={() => {
                     echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
-                  }}>
-                    Open for answers
-                  </button>
+                  }}>Open for answers</button>
                 </>)}
 
                 {phase === "open" && (<>
                   {settings.mode === "auto" && limitOf(inject.id) > 0
-                    ? <Countdown openedAt={openedAt} limit={limitOf(inject.id)} />
-                    : <span className="amsg">Answers are open.</span>}
-                  <span className="amsg right">
-                    {joinedHere.length === 0 ? "No devices joined" : allIn ? "All units in" : "Waiting on answers"}
+                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)} />
+                    : <span className="msg">Answers are open.</span>}
+                  <span className="msg">
+                    {seatsHere.length === 0 ? "No unit has taken a seat for this inject"
+                      : allIn ? "All units in"
+                        : `Waiting on answers — ${seatsHere.length} of ${inject.roles.length} units seated`}
                   </span>
-                  <button className="primary" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                  <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
                     Reveal answers
                   </button>
                 </>)}
 
                 {phase === "revealed" && (<>
-                  <span className="amsg">
+                  <span className="msg">
                     {keyShown
                       ? "Answer key is on every screen."
                       : "Discuss first. Reveal the key when the room has argued it out."}
                   </span>
                   {!keyShown && (
-                    <button className="primary" onClick={() => send({ t: "showkey", roomId })}>
+                    <button className="btn" onClick={() => send({ t: "showkey", roomId })}>
                       Show correct answers
                     </button>
                   )}
-                  <button className="ghost" onClick={() => {
+                  <button className="btn quiet" onClick={() => {
                     echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
-                  }}>
-                    Reopen
-                  </button>
+                  }}>Reopen</button>
                 </>)}
               </div>
 
               {phase === "open" && (
                 <div className="tracker">
                   {inject.roles.map((r) => {
-                    const members = people.filter((p) => p.peran === r);
+                    const seat = seatOf(r);
                     const qs = inject.questions.filter((q) => q.peran === r);
-                    const done = members.filter((p) => qs.every((q) => p.answers?.[q.qid]));
-                    const pct = members.length ? Math.round((done.length / members.length) * 100) : 0;
-                    // finished when their slowest answer for this inject landed
-                    const finishedMs = done.length
-                      ? Math.max(...done.flatMap((p) => qs.map((q) => p.answers[q.qid]?.ms || 0)))
-                      : null;
+                    const done = seat ? qs.filter((q) => seat.answers?.[q.qid]).length : 0;
+                    const pct = qs.length ? Math.round((done / qs.length) * 100) : 0;
+                    const finishedMs = seat && qs.length && done === qs.length
+                      ? Math.max(...qs.map((q) => seat.answers[q.qid]?.ms || 0)) : null;
                     return (
-                      <div key={r} className="trow">
-                        <span className="dot" style={{ background: roleColor(r) }} />
+                      <div key={r} className={`trow ${seat && done === qs.length ? "in" : ""}`}
+                        style={{ "--c": UNIT_VARS[(roleIdx(r) < 0 ? 0 : roleIdx(r)) % 6] }}>
+                        <Crest peran={r} idx={roleIdx(r)} />
                         <span className="tname">{unitOf(r)}</span>
-                        <span className="tbar"><i style={{ width: `${pct}%`, background: roleColor(r) }} /></span>
-                        <span className="tcount">{done.length}/{members.length}</span>
+                        <span className="tbar"><i style={{ width: `${pct}%` }} /></span>
+                        <span className="tcount mono">{done}/{qs.length}</span>
                         {finishedMs != null
-                          ? <span className="tdone">{(finishedMs / 1000).toFixed(1)}s</span>
-                          : members.length === 0
-                            ? <span className="tmiss">not joined</span>
+                          ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
+                          : !seat ? <span className="tmiss">seat open</span>
                             : <span className="tmiss">answering</span>}
                       </div>
                     );
@@ -782,9 +968,11 @@ function Host({ onExit }) {
 
               {phase === "revealed" && inject.roles.map((peran) => (
                 <div key={peran} className="rolegroup">
-                  <div className="rolerule" style={{ "--c": roleColor(peran) }}>{unitOf(peran)}</div>
+                  <div className="rolerule" style={{ "--c": UNIT_VARS[(roleIdx(peran) < 0 ? 0 : roleIdx(peran)) % 6] }}>
+                    <Crest peran={peran} idx={roleIdx(peran)} />{unitOf(peran)}
+                  </div>
                   {inject.questions.filter((q) => q.peran === peran).map((q) => (
-                    <QuestionResult key={q.qid} {...{ q, settings, roleColor, label, keyShown }}
+                    <QuestionResult key={q.qid} {...{ q, settings, keyShown, unitOf }}
                       answers={answeredBy(q)}
                       sc={scores[q.qid] || {}}
                       onScore={(patch) => setScore(q.qid, patch)}
@@ -795,36 +983,35 @@ function Host({ onExit }) {
               ))}
 
               {phase === "revealed" && (
-                <>
-                  <div className="notes">
-                    <label htmlFor={`n-${inject.id}`}>Facilitator notes</label>
-                    <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
-                      placeholder="Gaps, arguments, who hesitated, anything that becomes a finding"
-                      onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
-                  </div>
-                </>
+                <div className="notes">
+                  <label htmlFor={`n-${inject.id}`}>Facilitator notes</label>
+                  <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
+                    placeholder="Gaps, arguments, who hesitated, anything that becomes a finding"
+                    onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
+                </div>
               )}
 
               <div className="nav">
-                <button className="ghost" disabled={activeIdx === 0}
-                  onClick={() => { echo.current = ""; setActiveIdx((i) => i - 1); setPhase("briefing"); setConfirmNext(false); }}>Previous</button>
+                <button className="btn quiet" disabled={activeIdx === 0} onClick={goPrev}>Previous</button>
                 {activeIdx < model.injects.length - 1 ? (
                   confirmNext ? (
                     <span className="confirm">
-                      <span className="cmsg">Move everyone to inject {model.injects[activeIdx + 1].id}?</span>
-                      <button className="ghost" onClick={() => setConfirmNext(false)}>Cancel</button>
-                      <button className="primary" onClick={() => {
-                        echo.current = ""; setActiveIdx((i) => i + 1);
-                        setPhase("briefing"); setConfirmNext(false);
-                      }}>Yes, move on</button>
+                      <span className="msg">Move everyone to inject {model.injects[activeIdx + 1].id}?</span>
+                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>Cancel</button>
+                      <button className="btn" onClick={goNext}>Yes, move on</button>
                     </span>
                   ) : (
-                    <button className="primary" onClick={() => setConfirmNext(true)}>Next inject</button>
+                    <button className="btn" onClick={() => setConfirmNext(true)}>Next inject</button>
                   )
                 ) : (
-                  <button className="primary" onClick={() => setScreen("report")}>Finish</button>
+                  <button className="btn" onClick={() => setScreen("report")}>Finish</button>
                 )}
               </div>
+
+              <p className="keys">
+                <kbd>Space</kbd> advance · <kbd>R</kbd> reveal · <kbd>K</kbd> show key ·{" "}
+                <kbd>←</kbd> <kbd>→</kbd> injects · <kbd>C</kbd> seats · <kbd>P</kbd> projector
+              </p>
             </>
           )}
         </section>
@@ -835,71 +1022,60 @@ function Host({ onExit }) {
 
 /* --------------------------- host pieces --------------------------- */
 
-function Countdown({ openedAt, limit, big }) {
-  const [left, setLeft] = useState(limit);
-  useEffect(() => {
-    const tick = () => setLeft(Math.max(0, limit - (Date.now() - (openedAt || Date.now())) / 1000));
-    tick();
-    const iv = setInterval(tick, 200);
-    return () => clearInterval(iv);
-  }, [openedAt, limit]);
-  const frac = limit ? left / limit : 0;
-  const cls = left <= 10 ? "urgent" : left <= limit * 0.34 ? "warn" : "";
-  return (
-    <div className={`cd ${cls} ${big ? "big" : ""}`}>
-      <span className="cdnum">{fmt(Math.ceil(left))}</span>
-      <span className="cdbar"><i style={{ width: `${frac * 100}%` }} /></span>
-    </div>
-  );
-}
-
-function Lobby({ codes, people, model, roleColor, unitOf, showNames, onBegin, injectId }) {
-  const joined = people.length;
+function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injectId }) {
+  const taken = people.length;
   return (
     <div className="lobby">
-      <div className="lobbyhead">
+      <div className="lobbytop">
         <div>
-          <h2>Waiting room</h2>
-          <p className="muted">Each unit joins with its own code, on one device.</p>
+          <h2>{model.roles.length} units, {model.roles.length} seats</h2>
+          <p className="muted">
+            One seat per business unit — the code decides the unit, and the first device to
+            use it holds the seat. A second device on the same code is refused.
+          </p>
         </div>
-        <div className="joincount">
-          <b>{joined}</b><span>{joined === 1 ? "device in" : "devices in"}</span>
+        <div className="dial">
+          <b className="mono">{taken}</b><span>of {model.roles.length} seats</span>
         </div>
       </div>
 
       <ul className="codegrid">
-        {model.roles.map((r) => {
+        {model.roles.map((r, i) => {
           const code = Object.keys(codes).find((c) => codes[c] === r);
-          const members = people.filter((p) => p.peran === r);
+          const seat = seatOf(r);
           return (
-            <li key={r} className={members.length ? "in" : ""} style={{ "--c": roleColor(r) }}>
-              <span className="cgunit">{unitOf(r)}</span>
+            <li key={r} className={seat ? "in" : ""} style={{ "--c": UNIT_VARS[i % 6] }}>
+              <span className="cghead">
+                <Crest peran={r} idx={i} />
+                <b>{unitOf(r)}</b>
+                {!seat && <span className="seatopen">seat open</span>}
+              </span>
               <b className="cgcode">{code}</b>
               <span className="cgwho">
-                {members.length === 0
-                  ? "not joined yet"
+                {!seat ? "code not used yet"
                   : showNames
-                    ? members.map((m) => m.name).join(", ")
-                    : `${members.length} device${members.length > 1 ? "s" : ""} joined`}
+                    ? `${seat.name}${seat.live === false ? " · offline" : ""}`
+                    : seat.live === false ? "seated · offline" : "seated"}
               </span>
             </li>
           );
         })}
       </ul>
 
-      <button className="primary big" onClick={onBegin}>
+      <button className="btn wide" onClick={onBegin}>
         {injectId ? `Continue to inject ${injectId}` : "Begin the exercise"}
       </button>
-      {joined === 0 && (
+      {taken === 0 && (
         <p className="hint">
-          You can start with nobody in. Anyone joining later picks up wherever you are.
+          You can start with nobody in. A unit that joins later lands on the current inject.
         </p>
       )}
     </div>
   );
 }
 
-function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, onSetting, onClose, onLobby }) {
+function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onRelease, onClose, onLobby }) {
+  const [confirm, setConfirm] = useState("");
   useEffect(() => {
     const esc = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", esc);
@@ -908,47 +1084,50 @@ function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, o
 
   return (
     <div className="scrim" onClick={onClose}>
-      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Codes and devices">
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Seats">
         <div className="phead">
-          <h2>Codes &amp; devices</h2>
-          <button className="ghost" onClick={onClose}>Close</button>
+          <h2>Seats</h2>
+          <button className="btn quiet" onClick={onClose}>Close</button>
         </div>
         <p className="hint">
-          Late arrivals can join at any point. They pick up from the current inject.
+          One device per unit. A unit that lost its page can re-enter its code and take its own
+          seat back, keeping its answers. Release a seat only if a unit needs to start clean.
         </p>
         <ul className="codelist big">
-          {model.roles.map((r) => {
+          {model.roles.map((r, i) => {
             const code = Object.keys(codes).find((c) => codes[c] === r);
-            const members = people.filter((p) => p.peran === r);
+            const seat = seatOf(r);
             return (
               <li key={r}>
-                <span className="dot" style={{ background: roleColor(r) }} />
+                <Crest peran={r} idx={i} />
                 <span className="cname">{unitOf(r)}</span>
-                <b className="bigcode">{code}</b>
-                <span className={members.length ? "tin" : "tmiss"}>
-                  {members.length === 0
-                    ? "waiting"
+                <b className="bigcode mono">{code}</b>
+                <span className={seat && seat.live !== false ? "tin" : "tmiss"}>
+                  {!seat ? "open"
                     : settings.showNames
-                      ? members.map((m) => m.name).join(", ")
-                      : `${members.length} joined`}
+                      ? `${seat.name}${seat.live === false ? " · offline" : ""}`
+                      : seat.live === false ? "offline" : "seated"}
                 </span>
+                {seat && (confirm === r
+                  ? <span className="confirm">
+                    <button className="btn quiet" onClick={() => setConfirm("")}>Cancel</button>
+                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>Release</button>
+                  </span>
+                  : <button className="btn quiet" onClick={() => setConfirm(r)}>Release</button>)}
               </li>
             );
           })}
         </ul>
-        <h3>On-screen display</h3>
-        <label className="chk">
-          <input type="checkbox" checked={settings.showUnits}
-            onChange={(e) => onSetting({ showUnits: e.target.checked })} />
-          <span><b>Unit names</b><em>Off shows Unit A, Unit B instead of the real Peran.</em></span>
-        </label>
-        <label className="chk">
-          <input type="checkbox" checked={settings.showNames}
-            onChange={(e) => onSetting({ showNames: e.target.checked })} />
-          <span><b>Device names</b><em>Off hides who is operating each device.</em></span>
-        </label>
 
-        <button className="ghost wide" onClick={onLobby}>Back to the waiting room</button>
+        <h3>On-screen display</h3>
+        <Check label="Unit names" checked={settings.showUnits}
+          onChange={(v) => onSetting({ showUnits: v })}
+          hint="Off shows Unit A, Unit B instead of the real Peran." />
+        <Check label="Operator names" checked={settings.showNames}
+          onChange={(v) => onSetting({ showNames: v })}
+          hint="Off hides who is sitting at each unit's device." />
+
+        <button className="btn quiet wide" onClick={onLobby}>Back to the waiting room</button>
         <p className="hint">
           Sends every device back to standby. Your scores and notes are kept.
         </p>
@@ -957,9 +1136,9 @@ function RoomPanel({ codes, people, model, roleColor, label, unitOf, settings, o
   );
 }
 
-function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, label, keyShown }) {
+function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, keyShown, unitOf }) {
   const isAuto = settings.mode === "auto" && q.type === "choice";
-  const correctIdx = q.choices?.findIndex((c) => c.correct);
+  const correctIdx = q.choices ? q.choices.findIndex((c) => c.correct) : -1;
 
   const dist = useMemo(() => {
     if (!q.choices?.length) return [];
@@ -967,7 +1146,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
       ...c, i, n: answers.filter((p) => p.answers[q.qid]?.choice === i).length,
     }));
   }, [q, answers]);
-  const total = answers.length || 1;
+  const total = Math.max(1, dist.reduce((a, b) => a + b.n, 0));
 
   return (
     <div className="qcard">
@@ -975,15 +1154,21 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
 
       {isAuto ? (
         <>
-          <ul className="dist">
-            {dist.map((c) => (
-              <li key={c.i} className={keyShown && c.correct ? "right" : ""}>
-                <span className="dlabel">{c.text}</span>
-                {keyShown && c.correct && <span className="keytag">correct</span>}
-                <span className="dbar"><i style={{ width: `${(c.n / total) * 100}%` }} /></span>
-                <span className="dn">{c.n}</span>
-              </li>
-            ))}
+          <ul className="votes">
+            {dist.map((c) => {
+              const o = optOf(c.i);
+              const isKey = keyShown && c.correct;
+              return (
+                <li key={c.i} className={`vrow ${isKey ? "correct" : ""}`} style={{ "--c": o.c }}>
+                  <span className="vglyph"><Glyph shape={o.shape} size={14} /></span>
+                  <span className="vtrack">
+                    <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
+                    <span className="vlabel">{c.text}{isKey && <b> — key</b>}</span>
+                  </span>
+                  <span className="vn mono">{c.n}<em>{c.n === 1 ? "unit" : "units"}</em></span>
+                </li>
+              );
+            })}
           </ul>
           {keyShown && correctIdx < 0 && (
             <p className="hint warnhint">No correct option marked in your sheet, so nobody scored.</p>
@@ -991,12 +1176,14 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           <ul className="who-list">
             {answers.map((p) => {
               const a = p.answers[q.qid];
+              const o = optOf(a.choice ?? 0);
               return (
                 <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : ""}>
-                  {a.rank && <span className="rk">{a.rank}</span>}
-                  <span>{label(p)}</span>
-                  <span className="ms">{(a.ms / 1000).toFixed(1)}s</span>
-                  <span className="pts">{keyShown ? (a.points ? `+${a.points}` : "0") : "—"}</span>
+                  {a.rank && <span className="rk mono">{a.rank}</span>}
+                  <span className="wname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
+                  <span className="wopt" style={{ color: o.c }}><Glyph shape={o.shape} size={11} /></span>
+                  <span className="ms mono">{(a.ms / 1000).toFixed(1)}s</span>
+                  <span className="pts mono">{keyShown ? (a.points ? `+${a.points}` : "0") : "—"}</span>
                 </li>
               );
             })}
@@ -1008,13 +1195,15 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           {answers.length === 0
             ? <p className="noanswer">No answer from this unit.</p>
             : <ul className="answers">
-                {answers.map((p) => (
-                  <li key={p.pid}>
-                    <span className="who">{label(p)} · {(p.answers[q.qid].ms / 1000).toFixed(0)}s</span>
-                    <p>{p.answers[q.qid].text}</p>
-                  </li>
-                ))}
-              </ul>}
+              {answers.map((p) => (
+                <li key={p.pid}>
+                  <span className="who">
+                    {settings.showNames ? p.name : unitOf(p.peran)} · {(p.answers[q.qid].ms / 1000).toFixed(0)}s
+                  </span>
+                  <p>{p.answers[q.qid].text}</p>
+                </li>
+              ))}
+            </ul>}
           <div className="qfoot">
             <div className="dims">
               <div className="dim">
@@ -1038,7 +1227,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
               </div>
             </div>
             {q.answerRaw && (
-              <button className="reveal" onClick={toggleExpected}>
+              <button className="link" onClick={toggleExpected}>
                 {showExpected ? "Hide expected" : "Show expected"}
               </button>
             )}
@@ -1050,31 +1239,14 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
   );
 }
 
-const Toggle = ({ label, value, opts, onChange }) => (
-  <div className="fld span2">
-    <span>{label}</span>
-    <div className="seg2">
-      {opts.map(([v, l]) => (
-        <button key={v} className={value === v ? "on" : ""} onClick={() => onChange(v)}>{l}</button>
-      ))}
-    </div>
-  </div>
-);
-
-const Check = ({ label, checked, onChange, hint }) => (
-  <label className="chk span2">
-    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
-  </label>
-);
-
 /* =========================== PARTICIPANT =========================== */
 
 function Participant() {
   const [me, setMe] = useState(null);
   const [codeIn, setCodeIn] = useState("");
   const [nameIn, setNameIn] = useState("");
-  const [foundPeran, setFoundPeran] = useState("");
+  const [peek, setPeek] = useState(null);     // { peran, taken, holder, sinceMs, live }
+  const [taken, setTaken] = useState(null);   // refusal from an actual join attempt
   const [deck, setDeck] = useState(null);
   const [state, setState] = useState(null);
   const [settings, setSettings] = useState(null);
@@ -1082,13 +1254,18 @@ function Participant() {
   const [msg, setMsg] = useState("");
   const [key, setKey] = useState({});
   const [booted, setBooted] = useState(false);
+  const [evicted, setEvicted] = useState(false);
+  const codeRef = useRef(null);
 
   const onMsg = useCallback((m) => {
     if (m.t === "joined") {
-      const rec = { pid: m.pid, roomId: m.roomId, peran: m.peran, name: m.me.name, answers: m.me.answers || {}, total: m.me.total || 0 };
+      const rec = { pid: m.pid, roomId: m.roomId, peran: m.peran, name: m.me.name,
+        seat: m.me.claimedAt, answers: m.me.answers || {}, total: m.me.total || 0 };
       setMe(rec); lsSet(K_ME, rec);
-      setDeck(m.deck); setState(m.state); setSettings(m.settings); setMsg("");
-    } else if (m.t === "codeok") { setFoundPeran(m.peran); setMsg(""); }
+      setDeck(m.deck); setState(m.state); setSettings(m.settings);
+      setMsg(""); setTaken(null); setEvicted(false);
+    } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
+    else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
     else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
       openedAt: m.openedAt, limit: m.limit, keyShown: !!m.keyShown });
     else if (m.t === "settings") setSettings(m.settings);
@@ -1098,23 +1275,27 @@ function Participant() {
     }
     else if (m.t === "locked") setMsg("Answers are closed.");
     else if (m.t === "timeup") setMsg("Time is up for this question.");
-    else if (m.t === "nosuch") { setFoundPeran(""); setMsg("No exercise found with that code."); }
+    else if (m.t === "nosuch") { setPeek(null); setMsg("No exercise found with that code."); }
     else if (m.t === "key") setKey(m.key || {});
-    else if (m.t === "keyclear") setKey({});
-    else if (m.t === "left") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
-    else if (m.t === "gone" || m.t === "ended") { lsDel(K_ME); setMe(null); setDeck(null); setState(null); }
+    else if (m.t === "evicted") {
+      lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
+    }
+    else if (m.t === "left" || m.t === "gone" || m.t === "ended") {
+      lsDel(K_ME); setMe(null); setDeck(null); setState(null);
+    }
   }, []);
   const { send, status, gen } = useSocket(onMsg);
 
+  const meRoom = me?.roomId, mePid = me?.pid, meSeat = me?.seat;
   useEffect(() => {
-    if (gen > 1 && me?.roomId && me?.pid) send({ t: "rejoin", roomId: me.roomId, pid: me.pid });
-  }, [gen, me?.roomId, me?.pid, send]);
+    if (gen > 1 && meRoom && mePid) send({ t: "rejoin", roomId: meRoom, pid: mePid, seat: meSeat });
+  }, [gen, meRoom, mePid, meSeat, send]);
 
   useEffect(() => {
     const saved = lsGet(K_ME);
     if (saved?.roomId && saved?.pid) {
       setMe(saved);
-      send({ t: "rejoin", roomId: saved.roomId, pid: saved.pid });
+      send({ t: "rejoin", roomId: saved.roomId, pid: saved.pid, seat: saved.seat });
     }
     setBooted(true);
   }, [send]);
@@ -1122,7 +1303,7 @@ function Participant() {
   const leave = () => {
     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
     nukeAll(); setMe(null); setDeck(null); setState(null);
-    setCodeIn(""); setNameIn(""); setFoundPeran(""); setKey({});
+    setCodeIn(""); setNameIn(""); setPeek(null); setTaken(null); setKey({});
   };
 
   /* Derived above every early return. useExpired sat below them, so it only
@@ -1140,68 +1321,118 @@ function Participant() {
 
   if (!booted) return <div className="boot">Loading</div>;
 
-  /* ---- join: this is the front door for everyone but the facilitator ---- */
+  /* ---- join: the front door for everyone but the facilitator ---- */
   if (!me || !deck) {
     const ready = codeIn.length >= 4;
+    const doJoin = (takeover) =>
+      send({ t: "join", code: codeIn, name: nameIn.trim(), takeover: !!takeover });
+    const blocked = taken || (peek && peek.taken ? peek : null);
     return (
-      <main className="door">
-        <div className="doorinner">
-          <span className="mark" aria-hidden="true" />
-          <h1>Tabletop exercise</h1>
-          <p className="lede">Enter the code for your business unit.</p>
+      <>
+        <Bar left={<b className="wordmark">Tabletop exercise</b>} conn={status} />
+        <main className="door">
+          <div className="doorinner">
+            <h1>Enter your unit's code</h1>
+            <p className="lede">
+              Four characters from the facilitator. The code puts this device in the right
+              unit — one device per unit, so use the one your unit was given.
+            </p>
 
-          <input className="codein" value={codeIn} maxLength={8} placeholder="————"
-            autoComplete="off" autoCapitalize="characters" spellCheck="false"
-            aria-label="Your unit's code"
-            onChange={(e) => {
-              const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-              setCodeIn(v); setFoundPeran("");
-              if (v.length >= 4) send({ t: "peek", code: v });
-            }}
-            onKeyDown={(e) => e.key === "Enter" && ready && send({ t: "join", code: codeIn, name: nameIn })} />
-
-          <div className={`resolve ${foundPeran ? "hit" : msg ? "miss" : ""}`}>
-            {foundPeran
-              ? <>Joining as <b>{foundPeran}</b></>
-              : msg || (ready ? "Checking…" : "Four characters, from the facilitator")}
-          </div>
-
-          <label className="fld">
-            <span>Who's on this device <em>optional</em></span>
-            <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
-              placeholder="Name or desk" autoComplete="off" />
-          </label>
-
-          <button className="primary big" disabled={!foundPeran}
-            onClick={() => send({ t: "join", code: codeIn, name: nameIn })}>
-            Join
-          </button>
-
-          {(lsGet(K_ME) || lsGet(K_HOST)) && (
-            <div className="doorfoot">
-              <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
-                Clear saved session
-              </button>
+            <div className="slots" onClick={() => codeRef.current?.focus()}>
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className={`slot ${codeIn[i] ? "filled" : i === codeIn.length ? "caret" : ""}`}>
+                  {codeIn[i] || ""}
+                </div>
+              ))}
+              <input ref={codeRef} className="codeghost" value={codeIn} maxLength={8}
+                autoComplete="off" autoCapitalize="characters" spellCheck="false"
+                aria-label="Your unit's code"
+                onChange={(e) => {
+                  const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+                  setCodeIn(v); setPeek(null); setTaken(null); setEvicted(false);
+                  if (v.length >= 4) send({ t: "peek", code: v });
+                }}
+                onKeyDown={(e) => e.key === "Enter" && ready && !blocked && doJoin(false)} />
             </div>
-          )}
-        </div>
-      </main>
+
+            {evicted && (
+              <div className="resolved taken">
+                <div><small>Signed out</small><b>Another device took this unit's seat</b></div>
+              </div>
+            )}
+
+            {blocked ? (
+              <>
+                <div className="resolved taken">
+                  <Crest peran={blocked.peran} idx={0} size={34} />
+                  <div><small>Seat already taken</small><b>{blocked.peran}</b></div>
+                </div>
+                <p className="hint">
+                  {blocked.name || blocked.holder || "Another device"} has held this seat
+                  for {fmtAgo(blocked.sinceMs)}
+                  {blocked.live === false ? ", but is offline right now" : ""}. One unit holds one
+                  seat, so this device cannot join alongside them.
+                </p>
+                <button className="btn wide warnbtn" onClick={() => doJoin(true)}>
+                  Take over the seat
+                </button>
+                <p className="hint">
+                  Taking over signs the other device out and keeps this unit's answers and points.
+                  Use it when your unit switched device or lost the page.
+                </p>
+              </>
+            ) : peek ? (
+              <>
+                <div className="resolved">
+                  <Crest peran={peek.peran} idx={0} size={34} />
+                  <div><small>Claiming the seat for</small><b>{peek.peran}</b></div>
+                </div>
+                <label className="fld">
+                  <span>Who is at this device <em>optional</em></span>
+                  <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
+                    placeholder="Name or meeting room" autoComplete="off" />
+                </label>
+                <button className="btn wide" onClick={() => doJoin(false)}>Take the seat</button>
+              </>
+            ) : (
+              <p className="resolve">
+                {msg || (ready ? "Checking…" : "The facilitator reads the codes out, or they are on the projector.")}
+              </p>
+            )}
+
+            {(lsGet(K_ME) || lsGet(K_HOST)) && (
+              <div className="doorfoot">
+                <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
+                  Clear saved session
+                </button>
+              </div>
+            )}
+          </div>
+        </main>
+      </>
     );
   }
 
-
   return (
     <>
-      <Bar dark onExit={leave} exitLabel="Leave" conn={status}
-        left={<b className="unitname">{me.peran}</b>}
+      <Bar onExit={leave} exitLabel="Leave" conn={status}
+        left={<>
+          <Crest peran={me.peran} idx={0} />
+          <span className="unitblock">
+            <b className="unitname">{me.peran}</b>
+            <small className="seatline">
+              one seat{me.name && me.name !== me.peran ? ` · ${me.name}` : ""}
+            </small>
+          </span>
+        </>}
         right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
-          ? <span className="ptsbadge">{(me.total || 0).toLocaleString()}</span> : null} />
+          ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null} />
       <main className="pmain">
         <div className="pinner">
           {phase === "lobby" && (
             <div className="standby">
               <span className="pulse" />
-              <h2>You're in</h2>
+              <h2>Your unit is in</h2>
               <p className="muted">Waiting for the facilitator to begin.</p>
             </div>
           )}
@@ -1209,12 +1440,19 @@ function Participant() {
           {phase !== "lobby" && inject && (
             <>
               <div className="eyebrow">{inject.siklus} · Inject {inject.id}</div>
-              {inject.condition && <blockquote className="condition">{inject.condition}</blockquote>}
+              {inject.condition && (
+                <blockquote className="condition">
+                  <span className="eyebrow">Condition</span>{inject.condition}
+                </blockquote>
+              )}
 
               {phase === "briefing" && (
                 <div className="standby small">
                   <span className="pulse" />
-                  <p className="muted">Read the scenario. Questions open shortly.</p>
+                  <p className="muted">
+                    Read the scenario. Questions open shortly
+                    {limit > 0 && settings?.mode === "auto" ? ` — your window will be ${fmt(limit)}` : ""}.
+                  </p>
                 </div>
               )}
 
@@ -1225,9 +1463,10 @@ function Participant() {
               ) : (
                 <>
                   {limit > 0 && settings?.mode === "auto" && (
-                    <Countdown openedAt={state.openedAt} limit={limit} big />
+                    <div className="ringwrap">
+                      <Ring openedAt={state.openedAt} limit={limit} size="s150" cap="left" />
+                    </div>
                   )}
-                  {timeUp && <div className="timeup">Time is up. Answers are closed.</div>}
                   {mine.map((q) => {
                     const sent = me.answers?.[q.qid];
                     const isMC = q.type === "choice" && q.choices?.length && settings.mode === "auto";
@@ -1235,32 +1474,64 @@ function Participant() {
                       <div className="pq" key={q.qid}>
                         <p className="pqtext">{q.text}</p>
                         {isMC ? (
-                          <div className="opts">
-                            {q.choices.map((c, i) => (
-                              <button key={i}
-                                className={`opt ${sent && sent.choice === i ? "picked" : ""} ${timeUp ? "dim" : ""}`}
-                                disabled={timeUp}
-                                onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
-                                <span className="oletter">{String.fromCharCode(65 + i)}</span>
-                                <span className="otext">{c.text}</span>
-                              </button>
-                            ))}
-                            {sent && (
-                              <p className="sent">
-                                {timeUp ? "Locked in." : "Answer sent. Tap another option to change it."}
-                              </p>
+                          <>
+                            <div className="opts">
+                              {q.choices.map((c, i) => {
+                                const o = optOf(i);
+                                const picked = sent && sent.choice === i;
+                                return (
+                                  <button key={i} disabled={timeUp}
+                                    className={`opt ${picked ? "picked" : ""} ${sent && !picked ? "faded" : ""} ${timeUp && !picked ? "faded" : ""}`}
+                                    style={{ "--c": o.c }}
+                                    onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
+                                    <span className="oglyph"><Glyph shape={o.shape} /></span>
+                                    <span className="otxt">{c.text}</span>
+                                    <span className="oltr mono">{o.ltr}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {timeUp ? (
+                              <div className="lockstamp">
+                                <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
+                                  stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                                  <path d="M7 11V8a5 5 0 0110 0v3" />
+                                  <rect x="4" y="11" width="16" height="9" rx="2.4" />
+                                </svg>
+                                Window closed — answer locked in
+                              </div>
+                            ) : sent ? (
+                              <>
+                                <p className="sentline">
+                                  <span className="tick">
+                                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+                                      stroke="currentColor" strokeWidth="4" strokeLinecap="round">
+                                      <path d="M4 12.5l5.2 5.2L20 7" />
+                                    </svg>
+                                  </span>
+                                  Answer in{sent.rank ? ` — ${sent.rank}${ordinal(sent.rank)} unit to answer` : ""}
+                                </p>
+                                <p className="hint">
+                                  This is the whole unit's answer. Tap another tile to change it —
+                                  only your last choice counts, and it sets your time.
+                                </p>
+                              </>
+                            ) : (
+                              <p className="hint centre">One answer for the whole unit. Decide together, then tap.</p>
                             )}
-                          </div>
+                          </>
                         ) : (
                           <>
                             <textarea rows={5} placeholder="Type your unit's answer" disabled={timeUp}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
-                            <button className="primary big" disabled={timeUp}
+                            <button className="btn wide" disabled={timeUp}
                               onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
                               {sent ? "Update answer" : "Send answer"}
                             </button>
-                            {sent && <p className="sent">Sent. You can revise until answers close.</p>}
+                            {timeUp
+                              ? <div className="lockstamp">Window closed</div>
+                              : sent && <p className="hint centre">Sent. You can revise until answers close.</p>}
                           </>
                         )}
                       </div>
@@ -1271,48 +1542,65 @@ function Participant() {
               ))}
 
               {phase === "revealed" && (
-                <>
-                  {settings?.mode === "auto" && mine.some((q) => me.answers?.[q.qid]) ? (
-                    <div className="myresult">
-                      {mine.map((q) => {
-                        const a = me.answers?.[q.qid];
-                        if (!a) return (
-                          <div className="rescard miss" key={q.qid}>
-                            <p className="qtext">{q.text}</p>
-                            {key[q.qid] && <p className="rkey">Correct answer: <b>{key[q.qid].text}</b></p>}
-                            <p className="rline">No answer sent</p>
-                          </div>
-                        );
+                settings?.mode === "auto" && mine.length > 0 ? (
+                  <div className="myresult">
+                    {mine.map((q) => {
+                      const a = me.answers?.[q.qid];
+                      const k = key[q.qid];
+                      const ko = k ? optOf(k.i) : null;
+                      if (!a) {
                         return (
-                          <div className={`rescard ${!state?.keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : ""}`} key={q.qid}>
-                            <p className="qtext">{q.text}</p>
-                            <p className="rpick">You chose: {a.text}</p>
-                            {key[q.qid] && !a.correct && (
-                              <p className="rkey">Correct answer: <b>{key[q.qid].text}</b></p>
-                            )}
-                            <p className="rline">
-                              {!state?.keyShown
-                                ? "Answer sent"
-                                : a.correct == null ? "Not auto-scored" : a.correct ? "Correct" : "Incorrect"}
-                              {" · "}{(a.ms / 1000).toFixed(1)}s
-                              {a.rank ? ` · ${a.rank}${a.rank === 1 ? "st" : a.rank === 2 ? "nd" : a.rank === 3 ? "rd" : "th"} to answer` : ""}
-                              {state?.keyShown && <>{" · "}<b>{a.points || 0} pts</b></>}
-                            </p>
+                          <div className="rescard miss" key={q.qid}>
+                            <p className="qtext small">{q.text}</p>
+                            <p className="rline">No answer sent</p>
+                            {ko && <KeyLine o={ko} text={k.text} mine={false} />}
                           </div>
                         );
-                      })}
-                      {settings?.leaderboard && state?.keyShown && (
-                        <p className="bigpts">{me.total || 0} pts total</p>
-                      )}
-                      <p className="muted small">The facilitator is leading the discussion.</p>
-                    </div>
-                  ) : (
-                    <div className="standby small">
-                      <h2>Answers are in</h2>
-                      <p className="muted">The facilitator is leading the discussion.</p>
-                    </div>
-                  )}
-                </>
+                      }
+                      const ao = optOf(a.choice ?? 0);
+                      const cls = !state?.keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : "";
+                      return (
+                        <div className={`rescard ${cls}`} key={q.qid}>
+                          <div className="verdict">
+                            <span className="badge">
+                              {!state?.keyShown
+                                ? <Glyph shape={ao.shape} size={15} />
+                                : a.correct
+                                  ? <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                    strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M4 12.5l5.2 5.2L20 7" /></svg>
+                                  : <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                    strokeWidth="3.4" strokeLinecap="round">
+                                    <path d="M6 6l12 12M18 6L6 18" /></svg>}
+                            </span>
+                            <b>{!state?.keyShown ? "Answer sent"
+                              : a.correct == null ? "Not auto-scored"
+                                : a.correct ? "Correct" : "Not the key"}</b>
+                          </div>
+                          <p className="qtext small">{q.text}</p>
+                          {state?.keyShown && (
+                            <div className="ptsbig mono">{a.points ? `+${a.points.toLocaleString()}` : "0"}</div>
+                          )}
+                          <div className="metarow">
+                            <span>Answered in <b className="mono">{(a.ms / 1000).toFixed(1)}s</b></span>
+                            {a.rank && <span><b className="mono">{a.rank}{ordinal(a.rank)}</b> to answer</span>}
+                          </div>
+                          <KeyLine o={ao} text={a.text} mine />
+                          {ko && !a.correct && <KeyLine o={ko} text={k.text} mine={false} />}
+                        </div>
+                      );
+                    })}
+                    {settings?.leaderboard && state?.keyShown && (
+                      <p className="totalline mono">{(me.total || 0).toLocaleString()} pts total</p>
+                    )}
+                    <p className="hint centre">The facilitator is leading the discussion.</p>
+                  </div>
+                ) : (
+                  <div className="standby small">
+                    <h2>Answers are in</h2>
+                    <p className="muted">The facilitator is leading the discussion.</p>
+                  </div>
+                )
               )}
             </>
           )}
@@ -1322,9 +1610,157 @@ function Participant() {
   );
 }
 
+const KeyLine = ({ o, text, mine }) => (
+  <div className="keyline">
+    <span className="kglyph" style={{ "--c": o.c }}><Glyph shape={o.shape} size={11} /></span>
+    <span>
+      {mine ? "You chose the " : "The key was the "}<b>{o.name}</b>{text ? ` — ${text}` : ""}
+    </span>
+  </div>
+);
+
+/* ============================= PROJECTOR ============================= */
+
+/* /screen#<roomId>. Read-only: condition, question, option shapes, a clock
+   you can read from the back of the room, and the join codes. Never the
+   facilitator's controls, notes or unit scores. */
+function Screen() {
+  const [roomId] = useState(screenRoom);
+  const [deck, setDeck] = useState(null);
+  const [codes, setCodes] = useState({});
+  const [state, setState] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [people, setPeople] = useState([]);
+  const [key, setKey] = useState({});
+
+  const onMsg = useCallback((m) => {
+    if (m.t === "screened") {
+      setDeck(m.deck); setCodes(m.codes); setState(m.state); setSettings(m.settings);
+    } else if (m.t === "state") {
+      setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
+        limit: m.limit, keyShown: !!m.keyShown });
+      if (!m.keyShown) setKey({});
+    } else if (m.t === "roster") setPeople(m.people || []);
+    else if (m.t === "settings") setSettings(m.settings);
+    else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "gone" || m.t === "ended") { setDeck(null); setState(null); }
+  }, []);
+  const { send, status, gen } = useSocket(onMsg);
+
+  useEffect(() => { if (roomId) send({ t: "watch", roomId }); }, [roomId, gen, send]);
+
+  if (!roomId) {
+    return (
+      <div className="crash">
+        <h1>No exercise in the address</h1>
+        <p className="muted">
+          Open the projector view from the facilitator screen — the <b>Project</b> button —
+          so it carries the exercise id.
+        </p>
+      </div>
+    );
+  }
+  if (!deck || !state) {
+    return (
+      <div className="projwait">
+        <span className="pulse" />
+        <h1>Waiting for the exercise</h1>
+        <p className="muted">{status === "live" ? "Connected." : "Reconnecting…"}</p>
+      </div>
+    );
+  }
+
+  const inject = deck.injects[state.activeIdx];
+  const phase = state.phase;
+  const seatOf = (peran) => people.find((p) => p.peran === peran);
+  const shown = phase === "lobby" ? [] : (inject?.questions || []);
+
+  return (
+    <div className="screen">
+      <div className="projtop striped">
+        <div>
+          <p className="eyebrow">{inject?.siklus}</p>
+          <h1>Inject {inject?.id}</h1>
+        </div>
+        <span className={`projphase ${phase}`}>
+          <span className="pulse" />
+          {phase === "lobby" ? "Waiting"
+            : phase === "briefing" ? "Read the scenario"
+              : phase === "open" ? "Answering"
+                : state.keyShown ? "Answer key" : "Discussing"}
+        </span>
+      </div>
+
+      <div className="projbody">
+        {phase === "lobby" ? (
+          <div className="projlobby">
+            <h2>Enter your unit's code</h2>
+            <p className="muted">One device per business unit.</p>
+          </div>
+        ) : (
+          <div className="projmid">
+            <div className="projleft">
+              {inject?.condition && <p className="projcond">{inject.condition}</p>}
+              {shown.map((q) => {
+                const k = key[q.qid];
+                return (
+                  <div className="projq" key={q.qid}>
+                    <p className="projqtext">{q.text}</p>
+                    {q.choices?.length > 0 && (
+                      <div className="projopts">
+                        {q.choices.map((c, i) => {
+                          const o = optOf(i);
+                          const isKey = k && k.i === i;
+                          const n = phase === "revealed"
+                            ? people.filter((p) => p.answers?.[q.qid]?.choice === i).length : null;
+                          return (
+                            <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
+                              <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
+                              <span className="otxt">{c.text}</span>
+                              {n != null && <span className="on mono">{n}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {phase === "open" && state.limit > 0 && settings?.mode === "auto" && (
+              <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap="left" />
+            )}
+          </div>
+        )}
+
+        <div className="projstrip">
+          <span className="lab">Join</span>
+          {deck.roles.map((r, i) => {
+            const code = Object.keys(codes).find((c) => codes[c] === r);
+            const seat = seatOf(r);
+            return (
+              <span key={r} className={`jcode ${seat ? "in" : ""}`}>
+                <Crest peran={r} idx={i} size={20} />
+                <b className="mono">{code}</b>
+                {seat && (
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                    strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 12.5l5.2 5.2L20 7" />
+                  </svg>
+                )}
+              </span>
+            );
+          })}
+          {status !== "live" && <span className="offline">Reconnecting</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================= REPORT ============================= */
 
-function Report({ model, scores, notes, people, settings, roleColor, fileName, label, unitOf, onBack, onEnd }) {
+function Report({ model, scores, notes, people, settings, roleIdx, fileName, unitOf, onBack, onEnd }) {
   const all = useMemo(() => model.injects.flatMap((i) =>
     i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
 
@@ -1339,8 +1775,7 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
       b.total += 1;
       const sc = scores[q.qid] || {};
       if (sc.score != null) { b.scored += 1; b.sum += sc.score; }
-      const answers = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
-      answers.forEach((p) => {
+      people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]).forEach((p) => {
         const a = p.answers[q.qid];
         if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; }
         b.pts += a.points || 0;
@@ -1351,7 +1786,7 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const head = ["Siklus", "Inject", "Peran", "Question", "Expected", "Device", "Answer",
+    const head = ["Siklus", "Inject", "Peran", "Question", "Expected", "Operator", "Answer",
       "Correct", "Seconds", "Points", "Quality", "Decision", "Answer window (s)", "Notes"];
     const lines = [head.map(esc).join(",")];
     model.injects.forEach((inj) => {
@@ -1362,7 +1797,7 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
         (rs.length ? rs : [null]).forEach((p) => {
           const a = p?.answers[q.qid];
           lines.push([inj.siklus, inj.id, q.peran, q.text, q.answerRaw,
-            p ? label(p) : "", a?.text || "",
+            p ? (settings.showNames ? p.name : unitOf(p.peran)) : "", a?.text || "",
             a?.correct == null ? "" : a.correct ? "Yes" : "No",
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
             sc.score != null ? SCORE_LABELS[sc.score] : "",
@@ -1371,7 +1806,7 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
         });
       });
     });
-    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `ttx-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -1382,30 +1817,35 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
   const totalPts = people.reduce((a, p) => a + (p.total || 0), 0);
   const mcAll = Object.values(byRole).reduce((a, b) => a + b.mc, 0);
   const mcRight = Object.values(byRole).reduce((a, b) => a + b.correct, 0);
+  const maxPts = Math.max(1, ...board.map((p) => p.total || 0));
 
   return (
     <>
-      <Bar left={<>Results · {fileName}</>} onExit={onBack} exitLabel="Back" />
+      <Bar left={<b className="wordmark">Debrief · {fileName}</b>} onExit={onBack} exitLabel="Back" />
       <main className="report">
         <div className="repinner">
           <h1>Exercise results</h1>
           <div className="kpis">
-            <div><b>{people.length}</b><span>units</span></div>
-            <div><b>{all.length}</b><span>questions</span></div>
-            <div><b>{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>correct</span></div>
-            <div><b>{totalPts.toLocaleString()}</b><span>points</span></div>
+            <div><b className="mono">{people.length}</b><span>units seated</span></div>
+            <div><b className="mono">{all.length}</b><span>questions</span></div>
+            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>answered correctly</span></div>
+            <div><b className="mono">{totalPts.toLocaleString()}</b><span>points</span></div>
           </div>
 
           {settings.mode === "auto" && settings.leaderboard && board.length > 0 && (
             <>
-              <h3>Leaderboard</h3>
+              <h3>Where the room stood</h3>
               <ol className="board">
                 {board.map((p, i) => (
-                  <li key={p.pid}>
-                    <span className="rank">{i + 1}</span>
-                    <span className="dot" style={{ background: roleColor(p.peran) }} />
-                    <span className="bname">{label(p)}</span>
-                    <b>{(p.total || 0).toLocaleString()}</b>
+                  <li key={p.pid} className={i === 0 ? "first" : ""}>
+                    <span className="rank mono">{String(i + 1).padStart(2, "0")}</span>
+                    <Crest peran={p.peran} idx={roleIdx(p.peran)} />
+                    <span className="bname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
+                    <span className="bbar"><i style={{
+                      width: `${((p.total || 0) / maxPts) * 100}%`,
+                      background: UNIT_VARS[(roleIdx(p.peran) < 0 ? 0 : roleIdx(p.peran)) % 6],
+                    }} /></span>
+                    <b className="mono">{(p.total || 0).toLocaleString()}</b>
                   </li>
                 ))}
               </ol>
@@ -1413,458 +1853,539 @@ function Report({ model, scores, notes, people, settings, roleColor, fileName, l
           )}
 
           <h3>By Peran</h3>
-          <table className="tbl">
-            <thead><tr><th>Peran</th><th>Correct</th><th>Points</th>
-              {settings.mode === "manual" && <th>Quality</th>}</tr></thead>
-            <tbody>
-              {Object.entries(byRole).map(([role, d]) => (
-                <tr key={role}>
-                  <td><span className="dot" style={{ background: roleColor(role) }} />{role}</td>
-                  <td>{d.mc ? `${d.correct}/${d.mc}` : "—"}</td>
-                  <td>{d.pts ? d.pts.toLocaleString() : "—"}</td>
-                  {settings.mode === "manual" &&
-                    <td>{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="tblwrap">
+            <table className="tbl">
+              <thead><tr><th>Peran</th><th>Correct</th><th>Points</th>
+                {settings.mode === "manual" && <th>Quality</th>}</tr></thead>
+              <tbody>
+                {Object.entries(byRole).map(([role, d]) => (
+                  <tr key={role}>
+                    <td><Crest peran={role} idx={roleIdx(role)} /> {unitOf(role)}</td>
+                    <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "—"}</td>
+                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "—"}</td>
+                    {settings.mode === "manual" &&
+                      <td className="mono">{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <div className="repactions">
-            <button className="primary" onClick={exportCSV}>Download CSV</button>
-            <button className="ghost" onClick={onBack}>Back to the run</button>
-            <button className="danger" onClick={onEnd}>End session</button>
+            <button className="btn" onClick={exportCSV}>Download CSV</button>
+            <button className="btn quiet" onClick={onBack}>Back to the run</button>
+            <button className="btn danger" onClick={onEnd}>End session</button>
           </div>
-          <p className="muted small">Ending clears the room for everyone. Download the CSV first.</p>
+          <p className="hint">Ending clears the room for everyone. Download the CSV first.</p>
         </div>
       </main>
     </>
   );
 }
 
-function Bar({ left, right, onExit, exitLabel = "Exit", conn, dark }) {
-  return (
-    <header className={`bar ${dark ? "dark" : ""}`}>
-      <span className="mark" aria-hidden="true" />
-      <div className="brand">{left}</div>
-      <div className="barright">
-        {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
-        {right}
-        {dark && <span className="build">{BUILD}</span>}
-        <button className="ghost" onClick={onExit}>{exitLabel}</button>
-      </div>
-    </header>
-  );
-}
-
-/* The four phases are a real sequence, so they get a real stepper. */
-const PHASES = [
-  { k: "lobby", label: "Waiting" },
-  { k: "briefing", label: "Brief" },
-  { k: "open", label: "Answer" },
-  { k: "revealed", label: "Discuss" },
-];
-
-function PhaseSteps({ phase, onPick }) {
-  const at = PHASES.findIndex((p) => p.k === phase);
-  return (
-    <ol className="steps">
-      {PHASES.map((p, i) => (
-        <li key={p.k} className={i === at ? "now" : i < at ? "past" : ""}>
-          <button onClick={() => onPick(p.k)}>{p.label}</button>
-        </li>
-      ))}
-    </ol>
-  );
-}
-
 /* ============================== CSS ============================== */
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500&display=swap');
-
+/* ---------- LIGHT is the base token set ---------- */
+:root{
+  --ink:#F5F3EC; --ink2:#EAE7DB; --slab:#FFFFFF; --rise:#FFF8E0;
+  --edge:#D8D3C2; --edge2:#EAE6D9;
+  --txt:#17160F; --dim:#56534A; --faint:#85806F;
+  --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#8A6200; --signal-soft:#FFF1C2;
+  --live:#0E8A5F;  --live-soft:#E4F4EC;  --live-edge:#A9D8C2;
+  --wrong:#C8304A; --wrong-soft:#FBE8EB; --wrong-edge:#E7B3BD;
+  --warn:#A96E06;  --warn-soft:#FCF0D8;  --warn-edge:#E0C489;
+  --oA:#CE2743; --oB:#2456D2; --oC:#7136CE; --oD:#0C8760;
+  --on-opt:#FFFFFF;
+  --u1:#C93A54; --u2:#2F62D6; --u3:#A96C0C; --u4:#0E7F66; --u5:#6C45C4; --u6:#1B7A92;
+  --on-unit:#FFFFFF;
+  --shadow:0 20px 44px -26px rgba(30,26,10,.34);
+  --disp:'Archivo',"Helvetica Neue",system-ui,sans-serif;
+  --body:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,"SFMono-Regular",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ink:#141310; --ink2:#0B0A08; --slab:#1E1C17; --rise:#2C2718;
+    --edge:#3F3A2B; --edge2:#2B2820;
+    --txt:#F4F2EC; --dim:#A9A597; --faint:#7C7768;
+    --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#FFC600; --signal-soft:#3B3208;
+    --live:#2BD79A;  --live-soft:rgba(43,215,154,.13);  --live-edge:rgba(43,215,154,.42);
+    --wrong:#FF5A75; --wrong-soft:rgba(255,90,117,.12); --wrong-edge:rgba(255,90,117,.42);
+    --warn:#FFB43D;  --warn-soft:rgba(255,180,61,.12);  --warn-edge:rgba(255,180,61,.40);
+    --oA:#F0435E; --oB:#5286FF; --oC:#A374F5; --oD:#1FC98D;
+    --on-opt:#141310;
+    --u1:#F0697F; --u2:#6A94FF; --u3:#E2A03F; --u4:#2FB89A; --u5:#A683F0; --u6:#4FB8D1;
+    --on-unit:#141310;
+    --shadow:0 28px 66px -30px rgba(0,0,0,.85);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ink:#141310; --ink2:#0B0A08; --slab:#1E1C17; --rise:#2C2718;
+  --edge:#3F3A2B; --edge2:#2B2820;
+  --txt:#F4F2EC; --dim:#A9A597; --faint:#7C7768;
+  --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#FFC600; --signal-soft:#3B3208;
+  --live:#2BD79A;  --live-soft:rgba(43,215,154,.13);  --live-edge:rgba(43,215,154,.42);
+  --wrong:#FF5A75; --wrong-soft:rgba(255,90,117,.12); --wrong-edge:rgba(255,90,117,.42);
+  --warn:#FFB43D;  --warn-soft:rgba(255,180,61,.12);  --warn-edge:rgba(255,180,61,.40);
+  --oA:#F0435E; --oB:#5286FF; --oC:#A374F5; --oD:#1FC98D;
+  --on-opt:#141310;
+  --u1:#F0697F; --u2:#6A94FF; --u3:#E2A03F; --u4:#2FB89A; --u5:#A683F0; --u6:#4FB8D1;
+  --on-unit:#141310;
+  --shadow:0 28px 66px -30px rgba(0,0,0,.85);
+  color-scheme:dark;
+}
+html,body{background:var(--ink)}
 .ttx{
-  --paper:#EDEFEA; --panel:#FFFFFF; --sink:#12232A;
-  --ink:#14191D; --ink2:#414C54; --muted:#6E7973;
-  --rule:#D5DAD4; --rule2:#E6E9E4; --accent:#0E5457; --accent2:#0A4245;
-  --good:#1D6647; --warn:#8A6410; --alert:#A33A1F;
-  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
-  --serif:'IBM Plex Serif',Georgia,serif;
-  --mono:'IBM Plex Mono',ui-monospace,monospace;
-  font-family:var(--sans);color:var(--ink);background:var(--paper);
-  min-height:100vh;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  font-family:var(--body);color:var(--txt);background:var(--ink);
+  min-height:100vh;font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;
 }
 .ttx *{box-sizing:border-box}
 .ttx button{font:inherit;cursor:pointer;border:none;background:none;color:inherit;text-align:inherit}
-.ttx :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
-.ttx textarea,.ttx input[type=text],.ttx input[type=number],.ttx input:not([type]),.ttx select{
-  font:inherit;color:inherit;width:100%;background:var(--panel);
-  border:1px solid var(--rule);border-radius:5px;padding:10px 12px}
+.ttx :focus-visible{outline:2px solid var(--signal);outline-offset:3px;border-radius:4px}
+.ttx h1,.ttx h2{font-family:var(--disp);margin:0;letter-spacing:-.03em}
+.ttx h1{font-size:27px;font-weight:800;margin-bottom:10px;line-height:1.12}
+.ttx h2{font-size:20px;font-weight:800}
+.ttx h3{font-size:12px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);
+  margin:30px 0 10px;font-family:var(--body)}
+.ttx p{margin:0}
+.ttx textarea,.ttx input[type=text],.ttx input[type=number],.ttx input[type=password],.ttx input:not([type]){
+  font:inherit;color:var(--txt);width:100%;background:var(--slab);
+  border:1px solid var(--edge);border-radius:11px;padding:11px 13px}
 .ttx textarea{resize:vertical;line-height:1.55}
-.ttx textarea:focus,.ttx input:focus,.ttx select:focus{border-color:var(--accent);outline:none}
-.ttx h1{font-size:28px;font-weight:600;letter-spacing:-.015em;margin:0 0 10px;line-height:1.2}
-.ttx h2{font-size:20px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
-.ttx h3{font-size:13px;font-weight:600;color:var(--ink2);margin:32px 0 10px}
-.ttx code{font-family:var(--mono);font-size:12.5px;background:var(--rule2);padding:1px 5px;border-radius:3px}
-.mono{font-family:var(--mono)}
-.muted{color:var(--muted)}
-.small{font-size:13px}
-.boot{padding:70px;text-align:center;color:var(--muted)}
-.hint{font-size:12.5px;color:var(--muted);margin:8px 0 0;line-height:1.5;max-width:62ch}
+.ttx textarea:focus,.ttx input:focus{border-color:var(--signal);outline:none}
+.ttx code{font-family:var(--mono);font-size:12.5px;background:var(--ink2);padding:1px 5px;border-radius:4px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--dim)}
+.good{color:var(--live)}
+.centre{text-align:center}
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.boot{padding:70px;text-align:center;color:var(--faint)}
+.hint{font-size:12.5px;color:var(--faint);margin:8px 0 0;line-height:1.55;max-width:64ch}
+.lede{color:var(--dim);margin:0 0 20px;max-width:58ch}
+.lede b{font-weight:700}
+.keys{margin-top:26px;font-size:12px;color:var(--faint)}
+.ttx kbd{font-family:var(--mono);font-size:10.5px;background:var(--slab);border:1px solid var(--edge2);
+  border-radius:4px;padding:1px 5px;color:var(--dim)}
+
+/* brand motif: a short yellow stripe tab at the left of the top bar */
+.striped{position:relative}
+.striped::after{content:"";position:absolute;left:0;bottom:-1px;width:104px;height:3px;pointer-events:none;
+  background:repeating-linear-gradient(114deg,var(--signal) 0 13px,transparent 13px 21px)}
 
 /* ---------- buttons ---------- */
-.ttx .primary{padding:9px 18px;background:var(--accent);color:#fff;border-radius:5px;
-  font-size:14px;font-weight:500;width:auto;transition:background .12s}
-.ttx .primary:hover:not(:disabled){background:var(--accent2)}
-.ttx .primary:disabled{opacity:.35;cursor:default}
-.ttx .primary.big{width:100%;padding:14px;margin-top:20px;font-size:15px}
-.ttx .ghost{padding:6px 13px;border:1px solid var(--rule);border-radius:5px;
-  font-size:13px;color:var(--ink2);width:auto;background:transparent}
-.ttx .ghost:hover:not(:disabled){border-color:var(--muted)}
-.ttx .ghost:disabled{opacity:.35;cursor:default}
-.ttx .ghost.wide{width:100%;padding:11px;margin-top:20px;text-align:center}
-.vis{display:flex;gap:3px}
-.keytag{font-size:10px;font-weight:600;color:var(--good);border:1px solid #A9C7B4;
-  border-radius:9px;padding:1px 7px;background:#EFF6F1}
-.confirm{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.cmsg{font-size:13px;color:var(--ink2)}
-.rkey{margin:0 0 7px;font-size:13.5px;color:var(--good)}
-.rkey b{font-weight:600}
-.ttx .ghost.pill{padding:5px 11px;font-size:12px}
-.ttx .bar.dark .ghost.pill{background:#1E3D44;border-color:#2F5A60;color:#CFDCDA}
-.ttx .bar.dark .ghost.pill.off{background:transparent;border-style:dashed;border-color:#33474F;color:#728683}
-.panel .chk{margin-bottom:14px}
-.panel h3{margin-top:26px}
-.ttx .danger{padding:8px 16px;border:1px solid #D9B1A5;color:var(--alert);border-radius:5px;font-size:13px}
-.ttx .danger:hover{background:#FBF0EC}
-.ttx .link{color:var(--accent);text-decoration:underline;text-underline-offset:3px;font-size:14px}
+.ttx .btn{padding:9px 17px;border-radius:10px;background:var(--signal);color:var(--signal-ink);
+  font-weight:700;font-size:13.5px;width:auto;transition:transform .1s,filter .14s}
+.ttx .btn:hover:not(:disabled){filter:brightness(1.06)}
+.ttx .btn:active:not(:disabled){transform:translateY(1px)}
+.ttx .btn:disabled{opacity:.45;cursor:default}
+.ttx .btn.wide{width:100%;text-align:center;padding:15px;font-size:15.5px;border-radius:14px;margin-top:16px}
+.ttx .btn.quiet{background:var(--slab);color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge);font-weight:600}
+.ttx .btn.quiet:hover:not(:disabled){color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint);filter:none}
+.ttx .btn.quiet.off{opacity:.6}
+.ttx .btn.pill{padding:6px 12px;font-size:12px}
+.ttx .btn.danger{background:var(--wrong);color:#fff;box-shadow:none}
+.ttx .btn.warnbtn{background:var(--warn);color:var(--on-opt)}
+.ttx .link{color:var(--signal-text);text-decoration:underline;text-underline-offset:3px;font-size:13.5px;
+  font-weight:600;width:auto}
+.ttx .link.quiet{color:var(--faint);font-size:12.5px;font-weight:500}
 
 /* ---------- header ---------- */
-.bar{display:flex;align-items:center;gap:14px;padding:0 16px;height:56px;background:var(--panel);
-  border-bottom:1px solid var(--rule);position:sticky;top:0;z-index:10}
-.bar .mark{width:4px;height:22px;background:var(--accent);border-radius:2px;flex:none}
-.brand{display:flex;align-items:center;gap:14px;font-size:14px;min-width:0}
-.barright{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted)}
-.build{font-family:var(--mono);font-size:10.5px;opacity:.45}
-.build.big{display:block;margin:-12px 0 20px;opacity:.5}
-.offline{color:var(--alert);font-weight:500}
-.bar.dark{background:var(--sink);border-bottom-color:#0B171C;color:#DDE4E2}
-.bar.dark .mark{background:#3F8F84}
-.bar.dark .ghost{border-color:#2C4048;color:#B7C4C2}
-.bar.dark .ghost:hover{border-color:#4E6670;background:#1A2F37}
-.bar.dark .barright{color:#8FA09E}
-.crumb{color:#8FA09E;font-size:12.5px;white-space:nowrap}
-.injno{font-weight:600;white-space:nowrap}
-.unitname{font-size:15px;font-weight:600}
-.ptsbadge{font-family:var(--mono);font-size:14px;font-weight:600;color:#7FD4C0}
+.bar{display:flex;align-items:center;gap:14px;padding:11px 16px;min-height:58px;background:var(--slab);
+  border-bottom:1px solid var(--edge2);position:sticky;top:0;z-index:10;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:11px;font-size:14px;min-width:0}
+.wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
+.barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
+.build{font-family:var(--mono);font-size:10px;opacity:.55}
+.offline{color:var(--wrong);font-weight:700;font-size:12px}
+.crumb{color:var(--faint);font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+.injno{font-family:var(--disp);font-weight:800;white-space:nowrap;font-size:16px;letter-spacing:-.03em}
+.unitblock{min-width:0}
+.unitname{font-family:var(--disp);font-size:15px;font-weight:800;letter-spacing:-.025em;display:block;line-height:1.15}
+.seatline{display:block;font-size:10.5px;color:var(--faint)}
+.ptsbadge{font-size:14px;font-weight:700;color:var(--signal-text)}
+
+/* ---------- theme switch ---------- */
+.themes{display:flex;gap:2px;padding:3px;border-radius:10px;background:var(--ink2);
+  box-shadow:inset 0 0 0 1px var(--edge2);flex:none}
+.themes button{padding:4px 10px;border-radius:7px;font-size:12px;font-weight:700;color:var(--dim)}
+.themes button:hover{color:var(--txt)}
+.themes button[aria-pressed="true"]{background:var(--signal);color:var(--signal-ink)}
+.themes.compact button{padding:4px 8px;font-size:11px}
 
 /* ---------- phase stepper ---------- */
-.steps{display:flex;list-style:none;margin:0;padding:0;gap:2px}
-.steps li button{padding:5px 12px;font-size:12.5px;color:#7A8C8A;border-radius:4px;white-space:nowrap}
-.steps li button:hover{color:#DDE4E2;background:#1A2F37}
-.steps li.past button{color:#A9BAB7}
-.steps li.now button{background:#1E3D44;color:#fff;font-weight:500;box-shadow:inset 0 0 0 1px #2F5A60}
-.steps li+li{position:relative;padding-left:9px}
-.steps li+li::before{content:"";position:absolute;left:2px;top:50%;width:4px;height:1px;background:#2C4048}
+.phases{display:flex;gap:3px;flex-wrap:wrap}
+.phases button{padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;color:var(--faint);white-space:nowrap}
+.phases button:hover{color:var(--txt);background:var(--rise)}
+.phases button.past{color:var(--dim)}
+.phases button.on{background:var(--signal);color:var(--signal-ink);font-weight:700}
 
-/* ---------- door (join is the front page) ---------- */
-.door{display:flex;justify-content:center;padding:64px 22px 90px}
-.doorinner{max-width:380px;width:100%}
-.doorinner .mark{display:block;width:4px;height:26px;background:var(--accent);border-radius:2px;margin-bottom:24px}
-.doorinner h1{margin-bottom:6px}
-.doorinner .lede{margin-bottom:22px}
-.doorinner .codein{margin-bottom:10px;border-width:1.5px}
-.resolve{min-height:22px;font-size:13.5px;color:var(--muted);text-align:center;margin-bottom:22px}
-.resolve.hit{color:var(--good)}
-.resolve.hit b{font-weight:600}
-.resolve.miss{color:var(--alert)}
-.doorinner .fld>span{display:flex;align-items:baseline;gap:7px}
-.doorinner .fld em{font-style:normal;font-size:11.5px;color:var(--muted);font-weight:400}
-.doorfoot{margin-top:30px;padding-top:20px;border-top:1px solid var(--rule);
-  display:flex;flex-direction:column;gap:10px;align-items:flex-start}
-.ttx .link.quiet{color:var(--muted);font-size:12.5px}
+/* ---------- crest + chip ---------- */
+.crest{width:22px;height:22px;border-radius:7px;display:inline-grid;place-items:center;flex:none;
+  font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--on-unit);vertical-align:-5px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:4px 12px 4px 5px;border-radius:20px;
+  background:var(--rise);font-size:12.5px;font-weight:600;box-shadow:inset 0 0 0 1px var(--edge2);
+  text-transform:none;letter-spacing:0;color:var(--txt)}
 
-/* ---------- landing ---------- */
-.landing{display:flex;justify-content:center;padding:76px 24px}
-.landinner{max-width:460px;width:100%}
-.landinner .mark{display:block;width:4px;height:26px;background:var(--accent);border-radius:2px;margin-bottom:22px}
-.lede{color:var(--ink2);margin:0 0 26px;max-width:56ch}
-.lede b{font-weight:600;font-family:var(--mono);font-size:13px}
-.picks{display:grid;gap:9px}
-.ttx .pick{text-align:left;background:var(--panel);border:1px solid var(--rule);border-radius:7px;
-  padding:17px 19px;transition:border-color .12s}
-.ttx .pick:hover{border-color:var(--accent)}
-.ttx .pick b{display:block;font-size:15.5px;font-weight:600;margin-bottom:2px}
-.ttx .pick span{font-size:13.5px;color:var(--muted)}
-.ttx .landinner .link{margin-top:24px;display:inline-block}
+/* ---------- door ---------- */
+.door{display:flex;justify-content:center;padding:44px 20px 80px}
+.doorinner{max-width:400px;width:100%}
+.slots{display:flex;gap:9px;justify-content:center;position:relative;margin-bottom:18px;cursor:text}
+.slot{width:58px;height:72px;border-radius:14px;background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);
+  display:grid;place-items:center;font-family:var(--mono);font-size:30px;font-weight:700}
+.slot.filled{box-shadow:inset 0 0 0 2px var(--signal)}
+.slot.caret{box-shadow:inset 0 0 0 2px var(--signal);animation:blinkslot 1.1s step-end infinite}
+@keyframes blinkslot{50%{box-shadow:inset 0 0 0 1.5px var(--edge2)}}
+.ttx .codeghost{position:absolute;inset:0;opacity:0;width:100%;height:100%;padding:0;border:none;
+  background:transparent;font-size:16px;cursor:text}
+.resolve{min-height:22px;font-size:13.5px;color:var(--faint);text-align:center;margin-bottom:18px}
+.resolved{display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:14px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);margin-bottom:6px}
+.resolved.taken{background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge)}
+.resolved small{display:block;font-size:11px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;font-weight:700}
+.resolved.taken small{color:var(--warn)}
+.resolved b{font-family:var(--disp);font-size:16px;font-weight:800;letter-spacing:-.025em}
+.doorfoot{margin-top:28px;padding-top:18px;border-top:1px solid var(--edge2)}
 
 /* ---------- forms ---------- */
-.load{display:flex;justify-content:center;padding:46px 24px 90px}
+.load{display:flex;justify-content:center;padding:36px 20px 90px}
 .loadinner{max-width:560px;width:100%}
-.loadinner.narrow{max-width:380px}
-.loadinner.wide{max-width:660px}
-.drop{border:1.5px dashed var(--rule);border-radius:7px;padding:36px;text-align:center;
-  background:var(--panel);display:flex;flex-direction:column;align-items:center;gap:12px}
-.or{color:var(--muted);font-size:13px}
-.err{margin-top:14px;padding:11px 14px;background:#FBF0EC;border-left:3px solid var(--alert);
-  border-radius:0 5px 5px 0;font-size:13.5px;color:#7C2B16}
-.found{margin:-6px 0 16px;padding:10px 13px;background:#EFF6F1;border-left:3px solid var(--good);
-  border-radius:0 5px 5px 0;font-size:14px;color:var(--good)}
+.loadinner.wide{max-width:680px}
+.drop{border:1.5px dashed var(--edge);border-radius:14px;padding:34px;text-align:center;
+  background:var(--slab);display:flex;flex-direction:column;align-items:center;gap:12px}
+.or{color:var(--faint);font-size:13px}
+.err{margin-top:14px;padding:11px 14px;background:var(--wrong-soft);
+  box-shadow:inset 0 0 0 1px var(--wrong-edge);border-radius:10px;font-size:13.5px;color:var(--wrong)}
 .ttx .load .link{margin-top:18px;display:inline-block}
 .fld{display:block;margin-bottom:16px}
-.fld>span{display:block;font-size:13px;font-weight:500;color:var(--ink2);margin-bottom:6px}
-.codein{font-family:var(--mono);font-size:30px;font-weight:500;letter-spacing:.26em;
-  text-align:center;text-transform:uppercase;padding:14px 12px}
-.warn{font-size:12.5px;background:#FBF6E9;border:1px solid #E5D6AE;border-radius:5px;padding:10px 13px;margin-bottom:22px}
-.warn summary{cursor:pointer;font-weight:500;color:#755C14}
-.warn ul{margin:9px 0 0;padding-left:16px;color:#6A5415;line-height:1.5}
-.warn li{margin-bottom:5px}
+.fld>span{display:block;font-size:12.5px;font-weight:600;color:var(--dim);margin-bottom:6px}
+.fld>span em{font-style:normal;color:var(--faint);font-weight:400;margin-left:6px}
+.warn{font-size:12.5px;background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:10px;padding:11px 14px;margin-bottom:20px;color:var(--warn)}
+.warn summary{cursor:pointer;font-weight:700}
+.warn ul{margin:9px 0 0;padding-left:16px;line-height:1.55}
 .warnhint{color:var(--warn)}
 .setgrid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
 .span2{grid-column:1/-1}
-.seg2{display:flex;gap:3px}
-.seg2 button{flex:1;padding:9px 12px;border:1px solid var(--rule);border-radius:5px;
-  font-size:13.5px;color:var(--muted);background:var(--panel);text-align:center}
-.seg2 button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
-.chk{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
-.chk input{width:16px;height:16px;margin-top:3px;flex:none;accent-color:var(--accent)}
-.chk b{display:block;font-size:14px;font-weight:500}
-.chk em{display:block;font-style:normal;font-size:12.5px;color:var(--muted);margin-top:2px;line-height:1.45}
-.codelist{list-style:none;margin:10px 0 0;padding:0;background:var(--panel);
-  border:1px solid var(--rule);border-radius:6px;overflow:hidden}
-.codelist li{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--rule2)}
+.seg2{display:flex;gap:4px}
+.seg2 button{flex:1;padding:10px 12px;border-radius:10px;font-size:13.5px;color:var(--dim);
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);text-align:center;font-weight:600}
+.seg2 button.on{background:var(--signal);color:var(--signal-ink);box-shadow:none;font-weight:700}
+.chk{display:flex;gap:10px;align-items:flex-start;cursor:pointer;margin-bottom:12px}
+.chk input{width:16px;height:16px;margin-top:3px;flex:none;accent-color:var(--signal)}
+.chk b{display:block;font-size:14px;font-weight:600}
+.chk em{display:block;font-style:normal;font-size:12.5px;color:var(--faint);margin-top:2px;line-height:1.45}
+.codelist{list-style:none;margin:10px 0 0;padding:0;background:var(--slab);
+  box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;overflow:hidden}
+.codelist li{display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid var(--edge2);flex-wrap:wrap}
 .codelist li:last-child{border-bottom:none}
-.cname{flex:1;font-size:14px;font-weight:500}
-.cinput{width:112px;font-family:var(--mono);text-align:center;letter-spacing:.1em;text-transform:uppercase;padding:6px}
-.cinput.narrow{width:76px;letter-spacing:0}
-.unit{color:var(--muted);font-size:12.5px}
+.cname{flex:1;font-size:14px;font-weight:600;min-width:120px}
+.cinput{width:112px;font-family:var(--mono);text-align:center;letter-spacing:.1em;text-transform:uppercase;padding:7px}
+.cinput.narrow{width:78px;letter-spacing:0}
+.unit{color:var(--faint);font-size:12.5px}
+.bigcode{font-size:17px;font-weight:700;letter-spacing:.12em;color:var(--signal-text)}
 
 /* ---------- run shell ---------- */
-.run{display:grid;grid-template-columns:224px minmax(0,1fr);align-items:start}
-.rail{position:sticky;top:56px;height:calc(100vh - 56px);display:flex;flex-direction:column;
-  border-right:1px solid var(--rule);background:#E8EBE6}
+.run{display:grid;grid-template-columns:222px minmax(0,1fr);align-items:start}
+.rail{position:sticky;top:58px;height:calc(100vh - 58px);display:flex;flex-direction:column;
+  border-right:1px solid var(--edge2);background:var(--ink2)}
 .tl{list-style:none;margin:0;padding:12px 0;overflow-y:auto;flex:1}
-.tlhead{font-size:10.5px;font-weight:600;color:var(--muted);padding:16px 16px 7px;letter-spacing:.03em}
-.tl li:first-child.tlhead{padding-top:2px}
-.tlrow button{width:100%;display:grid;grid-template-columns:16px 22px 1fr auto;align-items:center;
-  gap:7px;padding:7px 14px;position:relative}
-.tlrow button:hover{background:#DFE3DC}
-.tldot{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--rule);background:var(--paper);
-  margin-left:3px;z-index:1}
-.tlrow::before{content:"";position:absolute;left:23px;width:1px;height:100%;background:var(--rule)}
-.tlrow:first-of-type::before{top:50%;height:50%}
-.tlrow.done .tldot{background:var(--muted);border-color:var(--muted)}
-.tlrow.now .tldot{background:var(--accent);border-color:var(--accent);
-  box-shadow:0 0 0 3px rgba(14,84,87,.16)}
-.tlrow.now button{background:var(--panel);font-weight:500}
-.tlrow{position:relative}
-.tlno{font-family:var(--mono);font-size:12px;color:var(--muted)}
-.tlrow.now .tlno{color:var(--ink)}
-.tltext{font-size:12.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tlrow.now .tltext{color:var(--ink2)}
-.tlunits{display:flex;gap:2px}
-.tlunits i{width:5px;height:5px;border-radius:50%;display:block}
-.tlfoot{border-top:1px solid var(--rule);padding:11px 16px;display:flex;align-items:center;gap:10px;
-  font-size:11.5px;color:var(--muted);background:#E4E8E2}
-.tlprog{flex:1;height:3px;background:var(--rule);border-radius:2px;overflow:hidden}
-.tlprog i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.tlhead{font-size:10px;font-weight:800;color:var(--faint);padding:14px 16px 6px;letter-spacing:.13em;text-transform:uppercase}
+.tlrow button{width:100%;display:grid;grid-template-columns:14px 20px 1fr;align-items:center;
+  gap:9px;padding:8px 16px;font-size:12.5px;color:var(--faint)}
+.tlrow button:hover{background:var(--slab)}
+.tldot{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--edge);margin-left:2px}
+.tlrow.done .tldot{background:var(--faint);box-shadow:none}
+.tlrow.now button{background:var(--rise);color:var(--txt);font-weight:600}
+.tlrow.now .tldot{background:var(--signal);box-shadow:0 0 0 3px var(--signal-soft)}
+.tlno{font-family:var(--mono);font-size:11px}
+.tltext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.tlfoot{border-top:1px solid var(--edge2);padding:11px 16px;display:flex;align-items:center;gap:10px;
+  font-size:11.5px;color:var(--faint)}
+.tlprog{flex:1;height:3px;background:var(--edge2);border-radius:2px;overflow:hidden}
+.tlprog i{display:block;height:100%;background:var(--signal);transition:width .3s}
 
 /* ---------- stage ---------- */
-.stage{padding:30px 36px 90px;max-width:820px}
-.scenario{font-family:var(--serif);font-size:19px;line-height:1.68;margin:0 0 22px;
-  padding:24px 28px;background:var(--panel);border-left:3px solid var(--accent);
-  border-radius:0 7px 7px 0;max-width:64ch;box-shadow:0 1px 2px rgba(20,25,29,.04)}
-.empty{color:var(--muted);font-style:italic;margin-bottom:22px}
+.stage{padding:26px 30px 90px;max-width:900px}
+.scenario{font-size:17.5px;line-height:1.62;margin:0 0 20px;padding:20px 22px;background:var(--slab);
+  box-shadow:inset 0 0 0 1px var(--edge2);border-radius:18px;max-width:62ch}
+.scenario .eyebrow,.condition .eyebrow{display:block;margin-bottom:9px}
+.empty{color:var(--faint);font-style:italic;margin-bottom:20px}
 .callon{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:18px;
-  font-size:12.5px;color:var(--muted)}
-.chip{color:#fff;background:var(--c);padding:4px 12px;border-radius:12px;font-size:12.5px;font-weight:500}
-.actbar{display:flex;align-items:center;gap:14px;padding:13px 16px;background:var(--panel);
-  border:1px solid var(--rule);border-radius:7px;margin-bottom:26px;flex-wrap:wrap}
-.amsg{font-size:13.5px;color:var(--muted)}
-.amsg.right{margin-left:auto}
-.actbar .primary,.actbar .ghost{margin-left:auto}
-.actbar .amsg.right+.primary{margin-left:0}
+  font-size:11.5px;color:var(--faint);font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.actbar{display:flex;align-items:center;gap:16px;padding:14px 18px;background:var(--rise);
+  box-shadow:inset 0 0 0 1px var(--edge);border-radius:16px;margin-bottom:22px;flex-wrap:wrap}
+.actbar .msg{font-size:13.5px;color:var(--dim)}
+.actbar .btn{margin-left:auto}
 .inlinetime{display:flex;align-items:center;gap:6px}
-.inlinetime input{width:70px;font-family:var(--mono);text-align:center;padding:5px 6px;background:var(--paper)}
+.inlinetime input{width:74px;font-family:var(--mono);text-align:center;padding:6px}
 
-/* ---------- countdown ---------- */
-.cd{display:flex;align-items:center;gap:11px;min-width:150px}
-.cdnum{font-family:var(--mono);font-size:19px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--ink2)}
-.cdbar{flex:1;height:5px;background:var(--rule2);border-radius:3px;overflow:hidden;min-width:60px}
-.cdbar i{display:block;height:100%;background:var(--accent);transition:width .2s linear}
-.cd.warn .cdnum{color:var(--warn)} .cd.warn .cdbar i{background:var(--warn)}
-.cd.urgent .cdnum{color:var(--alert)} .cd.urgent .cdbar i{background:var(--alert)}
-.cd.big{display:block;margin:0 0 22px}
-.cd.big .cdnum{display:block;font-size:46px;text-align:center;letter-spacing:-.02em;line-height:1.1}
-.cd.big .cdbar{width:100%;height:7px;margin-top:10px}
+/* ---------- ring ---------- */
+.ring{position:relative;flex:none;display:grid;place-items:center}
+.ring svg{transform:rotate(-90deg);display:block;overflow:visible}
+.ring .rtrack{fill:none;stroke:var(--edge2);stroke-width:9}
+.ring .rfill{fill:none;stroke:var(--live);stroke-width:9;stroke-linecap:round;transition:stroke .4s}
+.ring .rnum{position:absolute;font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
+  letter-spacing:-.03em;color:var(--txt)}
+.ring .rcap{position:absolute;bottom:-2px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--faint);font-weight:700}
+.ring.warn .rfill{stroke:var(--warn)} .ring.warn .rnum{color:var(--warn)}
+.ring.urgent .rfill{stroke:var(--wrong)} .ring.urgent .rnum{color:var(--wrong)}
+.ring.urgent{animation:tense 1s ease-in-out infinite}
+.ring.done .rnum{color:var(--wrong)}
+@keyframes tense{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+.ring.s72 svg{width:72px;height:72px} .ring.s72 .rnum{font-size:17px}
+.ring.s150 svg{width:150px;height:150px} .ring.s150 .rnum{font-size:38px;margin-bottom:6px}
+.ring.s150 .rtrack,.ring.s150 .rfill{stroke-width:7}
+.ring.s220 svg{width:220px;height:220px} .ring.s220 .rnum{font-size:58px;margin-bottom:8px}
+.ring.s220 .rtrack,.ring.s220 .rfill{stroke-width:6}
+.ringwrap{display:flex;justify-content:center;margin-bottom:6px}
 
 /* ---------- lobby ---------- */
-.lobby{max-width:720px}
-.lobbyhead{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:22px}
-.joincount{text-align:right;flex:none}
-.joincount b{display:block;font-family:var(--mono);font-size:32px;font-weight:500;line-height:1;color:var(--accent)}
-.joincount span{font-size:11.5px;color:var(--muted)}
+.lobby{max-width:760px}
+.lobbytop{display:flex;align-items:flex-start;gap:22px;flex-wrap:wrap;margin-bottom:20px}
+.lobbytop p{max-width:56ch;font-size:13.5px;margin-top:4px}
+.dial{margin-left:auto;text-align:right;flex:none}
+.dial b{display:block;font-size:34px;font-weight:700;line-height:1;letter-spacing:-.04em}
+.dial span{font-size:11px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase;font-weight:700}
 .codegrid{list-style:none;margin:0;padding:0;display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:9px}
-.codegrid li{background:var(--panel);border:1px solid var(--rule);border-top:3px solid var(--c);
-  border-radius:0 0 7px 7px;padding:14px 16px}
-.codegrid li.in{background:#F4F8F4;border-color:#B6CFBD;border-top-color:var(--c)}
-.cgunit{display:block;font-size:12.5px;font-weight:500;color:var(--ink2);margin-bottom:6px}
-.cgcode{display:block;font-family:var(--mono);font-size:28px;font-weight:600;
-  letter-spacing:.14em;color:var(--c);line-height:1.1}
-.cgwho{display:block;font-size:11.5px;color:var(--muted);margin-top:7px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.codegrid li.in .cgwho{color:var(--good)}
+  grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:11px}
+.codegrid li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  padding:16px 17px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
+.codegrid li::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c)}
+.codegrid li.in{background:var(--rise);box-shadow:inset 0 0 0 1px var(--edge)}
+.cghead{display:flex;align-items:center;gap:9px}
+.cghead b{font-size:13.5px;font-weight:700;line-height:1.3}
+.seatopen{margin-left:auto;font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:20px;padding:2px 7px;flex:none}
+.cgcode{display:block;font-family:var(--mono);font-size:29px;font-weight:700;letter-spacing:.13em;
+  color:var(--c);line-height:1}
+.cgwho{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.codegrid li.in .cgwho{color:var(--live)}
 
 /* ---------- tracker ---------- */
-.tracker{background:var(--panel);border:1px solid var(--rule);border-radius:7px;overflow:hidden;margin-bottom:22px}
-.trow{display:flex;align-items:center;gap:11px;padding:11px 15px;border-bottom:1px solid var(--rule2);font-size:13.5px}
+.tracker{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  overflow:hidden;margin-bottom:22px}
+.trow{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge2);font-size:13.5px}
 .trow:last-child{border-bottom:none}
-.tname{font-weight:500;min-width:140px}
-.tbar{flex:1;height:5px;background:var(--rule2);border-radius:3px;overflow:hidden;max-width:260px}
-.tbar i{display:block;height:100%;transition:width .3s}
-.tcount{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
-.tmiss{color:var(--muted);font-size:12.5px}
-.tin{color:var(--good);font-size:12.5px}
-.tdone{font-family:var(--mono);font-size:12px;color:var(--good);min-width:46px;text-align:right}
-.timeup{margin:-8px 0 20px;padding:11px 14px;background:#FBF0EC;border-left:3px solid var(--alert);
-  border-radius:0 5px 5px 0;font-size:13.5px;color:#7C2B16;text-align:center;font-weight:500}
+.trow.in{background:var(--live-soft)}
+.tname{font-weight:600;min-width:140px}
+.tbar{flex:1;height:7px;background:var(--edge2);border-radius:4px;overflow:hidden;max-width:260px}
+.tbar i{display:block;height:100%;background:var(--c);border-radius:4px;transition:width .4s}
+.tcount{font-size:12px;color:var(--faint)}
+.tmiss{color:var(--faint);font-size:12.5px}
+.tin{color:var(--live);font-size:12.5px;font-weight:600}
+.tdone{font-size:12px;color:var(--live);min-width:46px;text-align:right;font-weight:700}
 
 /* ---------- question cards ---------- */
-.rolegroup{margin-bottom:28px}
-.rolerule{font-size:12.5px;font-weight:600;color:var(--c);padding-bottom:7px;
-  border-bottom:2px solid var(--c);margin-bottom:13px}
-.qcard{background:var(--panel);border:1px solid var(--rule2);border-radius:7px;padding:16px 18px;margin-bottom:10px}
-.qtext{margin:0 0 13px;font-size:15.5px;line-height:1.5;font-weight:500}
-.dist{list-style:none;margin:0 0 13px;padding:0;display:grid;gap:7px}
-.dist li{display:flex;align-items:center;gap:11px;font-size:13.5px}
-.dist .dlabel{flex:1;color:var(--ink2)}
-.dist li.right .dlabel{color:var(--good);font-weight:500}
-.dbar{width:130px;height:9px;background:var(--rule2);border-radius:5px;overflow:hidden}
-.dbar i{display:block;height:100%;background:var(--muted)}
-.dist li.right .dbar i{background:var(--good)}
-.dn{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:18px;text-align:right}
-.who-list{list-style:none;margin:0;padding:11px 0 0;border-top:1px dashed var(--rule);display:grid;gap:6px}
+.rolegroup{margin-bottom:26px}
+.rolerule{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:700;color:var(--c);
+  padding-bottom:8px;border-bottom:2px solid var(--c);margin-bottom:13px}
+.qcard{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:18px;
+  padding:17px 19px;margin-bottom:10px}
+.qtext{margin:0 0 14px;font-family:var(--disp);font-size:16.5px;line-height:1.36;font-weight:800;letter-spacing:-.025em}
+.qtext.small{font-size:14.5px;font-weight:700;margin-bottom:0}
+.votes{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:9px}
+.vrow{display:grid;grid-template-columns:30px 1fr 62px;gap:12px;align-items:center}
+.vglyph{width:30px;height:30px;border-radius:9px;background:var(--c);display:grid;place-items:center;
+  color:var(--on-opt);flex:none}
+.vtrack{position:relative;height:40px;border-radius:11px;background:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--edge2);overflow:hidden;display:flex;align-items:center}
+.vfill{position:absolute;inset:0 auto 0 0;background:var(--c);opacity:.22;transition:width .5s}
+.vlabel{position:relative;padding-inline:13px;font-size:13.5px;line-height:1.35;z-index:1}
+.vrow.correct .vtrack{box-shadow:inset 0 0 0 2px var(--live)}
+.vrow.correct .vlabel{color:var(--live);font-weight:600}
+.vrow.correct .vn{color:var(--live)}
+.vn{font-size:15px;font-weight:700;text-align:right;color:var(--dim);line-height:1.15}
+.vn em{display:block;font-style:normal;font-family:var(--body);font-size:9px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.who-list{list-style:none;margin:0;padding:12px 0 0;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:7px}
 .who-list li{display:flex;align-items:center;gap:10px;font-size:13px}
-.who-list li span:nth-child(2){flex:1}
-.who-list li.ok span:nth-child(2){color:var(--good)}
-.who-list li.no span:nth-child(2){color:var(--alert)}
-.rk{font-family:var(--mono);font-size:10.5px;color:var(--muted);width:16px;flex:none}
-.who-list .ms{font-family:var(--mono);font-size:12px;color:var(--muted)}
-.who-list .pts{font-family:var(--mono);font-size:12.5px;font-weight:600;min-width:54px;text-align:right}
-.who-list .none{color:var(--muted);font-style:italic}
-.answers{list-style:none;margin:0 0 13px;padding:0;display:grid;gap:8px}
-.answers li{background:var(--paper);border-radius:5px;padding:10px 13px}
-.answers .who{font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px}
-.answers p{margin:0;font-family:var(--serif);font-size:14.5px;line-height:1.58}
-.noanswer{margin:0 0 12px;color:var(--alert);font-size:13.5px;font-style:italic}
+.who-list .wname{flex:1}
+.who-list li.ok .wname{color:var(--live);font-weight:600}
+.who-list li.no .wname{color:var(--wrong)}
+.wopt{display:grid;place-items:center}
+.rk{font-size:10.5px;color:var(--faint);width:16px;flex:none}
+.who-list .ms{font-size:12px;color:var(--faint)}
+.who-list .pts{font-size:12.5px;font-weight:700;min-width:56px;text-align:right}
+.who-list .none{color:var(--faint);font-style:italic}
+.answers{list-style:none;margin:0 0 13px;padding:0;display:flex;flex-direction:column;gap:8px}
+.answers li{background:var(--ink);border-radius:12px;padding:11px 13px}
+.answers .who{font-size:11px;font-weight:700;color:var(--faint);display:block;margin-bottom:4px}
+.answers p{margin:0;font-size:14.5px;line-height:1.55}
+.noanswer{margin:0 0 12px;color:var(--wrong);font-size:13.5px;font-style:italic}
 .qfoot{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap}
 .dims{display:flex;gap:22px;flex-wrap:wrap}
 .dim{display:flex;align-items:center;gap:7px}
-.dimlab{font-size:11px;color:var(--muted);font-weight:500}
+.dimlab{font-size:11px;color:var(--faint);font-weight:700}
 .scorer{display:flex;gap:3px}
-.scorer button{width:28px;height:28px;border:1px solid var(--rule);border-radius:5px;
-  font-family:var(--mono);font-size:13px;color:var(--muted)}
-.scorer button:hover{border-color:var(--ink2)}
-.scorer button.on{background:var(--accent);border-color:var(--accent);color:#fff}
-.scorelab{font-size:12.5px;color:var(--muted);min-width:76px}
-.dseg{display:flex;gap:3px}
-.dseg button{padding:6px 11px;border:1px solid var(--rule);border-radius:5px;
-  font-size:12.5px;color:var(--muted);white-space:nowrap}
-.dseg button:hover{border-color:var(--ink2)}
-.dseg button.on{background:var(--c);border-color:var(--c);color:#fff;font-weight:500}
-.ttx .reveal{font-size:13px;color:var(--accent);text-decoration:underline;text-underline-offset:3px}
-.model{margin:13px 0 0;padding-top:13px;border-top:1px dashed var(--rule);white-space:pre-line;
-  font-family:var(--serif);font-size:14.5px;line-height:1.6;color:var(--ink2)}
-.notes{margin-top:28px}
-.notes label{display:block;font-size:13px;font-weight:500;color:var(--ink2);margin-bottom:7px}
-.nav{display:flex;justify-content:space-between;margin-top:28px;padding-top:22px;border-top:1px solid var(--rule)}
+.scorer button{width:28px;height:28px;border-radius:8px;font-family:var(--mono);font-size:13px;
+  color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge)}
+.scorer button.on{background:var(--signal);color:var(--signal-ink);box-shadow:none;font-weight:700}
+.scorelab{font-size:12.5px;color:var(--faint);min-width:76px}
+.dseg{display:flex;gap:3px;flex-wrap:wrap}
+.dseg button{padding:6px 11px;border-radius:8px;font-size:12.5px;color:var(--dim);
+  box-shadow:inset 0 0 0 1px var(--edge);white-space:nowrap}
+.dseg button.on{background:var(--c);color:#fff;font-weight:700;box-shadow:none}
+.model{margin:13px 0 0;padding-top:13px;border-top:1px solid var(--edge2);white-space:pre-line;
+  font-size:14.5px;line-height:1.6;color:var(--dim)}
+.notes{margin-top:26px}
+.notes label{display:block;font-size:12.5px;font-weight:600;color:var(--dim);margin-bottom:7px}
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:22px;
+  border-top:1px solid var(--edge2);flex-wrap:wrap}
+.confirm{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.confirm .msg{font-size:13px;color:var(--dim)}
 
-/* ---------- room panel ---------- */
-.scrim{position:fixed;inset:0;background:rgba(18,35,42,.38);z-index:30;display:flex;justify-content:flex-end}
-.panel{background:var(--paper);width:min(460px,100%);height:100%;overflow-y:auto;padding:24px 26px 44px;
-  border-left:1px solid var(--rule);box-shadow:-10px 0 32px rgba(0,0,0,.12)}
+/* ---------- seats panel ---------- */
+.scrim{position:fixed;inset:0;background:rgba(10,9,6,.44);z-index:30;display:flex;justify-content:flex-end}
+.panel{background:var(--ink);width:min(480px,100%);height:100%;overflow-y:auto;padding:22px 24px 44px;
+  border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.phead h2{margin:0}
 
 /* ---------- participant ---------- */
-.pmain{display:flex;justify-content:center;padding:22px 16px 80px}
-.pinner{max-width:560px;width:100%}
-.standby{text-align:center;padding:64px 20px}
-.standby.small{padding:30px 20px}
-.pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--accent);
-  margin-bottom:16px;animation:beat 2s ease-in-out infinite}
-@keyframes beat{0%,100%{opacity:.22}50%{opacity:1}}
-.pq{margin-bottom:22px}
-.pqtext{margin:0 0 14px;font-size:18px;line-height:1.42;font-weight:500;letter-spacing:-.005em}
-.opts{display:grid;gap:9px}
-.ttx .opt{display:flex;align-items:center;gap:13px;text-align:left;padding:16px 16px;
-  background:var(--panel);border:1.5px solid var(--rule);border-radius:8px;font-size:15.5px;line-height:1.4}
-.ttx .opt:hover:not(:disabled){border-color:var(--accent)}
-.ttx .opt.dim{opacity:.4}
-.ttx .opt.picked{border-color:var(--accent);background:#E7F1F0;font-weight:500;opacity:1}
-.otext{flex:1}
-.oletter{font-family:var(--mono);font-size:12.5px;font-weight:600;width:26px;height:26px;flex:none;
-  display:grid;place-items:center;border-radius:5px;background:var(--paper);border:1px solid var(--rule);color:var(--muted)}
-.ttx .opt.picked .oletter{background:var(--accent);border-color:var(--accent);color:#fff}
-.sent{margin:11px 0 0;font-size:12.5px;color:var(--accent);text-align:center}
-.sentnote{text-align:center;font-size:13px;color:var(--accent);margin-top:12px}
-.bigpts{font-family:var(--mono);font-size:34px;font-weight:600;color:var(--accent);margin:16px 0 0;text-align:center}
-.myresult{display:grid;gap:10px}
-.rescard{background:var(--panel);border:1px solid var(--rule2);border-left:3px solid var(--muted);
-  border-radius:0 7px 7px 0;padding:15px 17px}
-.rescard.ok{border-left-color:var(--good)}
-.rescard.no{border-left-color:var(--alert)}
-.rescard.miss{opacity:.65}
-.rpick{margin:0 0 7px;font-size:14px;color:var(--ink2)}
-.rline{margin:0;font-size:12.5px;color:var(--muted)}
-.rescard.ok .rline b{color:var(--good)}
-.rescard.no .rline b{color:var(--alert)}
+.pmain{display:flex;justify-content:center;padding:20px 16px 80px}
+.pinner{max-width:560px;width:100%;display:flex;flex-direction:column;gap:16px}
+.condition{margin:0;border-radius:16px;background:var(--slab);padding:18px;
+  box-shadow:inset 0 0 0 1px var(--edge2);font-size:15.5px;line-height:1.6}
+.standby{text-align:center;padding:56px 20px}
+.standby.small{padding:26px 20px}
+.pulse{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--live);
+  margin-bottom:14px;animation:beat 2.2s ease-in-out infinite;flex:none}
+@keyframes beat{0%,100%{opacity:.3}50%{opacity:1}}
+.pq{display:flex;flex-direction:column;gap:13px}
+.pqtext{margin:0;font-family:var(--disp);font-size:21px;line-height:1.28;font-weight:800;letter-spacing:-.03em}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.ttx .opt{position:relative;display:flex;flex-direction:column;gap:11px;padding:15px 15px 14px;
+  border-radius:18px;background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);text-align:left;
+  transition:transform .12s,box-shadow .16s,opacity .2s,background .16s}
+.ttx .opt:hover:not(:disabled){transform:translateY(-2px);box-shadow:inset 0 0 0 1.5px var(--c)}
+.ttx .opt:active:not(:disabled){transform:translateY(0)}
+.ttx .opt:disabled{cursor:default}
+.oglyph{width:34px;height:34px;border-radius:10px;background:var(--c);display:grid;place-items:center;
+  flex:none;color:var(--on-opt)}
+.otxt{font-size:14.5px;font-weight:500;line-height:1.4}
+.oltr{position:absolute;top:15px;right:15px;font-size:11px;font-weight:700;color:var(--faint)}
+.ttx .opt.picked{background:var(--c);box-shadow:inset 0 0 0 1.5px var(--c)}
+.ttx .opt.picked .otxt{color:var(--on-opt);font-weight:600}
+.ttx .opt.picked .oglyph{background:var(--slab);color:var(--c)}
+.ttx .opt.picked .oltr{color:var(--on-opt);opacity:.65}
+.ttx .opt.faded{opacity:.42}
+.lockstamp{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px;border-radius:14px;
+  background:var(--wrong-soft);box-shadow:inset 0 0 0 1.5px var(--wrong-edge);
+  font-family:var(--disp);font-weight:800;color:var(--wrong);font-size:14.5px}
+.sentline{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--live);font-weight:700;margin:0}
+.sentline .tick{width:18px;height:18px;border-radius:50%;background:var(--live);display:grid;
+  place-items:center;flex:none;color:var(--on-opt)}
+.sentnote{text-align:center;font-size:13px;color:var(--live);font-weight:600}
+.myresult{display:flex;flex-direction:column;gap:11px}
+.rescard{background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);border-radius:18px;
+  padding:17px;display:flex;flex-direction:column;gap:11px}
+.rescard.ok{background:var(--live-soft);box-shadow:inset 0 0 0 1.5px var(--live-edge)}
+.rescard.no{background:var(--wrong-soft);box-shadow:inset 0 0 0 1.5px var(--wrong-edge)}
+.rescard.miss{opacity:.7}
+.verdict{display:flex;align-items:center;gap:11px}
+.verdict .badge{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;flex:none;
+  background:var(--dim);color:var(--on-opt)}
+.rescard.ok .badge{background:var(--live)}
+.rescard.no .badge{background:var(--wrong)}
+.verdict b{font-family:var(--disp);font-size:18px;font-weight:800;letter-spacing:-.025em}
+.ptsbig{font-size:40px;font-weight:700;letter-spacing:-.04em;line-height:1;color:var(--signal-text)}
+.metarow{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--dim)}
+.metarow b{color:var(--txt);font-weight:700}
+.keyline{display:flex;gap:9px;align-items:flex-start;font-size:13.5px;color:var(--dim);line-height:1.5}
+.keyline b{color:var(--txt);font-weight:700}
+.kglyph{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;flex:none;
+  color:var(--on-opt);background:var(--c);margin-top:1px}
+.rline{margin:0;font-size:12.5px;color:var(--faint)}
+.totalline{text-align:center;font-size:26px;font-weight:700;color:var(--signal-text);letter-spacing:-.03em}
+
+/* ---------- projector ---------- */
+.screen{min-height:100vh;display:flex;flex-direction:column;background:var(--ink)}
+.projwait{text-align:center;padding:22vh 20px}
+.projtop{display:flex;align-items:center;gap:20px;padding:22px 34px;background:var(--slab);
+  border-bottom:1px solid var(--edge2)}
+.projtop h1{font-size:26px;margin:2px 0 0}
+.projphase{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
+.projphase .pulse{margin:0;width:12px;height:12px}
+.projphase.revealed{color:var(--signal-text)}
+.projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 24px}
+.projlobby{text-align:center;padding:8vh 0}
+.projlobby h2{font-size:40px}
+.projmid{display:flex;gap:36px;align-items:flex-start;flex:1}
+.projleft{flex:1;display:flex;flex-direction:column;gap:22px;min-width:0}
+.projcond{font-size:19px;line-height:1.55;color:var(--dim);max-width:62ch;
+  border-left:3px solid var(--signal);padding-left:16px}
+.projq{display:flex;flex-direction:column;gap:16px}
+.projqtext{font-family:var(--disp);font-size:32px;font-weight:800;line-height:1.16;
+  letter-spacing:-.035em;max-width:28ch}
+.projopts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.projopt{display:flex;align-items:center;gap:13px;padding:14px 16px;border-radius:14px;
+  background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);font-size:17px}
+.projopt.key{box-shadow:inset 0 0 0 2.5px var(--live)}
+.projopt .oglyph{width:32px;height:32px}
+.projopt .otxt{font-size:17px}
+.projopt .on{margin-left:auto;font-size:19px;font-weight:700;color:var(--dim)}
+.projopt.key .on{color:var(--live)}
+.projstrip{display:flex;gap:9px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--edge2);
+  padding-top:18px;margin-top:auto}
+.projstrip .lab{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:800}
+.jcode{display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:11px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
+.jcode b{font-size:16px;font-weight:700;letter-spacing:.1em}
+.jcode.in{background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge);color:var(--live)}
 
 /* ---------- report ---------- */
-.report{display:flex;justify-content:center;padding:34px 24px 96px}
-.repinner{max-width:790px;width:100%}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:1px;background:var(--rule);
-  border:1px solid var(--rule);border-radius:7px;overflow:hidden;margin:20px 0 8px}
-.kpis div{background:var(--panel);padding:15px 16px}
-.kpis b{display:block;font-family:var(--mono);font-size:25px;font-weight:600;
-  font-variant-numeric:tabular-nums;letter-spacing:-.02em}
-.kpis span{font-size:11.5px;color:var(--muted);display:block;margin-top:4px}
-.board{list-style:none;margin:0;padding:0;background:var(--panel);border:1px solid var(--rule);
-  border-radius:7px;overflow:hidden}
-.board li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--rule2);font-size:14px}
+.report{display:flex;justify-content:center;padding:30px 22px 96px}
+.repinner{max-width:820px;width:100%}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:11px;margin:18px 0 6px}
+.kpis>div{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;padding:15px 17px}
+.kpis b{display:block;font-size:26px;font-weight:700;letter-spacing:-.035em;line-height:1.1}
+.kpis span{font-size:10.5px;color:var(--faint);display:block;margin-top:6px;letter-spacing:.09em;
+  text-transform:uppercase;font-weight:700}
+.board{list-style:none;margin:0;padding:0;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);
+  border-radius:14px;overflow:hidden}
+.board li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge2);font-size:14px}
 .board li:last-child{border-bottom:none}
-.board li:first-child{background:#F4F8F4}
-.rank{font-family:var(--mono);font-size:13px;color:var(--muted);width:20px}
-.bname{flex:1}
-.board b{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.tbl{width:100%;border-collapse:collapse;font-size:14px;background:var(--panel);
-  border:1px solid var(--rule);border-radius:7px;overflow:hidden}
-.tbl th{text-align:left;font-size:11.5px;font-weight:600;color:var(--muted);padding:10px 15px;border-bottom:1px solid var(--rule)}
-.tbl td{padding:11px 15px;border-bottom:1px solid var(--rule2)}
-.tbl tr:last-child td{border-bottom:none}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:9px;flex:none}
-.repactions{display:flex;gap:12px;margin-top:32px;flex-wrap:wrap}
-.crash{max-width:490px;margin:88px auto;padding:0 24px;text-align:center}
-.crash pre{text-align:left;background:var(--panel);border:1px solid var(--rule);border-radius:6px;
-  padding:13px;font-size:12px;overflow:auto;margin:18px 0;color:var(--alert)}
+.board li.first{background:var(--rise)}
+.rank{font-size:12px;color:var(--faint);width:24px}
+.bname{flex:1;font-weight:600;min-width:100px}
+.bbar{flex:1;height:7px;background:var(--edge2);border-radius:4px;overflow:hidden;max-width:200px}
+.bbar i{display:block;height:100%;border-radius:4px}
+.board b{font-weight:700;min-width:64px;text-align:right}
+.tblwrap{overflow-x:auto;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px}
+.tbl{width:100%;border-collapse:collapse;font-size:14px}
+.tbl th{text-align:left;font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);padding:13px 15px 9px}
+.tbl td{padding:11px 15px;border-top:1px solid var(--edge2)}
+.repactions{display:flex;gap:12px;margin-top:30px;flex-wrap:wrap}
+.crash{max-width:500px;margin:70px auto;padding:0 24px;text-align:center}
+.crash pre{text-align:left;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:10px;
+  padding:13px;font-size:12px;overflow:auto;margin:18px 0;color:var(--wrong)}
 
-@media (max-width:860px){
+@media (max-width:900px){
   .run{grid-template-columns:1fr}
-  .rail{position:static;height:auto;border-right:none;border-bottom:1px solid var(--rule)}
-  .tl{display:flex;overflow-x:auto;padding:10px}
+  .rail{position:static;height:auto;border-right:none;border-bottom:1px solid var(--edge2)}
+  .tl{display:flex;overflow-x:auto;padding:10px;gap:7px}
   .tlhead{display:none}
-  .tlrow::before{display:none}
-  .tlrow button{grid-template-columns:auto auto;padding:8px 12px;border:1px solid var(--rule);
-    border-radius:6px;background:var(--panel)}
-  .tltext,.tlunits{display:none}
+  .tlrow button{grid-template-columns:auto auto;border-radius:9px;padding:8px 12px;background:var(--slab);
+    box-shadow:inset 0 0 0 1px var(--edge2);width:auto}
+  .tltext{display:none}
   .stage{padding:22px 16px 80px}
-  .scenario{font-size:17px;padding:18px 20px}
   .setgrid{grid-template-columns:1fr}
-  .steps{display:none}
-  .actbar{flex-wrap:wrap}
-  .actbar .primary{width:100%;margin-left:0}
-  .lobbyhead{flex-direction:column;gap:10px}
-  .joincount{text-align:left}
+  .actbar .btn{width:100%;margin-left:0}
+  .projmid{flex-direction:column}
+  .projopts{grid-template-columns:1fr}
+  .projqtext{font-size:24px}
+  .projtop,.projbody{padding-inline:18px}
+}
+@media (max-width:420px){
+  .opts{grid-template-columns:1fr}
+  .slot{width:52px;height:66px;font-size:26px}
 }
 @media (prefers-reduced-motion:reduce){.ttx *{animation:none!important;transition:none!important}}
 `;
