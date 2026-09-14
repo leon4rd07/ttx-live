@@ -1,0 +1,477 @@
+/* ------------------------------------------------------------------ *
+ * TTX server
+ *
+ * One exercise, many join codes. Each business unit gets its own code,
+ * so entering JEXN puts you in Risk Management without picking from a
+ * dropdown you could get wrong.
+ *
+ * Timing and scoring are computed here, not on the client. The clock
+ * starts when the facilitator opens the inject, so a slow phone doesn't
+ * change anyone's score.
+ * ------------------------------------------------------------------ */
+
+import express from "express";
+import { WebSocketServer } from "ws";
+import { createServer } from "http";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PORT = process.env.PORT || 3000;
+const SNAPSHOT = process.env.SNAPSHOT_PATH || join(__dirname, "rooms.json");
+const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
+
+/* Optional facilitator passcode. Unset means anyone reaching /host can run an
+   exercise — fine for a dry run, not for one with real content. */
+const HOST_KEY = (process.env.HOST_KEY || "").trim();
+
+const app = express();
+const server = createServer(app);
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+app.use(express.static(join(__dirname, "dist")));
+app.get("/healthz", (_, res) => res.send("ok"));
+
+/* ------------------------------ state ------------------------------ */
+
+const rooms = new Map();      // roomId -> room
+const codeIndex = new Map();  // JOIN CODE -> { roomId, peran }
+const sockets = new Map();    // ws -> { roomId, pid, isHost }
+
+const DEFAULTS = {
+  mode: "auto",       // auto = multiple choice, scored. manual = facilitator scores
+  timeLimit: 60,      // seconds to answer, 0 for none
+  points: 1000,
+  speedBonus: true,
+  autoReveal: true,
+  showNames: true,
+  showUnits: true,
+  leaderboard: true,
+};
+
+/* Answer time for an inject: its own override, else the global default. */
+const limitFor = (room, injId) => {
+  const v = room.times?.[injId];
+  return v === "" || v == null ? room.settings.timeLimit : Number(v);
+};
+
+function restore() {
+  if (!existsSync(SNAPSHOT)) return;
+  try {
+    const saved = JSON.parse(readFileSync(SNAPSHOT, "utf8"));
+    const now = Date.now();
+    for (const r of saved) {
+      if (now - r.touched > ROOM_TTL_MS) continue;
+      rooms.set(r.id, r);
+      for (const [code, peran] of Object.entries(r.codes || {})) {
+        codeIndex.set(code, { roomId: r.id, peran });
+      }
+    }
+    console.log(`restored ${rooms.size} room(s)`);
+  } catch (e) {
+    console.warn("restore failed:", e.message);
+  }
+}
+
+let snapPending = false;
+const markSnapshot = () => { snapPending = true; };
+function snapshot() {
+  try { writeFileSync(SNAPSHOT, JSON.stringify([...rooms.values()])); }
+  catch (e) { console.warn("snapshot failed:", e.message); }
+}
+
+function dropRoom(room) {
+  for (const code of Object.keys(room.codes || {})) codeIndex.delete(code);
+  rooms.delete(room.id);
+}
+
+function sweep() {
+  const now = Date.now();
+  for (const room of [...rooms.values()]) {
+    if (now - room.touched > ROOM_TTL_MS) dropRoom(room);
+  }
+}
+
+function newCode() {
+  let c;
+  do { c = Array.from({ length: 4 }, () => ALPHABET[Math.floor(Math.random() * 32)]).join(""); }
+  while (codeIndex.has(c));
+  return c;
+}
+
+const send = (ws, msg) => { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); };
+
+const revealTimers = new Map(); // roomId -> timeout
+function clearReveal(roomId) {
+  const t = revealTimers.get(roomId);
+  if (t) { clearTimeout(t); revealTimers.delete(roomId); }
+}
+function armReveal(room) {
+  clearReveal(room.id);
+  const inj = room.deck.injects[room.state.activeIdx];
+  const limit = limitFor(room, inj?.id);
+  if (!room.settings.autoReveal || !limit) return;
+  const fireIn = limit * 1000 + 1200; // small grace for in-flight answers
+  revealTimers.set(room.id, setTimeout(() => {
+    const r = rooms.get(room.id);
+    if (!r || r.state.phase !== "open") return;
+    r.state = { ...r.state, phase: "revealed", keyShown: false };
+    toRoom(r.id, { t: "state", ...r.state });
+    toRoom(r.id, { t: "roster", people: roster(r) }, true);
+    markSnapshot();
+  }, fireIn));
+}
+
+/* staffOnly covers the facilitator and the projector view: both need the roster,
+   participants must never see it. */
+function toRoom(roomId, msg, staffOnly = false) {
+  const raw = JSON.stringify(msg);
+  for (const [ws, s] of sockets) {
+    if (s.roomId !== roomId) continue;
+    if (staffOnly && !s.isHost && !s.isScreen) continue;
+    if (ws.readyState === 1) ws.send(raw);
+  }
+}
+
+/* A unit's seat is held while some socket is bound to its pid. */
+const seatHolder = (room, peran) => Object.values(room.people).find((p) => p.peran === peran);
+const pidLive = (pid) => { for (const s of sockets.values()) if (s.pid === pid) return true; return false; };
+
+/* Roster as the facilitator and projector see it: one entry per unit, with
+   whether that unit's device is actually connected right now. */
+const roster = (room) => Object.values(room.people).map((p) => ({ ...p, live: pidLive(p.pid) }));
+
+/* Coalesce roster pushes: a burst of answers becomes one update. */
+const dirty = new Set();
+setInterval(() => {
+  for (const id of dirty) {
+    const room = rooms.get(id);
+    if (room) toRoom(id, { t: "roster", people: roster(room) }, true);
+  }
+  dirty.clear();
+}, 1200);
+const markDirty = (id) => dirty.add(id);
+
+/* Participants get only their own unit's questions — no peeking. */
+function deckFor(room, peran) {
+  return {
+    roles: room.deck.roles,
+    injects: room.deck.injects.map((i) => ({
+      id: i.id, siklus: i.siklus, condition: i.condition, window: i.window,
+      limit: limitFor(room, i.id),
+      questions: i.questions
+        .filter((q) => q.peran === peran)
+        .map((q) => ({
+          qid: q.qid, peran: q.peran, text: q.text, type: q.type,
+          // never send which option is correct
+          choices: (q.choices || []).map((c) => ({ text: c.text })),
+        })),
+    })),
+  };
+}
+
+/* The projector gets every unit's questions but never the correct flags —
+   the key reaches it through sendKey, at the same moment as the phones. */
+function screenDeck(room) {
+  return {
+    roles: room.deck.roles,
+    injects: room.deck.injects.map((i) => ({
+      id: i.id, siklus: i.siklus, condition: i.condition, roles: i.roles,
+      limit: limitFor(room, i.id),
+      questions: i.questions.map((q) => ({
+        qid: q.qid, peran: q.peran, text: q.text, type: q.type,
+        choices: (q.choices || []).map((c) => ({ text: c.text })),
+      })),
+    })),
+  };
+}
+
+/* Participants only learn the key once answering has closed. */
+function sendKey(room) {
+  const inj = room.deck.injects[room.state.activeIdx];
+  if (!inj) return;
+  const key = {};
+  inj.questions.forEach((q) => {
+    const i = (q.choices || []).findIndex((c) => c.correct);
+    if (i >= 0) key[q.qid] = { i, text: q.choices[i].text };
+  });
+  toRoom(room.id, { t: "key", injectId: inj.id, key });
+}
+
+/* Quizizz-style: correct answers earn full points, faster ones earn more. */
+function scoreAnswer(room, q, choiceIdx, elapsedMs, limit) {
+  const s = room.settings;
+  if (s.mode !== "auto" || q.type !== "choice") return { correct: null, points: 0 };
+  const correctIdx = (q.choices || []).findIndex((c) => c.correct);
+  if (correctIdx < 0) return { correct: null, points: 0 };
+  const correct = choiceIdx === correctIdx;
+  if (!correct) return { correct: false, points: 0 };
+  if (!s.speedBonus || !limit) return { correct: true, points: s.points };
+  const frac = Math.max(0, 1 - elapsedMs / (limit * 1000));
+  return { correct: true, points: Math.round(s.points * (0.5 + 0.5 * frac)) };
+}
+
+/* --------------------------- connections --------------------------- */
+
+wss.on("connection", (ws) => {
+  sockets.set(ws, {});
+  send(ws, { t: "hello", keyRequired: !!HOST_KEY });
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
+
+  ws.on("message", (raw) => {
+    let m;
+    try { m = JSON.parse(raw); } catch (e) { return; }
+
+    const byId = m.roomId ? rooms.get(m.roomId) : null;
+    if (byId) byId.touched = Date.now();
+
+    switch (m.t) {
+      /* ---- facilitator opens an exercise ---- */
+      case "host": {
+        if (HOST_KEY && String(m.key || "") !== HOST_KEY) return send(ws, { t: "denied" });
+        const id = newCode() + newCode();
+        const settings = { ...DEFAULTS, ...(m.settings || {}) };
+        const codes = {};
+        for (const [peran, wanted] of Object.entries(m.codes || {})) {
+          let c = String(wanted || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+          if (!c || codeIndex.has(c) || codes[c]) c = newCode();
+          codes[c] = peran;
+        }
+        for (const peran of m.deck.roles) {
+          if (!Object.values(codes).includes(peran)) codes[newCode()] = peran;
+        }
+        const room = { id, deck: m.deck, settings, codes, people: {},
+          times: m.times || {},
+          state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null }, touched: Date.now() };
+        rooms.set(id, room);
+        for (const [c, p] of Object.entries(codes)) codeIndex.set(c, { roomId: id, peran: p });
+        sockets.set(ws, { roomId: id, isHost: true });
+        send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times, state: room.state });
+        markSnapshot();
+        break;
+      }
+
+      /* ---- facilitator returns after a refresh ---- */
+      case "rehost": {
+        if (!byId) return send(ws, { t: "gone" });
+        sockets.set(ws, { roomId: byId.id, isHost: true });
+        send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
+          settings: byId.settings, times: byId.times || {}, state: byId.state });
+        send(ws, { t: "roster", people: roster(byId) });
+        break;
+      }
+
+      case "settings": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
+        if (m.times) byId.times = { ...byId.times, ...m.times };
+        toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times });
+        markSnapshot();
+        break;
+      }
+
+      /* ---- a code tells us the room, the unit, and whether its seat is free ---- */
+      case "peek": {
+        const hit = codeIndex.get(String(m.code || "").toUpperCase());
+        const room = hit && rooms.get(hit.roomId);
+        if (!room) return send(ws, { t: "nosuch" });
+        const held = seatHolder(room, hit.peran);
+        send(ws, { t: "codeok", peran: hit.peran,
+          taken: !!held,
+          holder: held ? held.name : "",
+          sinceMs: held ? Date.now() - (held.claimedAt || 0) : 0,
+          live: held ? pidLive(held.pid) : false });
+        break;
+      }
+
+      /* ---- one seat per business unit ----
+         The code is a seat, not a password. The first device to use it holds
+         the unit; a second device is refused rather than quietly added, and
+         can take the seat over — which is how a unit that refreshed, dropped
+         its socket or swapped device gets back in with its answers intact. */
+      case "join": {
+        const code = String(m.code || "").toUpperCase();
+        const hit = codeIndex.get(code);
+        const room = hit && rooms.get(hit.roomId);
+        if (!room) return send(ws, { t: "nosuch" });
+        room.touched = Date.now();
+
+        const held = seatHolder(room, hit.peran);
+        if (held && !m.takeover) {
+          return send(ws, { t: "seattaken", peran: hit.peran, name: held.name,
+            sinceMs: Date.now() - (held.claimedAt || 0), live: pidLive(held.pid) });
+        }
+
+        let pid;
+        if (held) {
+          pid = held.pid;                       // same seat, same answers, same points
+          for (const [sock, s] of sockets) {
+            if (s.pid === pid && sock !== ws) { send(sock, { t: "evicted" }); sockets.set(sock, {}); }
+          }
+          held.name = (m.name || "").trim() || held.name;
+          held.claimedAt = Date.now();
+        } else {
+          pid = `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+          room.people[pid] = { pid, code, peran: hit.peran,
+            name: (m.name || "").trim() || hit.peran,
+            answers: {}, total: 0, claimedAt: Date.now() };
+        }
+
+        sockets.set(ws, { roomId: room.id, pid });
+        send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
+          deck: deckFor(room, hit.peran), state: room.state,
+          settings: room.settings, me: room.people[pid] });
+        if (room.state.keyShown) sendKey(room); // joined after the key went out
+        markDirty(room.id);
+        markSnapshot();
+        break;
+      }
+
+      case "rejoin": {
+        const room = byId;
+        const me = room?.people[m.pid];
+        if (!room || !me) return send(ws, { t: "gone" });
+        /* Someone took this seat over while we were away. Don't let the old
+           device silently reappear alongside the new one. */
+        if (m.seat && me.claimedAt && Number(m.seat) !== me.claimedAt) return send(ws, { t: "evicted" });
+        sockets.set(ws, { roomId: room.id, pid: m.pid });
+        send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
+          deck: deckFor(room, me.peran), state: room.state,
+          settings: room.settings, me });
+        if (room.state.keyShown) sendKey(room);
+        markDirty(room.id);
+        break;
+      }
+
+      /* ---- the projector view attaches read-only ---- */
+      case "watch": {
+        if (!byId) return send(ws, { t: "gone" });
+        sockets.set(ws, { roomId: byId.id, isScreen: true });
+        send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
+          settings: byId.settings, state: byId.state, codes: byId.codes });
+        send(ws, { t: "roster", people: roster(byId) });
+        if (byId.state.keyShown) sendKey(byId);
+        break;
+      }
+
+      /* ---- facilitator frees a unit's seat ---- */
+      case "release": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        const held = seatHolder(byId, m.peran);
+        if (!held) return;
+        for (const [sock, s] of sockets) {
+          if (s.pid === held.pid) { send(sock, { t: "evicted" }); sockets.set(sock, {}); }
+        }
+        delete byId.people[held.pid];
+        toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
+        markSnapshot();
+        break;
+      }
+
+      /* ---- phase changes; the answer clock starts here ---- */
+      case "state": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
+        const inj0 = byId.deck.injects[m.activeIdx];
+        byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
+          keyShown: false,
+          limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit };
+        toRoom(byId.id, { t: "state", ...byId.state });
+        if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
+        markDirty(byId.id);
+        markSnapshot();
+        break;
+      }
+
+      case "answer": {
+        const room = byId;
+        if (!room) return;
+        const p = room.people[m.pid];
+        if (!p) return;
+        if (room.state.phase !== "open") return send(ws, { t: "locked" });
+
+        const inj = room.deck.injects[room.state.activeIdx];
+        const elapsed = room.state.openedAt ? Date.now() - room.state.openedAt : 0;
+        const limit = limitFor(room, inj?.id);
+        if (limit && elapsed > limit * 1000 + 800) return send(ws, { t: "timeup" });
+
+        for (const [qid, val] of Object.entries(m.answers || {})) {
+          const q = inj?.questions.find((x) => x.qid === qid);
+          if (!q || q.peran !== p.peran) continue;
+          if (q.type === "choice" && room.settings.mode === "auto") {
+            const idx = Number(val);
+            const { correct, points } = scoreAnswer(room, q, idx, elapsed, limit);
+            const prev = p.answers[qid];
+            p.answers[qid] = { choice: idx, text: q.choices[idx]?.text || "",
+              ms: elapsed, correct, points, changed: (prev?.changed || 0) + (prev ? 1 : 0) };
+          } else {
+            const text = String(val).trim();
+            if (!text) continue;
+            p.answers[qid] = { text, ms: elapsed, correct: null, points: 0, locked: false };
+          }
+        }
+        for (const qid of Object.keys(m.answers || {})) {
+          if (!p.answers[qid]) continue;
+          const earlier = Object.values(room.people)
+            .filter((o) => o.pid !== p.pid && o.answers[qid] && o.answers[qid].ms < p.answers[qid].ms).length;
+          p.answers[qid].rank = earlier + 1;
+        }
+        p.total = Object.values(p.answers).reduce((a, b) => a + (b.points || 0), 0);
+        send(ws, { t: "ack", me: p });
+        markDirty(room.id);
+        markSnapshot();
+        break;
+      }
+
+      case "showkey": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        byId.state = { ...byId.state, keyShown: true };
+        toRoom(byId.id, { t: "state", ...byId.state });
+        sendKey(byId);
+        markSnapshot();
+        break;
+      }
+
+      case "leave": {
+        const room = byId;
+        if (!room) return send(ws, { t: "left" });
+        delete room.people[m.pid];
+        sockets.set(ws, {});
+        send(ws, { t: "left" });
+        markDirty(room.id);
+        markSnapshot();
+        break;
+      }
+
+      case "end": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        toRoom(byId.id, { t: "ended" });
+        clearReveal(byId.id);
+        dropRoom(byId);
+        snapshot();
+        break;
+      }
+    }
+  });
+
+  ws.on("close", () => sockets.delete(ws));
+});
+
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) { ws.terminate(); sockets.delete(ws); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30000);
+
+setInterval(() => { if (snapPending) { snapshot(); snapPending = false; } }, 8000);
+setInterval(() => { sweep(); snapshot(); }, 60000);
+
+app.get("*", (_, res) => res.sendFile(join(__dirname, "dist", "index.html")));
+
+restore();
+server.listen(PORT, () => console.log(`TTX server on :${PORT}`));
