@@ -2151,6 +2151,10 @@ const CSS = `
   --u1:#C93A54; --u2:#2F62D6; --u3:#A96C0C; --u4:#0E7F66; --u5:#6C45C4; --u6:#1B7A92;
   --on-unit:#FFFFFF;
   --shadow:0 20px 44px -26px rgba(30,26,10,.34);
+  /* Logo size lives here — raise or lower these two and every surface follows.
+     If your file has built-in whitespace around the mark it will still look
+     small; trim the artboard in the SVG, or push these up. */
+  --logo-h:34px; --logo-h-big:60px;
   --disp:'Archivo',"Helvetica Neue",system-ui,sans-serif;
   --body:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;
   --mono:'JetBrains Mono',ui-monospace,"SFMono-Regular",monospace;
@@ -2244,14 +2248,15 @@ html,body{background:var(--ink)}
 .ttx .link.quiet{color:var(--faint);font-size:12.5px;font-weight:500}
 
 /* ---------- header ---------- */
-.bar{display:flex;align-items:center;gap:14px;padding:11px 16px;min-height:58px;background:var(--slab);
+.bar{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:62px;background:var(--slab);
   border-bottom:1px solid var(--edge2);position:sticky;top:0;z-index:10;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:11px;font-size:14px;min-width:0}
 .wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
 .barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
 .build{font-family:var(--mono);font-size:10px;opacity:.55}
-.brandlogo{height:22px;width:auto;max-width:132px;display:block;flex:none;object-fit:contain}
-.brandlogo.big{height:38px;max-width:190px}
+.brandlogo{height:var(--logo-h);width:auto;max-width:240px;display:block;flex:none;
+  object-fit:contain;object-position:left center}
+.brandlogo.big{height:var(--logo-h-big);max-width:380px}
 .offline{color:var(--wrong);font-weight:700;font-size:12px}
 .crumb{color:var(--faint);font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
 .injno{font-family:var(--disp);font-weight:800;white-space:nowrap;font-size:16px;letter-spacing:-.03em}
@@ -2671,7 +2676,7 @@ html,body{background:var(--ink)}
   .projtop,.projbody{padding-inline:18px}
 }
 @media (max-width:420px){
-  .brandlogo{height:18px;max-width:96px}
+  .ttx{--logo-h:26px}
   .opts{grid-template-columns:1fr}
   .slot{width:52px;height:66px;font-size:26px}
 }
