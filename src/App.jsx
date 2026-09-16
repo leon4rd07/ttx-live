@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b20";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b21";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -43,10 +43,11 @@ const SHAPES = {
   square: "M3.5 3.5h17v17h-17z",
 };
 const OPT_SHAPES = ["triangle", "diamond", "circle", "square"];
+const OPT_NAMES_ID = ["segitiga", "wajik", "bulat", "kotak"];
 const OPT_VAR = ["var(--oA)", "var(--oB)", "var(--oC)", "var(--oD)"];
 const optOf = (i) => {
   const k = ((i % 4) + 4) % 4;
-  return { shape: OPT_SHAPES[k], name: OPT_SHAPES[k], c: OPT_VAR[k], ltr: String.fromCharCode(65 + i) };
+  return { shape: OPT_SHAPES[k], name: OPT_NAMES_ID[k], c: OPT_VAR[k], ltr: String.fromCharCode(65 + i) };
 };
 const Glyph = ({ shape, size = 16 }) => (
   <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
@@ -63,12 +64,28 @@ function monogram(s) {
   return w[0].slice(0, 2).toUpperCase();
 }
 
-const SCORE_LABELS = ["Not addressed", "Partial", "Adequate", "Strong"];
+/* Which kind of question this is, said out loud on every surface. Without this
+   a unit that happens to be asked only single-choice never learns the others exist. */
+const TYPE_LABEL = {
+  choice: "Pilihan tunggal",
+  checkbox: "Pilih semua yang sesuai",
+  open: "Esai",
+};
+const TYPE_HINT = {
+  choice: "Pilih satu jawaban.",
+  checkbox: "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.",
+  open: "Jawaban teks bebas, dinilai fasilitator setelah diskusi.",
+};
+const TypeBadge = ({ type }) => (
+  <span className={`typebadge ${type}`}>{TYPE_LABEL[type] || type}</span>
+);
+
+const SCORE_LABELS = ["Tidak dijawab", "Sebagian", "Memadai", "Kuat"];
 const DECISION_OPTS = [
-  { k: "reached", label: "Decided", color: "var(--live)" },
-  { k: "deferred", label: "Deferred", color: "var(--warn)" },
-  { k: "none", label: "No decision", color: "var(--wrong)" },
-  { k: "na", label: "N/A", color: "var(--faint)" },
+  { k: "reached", label: "Diputuskan", color: "var(--live)" },
+  { k: "deferred", label: "Ditunda", color: "var(--warn)" },
+  { k: "none", label: "Tidak ada keputusan", color: "var(--wrong)" },
+  { k: "na", label: "Tidak relevan", color: "var(--faint)" },
 ];
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -76,11 +93,11 @@ const rand = (n = 4) => Array.from({ length: n }, () => ALPHABET[Math.floor(Math
 const fmt = (s) => `${Math.floor((s || 0) / 60)}:${String(Math.floor(s || 0) % 60).padStart(2, "0")}`;
 const fmtAgo = (ms) => {
   const m = Math.floor((ms || 0) / 60000);
-  if (m < 1) return "less than a minute";
-  if (m < 60) return `${m} min`;
-  return `${Math.floor(m / 60)} h`;
+  if (m < 1) return "kurang dari semenit";
+  if (m < 60) return `${m} menit`;
+  return `${Math.floor(m / 60)} jam`;
 };
-const ordinal = (n) => (n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th");
+const nth = (n) => `ke-${n}`;
 
 function nukeAll() {
   try {
@@ -106,10 +123,11 @@ function applyTheme(mode) {
    where the press will take you, not where you are. */
 function ThemeToggle() {
   const dark = useIsDark();
-  const next = dark ? "light" : "dark";
+  const next = dark ? "light" : "dark";  // token value, not shown to anyone
   return (
     <button className="themebtn" onClick={() => applyTheme(next)}
-      title={`Switch to ${next} theme`} aria-label={`Switch to ${next} theme`}>
+      title={dark ? "Ganti ke tema terang" : "Ganti ke tema gelap"}
+      aria-label={dark ? "Ganti ke tema terang" : "Ganti ke tema gelap"}>
       {dark ? (
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
           strokeWidth="2" strokeLinecap="round">
@@ -183,7 +201,7 @@ function BrandLogo({ className = "" }) {
 /* One fixed line in the bottom-left corner, on every screen. Small and quiet:
    there for anyone who looks, out of the way of anyone running the exercise. */
 const AiNote = () => (
-  <p className="aidisc">Built in-house with AI assistance</p>
+  <p className="aidisc">Dibuat internal dengan bantuan AI</p>
 );
 
 /* ---------------------------- transport ---------------------------- */
@@ -312,7 +330,7 @@ const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim
   }));
 
 function buildModel(rows) {
-  if (!rows.length) return { injects: [], roles: [], warnings: ["The sheet has no rows."] };
+  if (!rows.length) return { injects: [], roles: [], warnings: ["Sheet ini tidak berisi baris data."] };
   const hmap = {};
   Object.keys(rows[0]).forEach((k) => {
     const hit = HEADER_ALIASES[normKey(k)];
@@ -320,7 +338,10 @@ function buildModel(rows) {
   });
   const warnings = [];
   ["inject", "peran", "question"].forEach((f) => {
-    if (!hmap[f]) warnings.push(`No column matched "${f}". Check the header row spelling.`);
+    if (!hmap[f]) {
+      const NAMA = { inject: "Inject No.", peran: "Peran", question: "Pertanyaan" };
+      warnings.push(`Tidak ada kolom yang cocok untuk "${NAMA[f] || f}". Periksa ejaan baris header.`);
+    }
   });
   const get = (row, f) => (hmap[f] ? String(row[hmap[f]] ?? "").trim() : "");
 
@@ -385,14 +406,14 @@ function buildModel(rows) {
   const allQ = injects.flatMap((i) => i.questions);
   const mc = allQ.filter((q) => q.type === "choice" || q.type === "checkbox").length;
   if (badCheck.length) {
-    warnings.push(`${[...new Set(badCheck)].join(", ")}: marked as checkbox but the Answer cell has no options, so it falls back to an essay question.`);
+    warnings.push(`Inject ${[...new Set(badCheck)].join(", ")}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.`);
   }
   if (noKey > 0) {
-    warnings.push(`${noKey} multiple-choice question${noKey > 1 ? "s have" : " has"} no correct option marked. Put * at the start of the right answer, or those questions score zero.`);
+    warnings.push(`${noKey} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.`);
   }
   injects.forEach((i) => {
-    if (i.splitNarrative) warnings.push(`Inject ${i.id} has more than one Condition. Only the first is shown.`);
-    if (!i.condition) warnings.push(`Inject ${i.id} has no Condition text.`);
+    if (i.splitNarrative) warnings.push(`Inject ${i.id} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.`);
+    if (!i.condition) warnings.push(`Inject ${i.id} tidak punya teks Kondisi.`);
   });
   /* Units are not asked the same number of questions, so say so before the run
      rather than letting it surface as a lopsided leaderboard afterwards. */
@@ -406,19 +427,20 @@ function buildModel(rows) {
   if (counts.length > 1 && Math.max(...counts) !== Math.min(...counts)) {
     const spread = Object.entries(perRole).sort((a, b) => b[1] - a[1])
       .map(([r, n]) => `${r} ${n}`).join(", ");
-    warnings.push(`Units are asked different numbers of scored questions (${spread}). Points alone would favour whoever gets more, so the leaderboard ranks by percentage of each unit's own maximum. Raw points are still shown.`);
+    warnings.push(`Jumlah pertanyaan berskor per unit tidak sama (${spread}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.`);
   }
   return { injects, roles, warnings, mcCount: mc };
 }
 
 const SAMPLE = [
-  { "Inject No.": "1", Siklus: "Siklus 1 - Detection", Window: "2", Condition: "At 02:14 the SOC monitoring tool raises a burst of failed authentications against the core banking admin portal, originating from an internal subnet assigned to a third-party maintenance vendor. The on-call analyst has not yet escalated.", Peran: "SOC, IT Operations", Question: "What is your first action in the next 15 minutes?", Answer: "A. Wait for a second alert before acting\n*B. Verify the alert, disable the vendor account, notify the IR lead\nC. Call the vendor and ask what they are doing\nD. Open a ticket and hand over at shift change" },
-  { "Inject No.": "", Siklus: "", Condition: "", Peran: "Vendor Management", Question: "Do you have current after-hours contact details and a contractual notification window for this vendor?", Answer: "A. No, we would have to wait for business hours\n*B. Yes, both are in the contract register and reachable now\nC. We have a contact but no defined window" },
-  { "Inject No.": "2", Siklus: "Siklus 1 - Detection", Window: "1.5", Condition: "Thirty minutes later the vendor account is confirmed compromised. Logs show successful access to a database holding customer identity documents. The volume of records touched is not yet known.", Peran: "Risk Management", Tipe: "pg", Question: "Has this crossed your threshold for declaring a major incident?", Answer: "A. Not yet, wait for the record count\n*B. Yes, declare immediately on confirmed unauthorised access to customer data\nC. Escalate to the CISO for a decision\nD. Log it as a security event and review at the weekly forum" },
-  { "Inject No.": "", Siklus: "", Condition: "", Peran: "SOC", Tipe: "checkbox", Question: "Which of these must be preserved before you rebuild the host? Tick all that apply.", Answer: "*A. Authentication logs for the vendor account\n*B. A memory image of the affected host\nC. The vendor's own ticket history\n*D. Database access logs for the period" },
-  { "Inject No.": "", Siklus: "", Condition: "", Peran: "Hukum & Kepatuhan", Question: "What regulatory notification clock has now started?", Answer: "*A. The clock started at confirmation of unauthorised access to personal data\nB. It starts once the record count is final\nC. It starts when the board is briefed" },
-  { "Inject No.": "3", Siklus: "Siklus 2 - Response", Window: "2", Condition: "A journalist emails corporate communications at 08:40 asking to confirm a data breach affecting customer identity documents. They cite a post on a criminal forum and want a response within two hours.", Peran: "Corporate Communications, Hukum & Kepatuhan", Question: "What goes in the first response?", Answer: "A. A full account of what happened so far\n*B. A holding statement, legally reviewed, from one named spokesperson\nC. No response until the investigation closes" },
-  { "Inject No.": "", Siklus: "", Condition: "", Peran: "Executive", Question: "Do you notify the board now or wait for confirmed scope?", Answer: "*A. Now, covering what is known, what is not, and decisions taken\nB. Wait until scope is confirmed\nC. Delegate to the CISO at the next scheduled meeting" },
+  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n*B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\nC. Menelepon vendor dan menanyakan aktivitas mereka\nD. Membuat tiket dan menyerahkan saat pergantian shift" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?", Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati" },
+  { "Inject No.": "2", Siklus: "Siklus 1 - Deteksi", Waktu: "1.5", Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.", Peran: "Risk Management", Tipe: "pg", Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?", Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox", Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.", Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "", Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?", Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
+  { "Inject No.": "3", Siklus: "Siklus 2 - Respons", Waktu: "2", Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.", Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg", Pertanyaan: "Apa yang masuk dalam respons pertama?", Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai", Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.", Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "", Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?", Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
 ];
 
 /* ------------------------- crash containment ------------------------- */
@@ -430,14 +452,14 @@ class Boundary extends React.Component {
     if (!this.state.err) return this.props.children;
     return (
       <div className="crash">
-        <h1>Something broke</h1>
+        <h1>Ada yang rusak</h1>
         <p className="muted">
-          Try clearing first. If it returns immediately, it's a fault in the app
-          rather than your device — send this message to whoever runs the exercise.
+          Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi,
+          bukan perangkat Anda — kirimkan pesan ini ke penyelenggara latihan.
         </p>
         <pre>{String(this.state.err?.message || this.state.err)}</pre>
         <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>
-          Clear and start fresh
+          Bersihkan dan mulai ulang
         </button>
       </div>
     );
@@ -489,8 +511,10 @@ function Ring({ openedAt, limit, size = "s72", cap }) {
         <circle className="rfill" cx="60" cy="60" r="52"
           style={{ strokeDasharray: `${CIRC * frac} ${CIRC}` }} />
       </svg>
-      <span className="rnum">{fmt(Math.ceil(left))}</span>
-      {cap && <span className="rcap">{cap}</span>}
+      <span className="rlabel">
+        <span className="rnum">{fmt(Math.ceil(left))}</span>
+        {cap && <span className="rcap">{cap}</span>}
+      </span>
     </div>
   );
 }
@@ -502,12 +526,12 @@ const Crest = ({ peran, idx, size }) => (
   }}>{monogram(peran)}</span>
 );
 
-function Bar({ left, right, onExit, exitLabel = "Exit", conn, theme = true }) {
+function Bar({ left, right, onExit, exitLabel = "Keluar", conn, theme = true }) {
   return (
     <header className="bar striped">
       <div className="brand"><BrandLogo />{left}</div>
       <div className="barright">
-        {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
+        {conn && conn !== "live" && <span className="offline">Menyambung ulang</span>}
         {right}
         {theme && <ThemeToggle />}
         <span className="build">{BUILD}</span>
@@ -518,10 +542,10 @@ function Bar({ left, right, onExit, exitLabel = "Exit", conn, theme = true }) {
 }
 
 const PHASES = [
-  { k: "lobby", label: "Waiting" },
-  { k: "briefing", label: "Brief" },
-  { k: "open", label: "Answer" },
-  { k: "revealed", label: "Discuss" },
+  { k: "lobby", label: "Menunggu" },
+  { k: "briefing", label: "Briefing" },
+  { k: "open", label: "Menjawab" },
+  { k: "revealed", label: "Diskusi" },
 ];
 function PhaseSteps({ phase, onPick }) {
   const at = PHASES.findIndex((p) => p.k === phase);
@@ -633,7 +657,7 @@ function Host({ onExit }) {
 
   function loadRows(rows, name) {
     const built = buildModel(rows);
-    if (!built.injects.length) { setParseError("No injects found. Check that the header row is the first row."); return; }
+    if (!built.injects.length) { setParseError("Tidak ada inject yang terbaca. Pastikan baris header ada di baris pertama."); return; }
     setModel({ injects: built.injects, roles: built.roles });
     setWarnings(built.warnings); setFileName(name); setParseError("");
     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
@@ -649,7 +673,7 @@ function Host({ onExit }) {
       const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
       loadRows(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" }), file.name);
     } catch (e) {
-      setParseError("That file could not be read. Save it as .xlsx or .csv and try again.");
+      setParseError("File itu tidak bisa dibaca. Simpan sebagai .xlsx atau .csv lalu coba lagi.");
     }
   }
 
@@ -736,37 +760,37 @@ function Host({ onExit }) {
   if (screen === "setup") {
     return (
       <>
-        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Kembali" conn={status} />
         <main className="load">
           <div className="loadinner">
-            <p className="eyebrow">Facilitator</p>
-            <h1>Load your inject sheet</h1>
+            <p className="eyebrow">Fasilitator</p>
+            <h1>Muat sheet inject Anda</h1>
             <p className="lede">
-              One row per question, with <b>Inject No.</b>, <b>Condition</b>, <b>Peran</b>,{" "}
-              <b>Siklus</b>, <b>Question</b> and <b>Answer</b>. Optional <b>Window</b> sets the
-              answering time for that inject, in minutes.
+              Satu baris per pertanyaan, berisi <b>Inject No.</b>, <b>Kondisi</b>, <b>Peran</b>,{" "}
+              <b>Siklus</b>, <b>Pertanyaan</b> dan <b>Jawaban</b>. Kolom <b>Waktu</b> opsional,
+              mengatur lama menjawab untuk inject itu dalam menit.
             </p>
             <p className="lede">
-              For multiple choice, put each option on its own line in the Answer cell
-              (<code>A. …</code> / <code>B. …</code>) and mark the correct one with a
-              leading <code>*</code>. Star <b>two or more</b> options and it becomes a
-              tick-all-that-apply question.
+              Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban
+              (<code>A. …</code> / <code>B. …</code>) dan beri tanda <code>*</code> di depan
+              opsi yang benar. Beri tanda pada <b>dua opsi atau lebih</b> dan pertanyaan itu
+              menjadi centang-semua-yang-sesuai.
             </p>
             <p className="lede">
-              An optional <b>Tipe</b> column settles it outright — <code>pg</code>,{" "}
-              <code>checkbox</code> or <code>esai</code>. Leave it blank, or leave the
-              column out, and the Answer cell decides as before.
+              Kolom <b>Tipe</b> opsional menentukan langsung — <code>pg</code>,{" "}
+              <code>checkbox</code> atau <code>esai</code>. Kosongkan, atau hilangkan
+              kolomnya, dan bentuk sel Jawaban yang menentukan.
             </p>
             <div className="drop" onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}>
               <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden
                 onChange={(e) => handleFile(e.target.files[0])} />
-              <button className="btn" onClick={() => fileRef.current?.click()}>Choose a file</button>
-              <span className="or">or drop it here</span>
+              <button className="btn" onClick={() => fileRef.current?.click()}>Pilih file</button>
+              <span className="or">atau jatuhkan di sini</span>
             </div>
             {parseError && <div className="err">{parseError}</div>}
-            <button className="link" onClick={() => loadRows(SAMPLE, "sample-exercise")}>
-              Load a sample exercise instead
+            <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
+              Muat contoh latihan saja
             </button>
           </div>
         </main>
@@ -778,75 +802,74 @@ function Host({ onExit }) {
   if (screen === "config") {
     return (
       <>
-        <Bar left={<b className="wordmark">Before you start</b>}
-          onExit={() => setScreen("setup")} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">Sebelum mulai</b>}
+          onExit={() => setScreen("setup")} exitLabel="Kembali" conn={status} />
         <main className="load">
           <div className="loadinner wide">
-            <h1>Before you start</h1>
+            <h1>Sebelum mulai</h1>
 
             {warnings.length > 0 && (
               <details className="warn" open>
-                <summary>{warnings.length} thing{warnings.length > 1 ? "s" : ""} to check</summary>
+                <summary>{warnings.length} hal yang perlu dicek</summary>
                 <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
               </details>
             )}
 
-            <h3>Scoring</h3>
+            <h3>Penilaian</h3>
             <div className="setgrid">
               <div className="fld span2">
-                <span>Mode</span>
+                <span>Mode penilaian</span>
                 <div className="seg2">
-                  {[["auto", "Auto (multiple choice)"], ["manual", "Manual (you score)"]].map(([v, l]) => (
+                  {[["auto", "Otomatis (pilihan)"], ["manual", "Manual (Anda yang menilai)"]].map(([v, l]) => (
                     <button key={v} className={settings.mode === v ? "on" : ""}
                       onClick={() => patchSettings({ mode: v })}>{l}</button>
                   ))}
                 </div>
               </div>
               <p className="hint span2">
-                Auto scores multiple-choice answers by correctness and speed. Manual keeps
-                answers unscored so you grade them after the discussion. Questions with no
-                options always fall through to manual.
+                Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual
+                membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan
+                tanpa opsi selalu jatuh ke penilaian manual.
               </p>
 
               {settings.mode === "auto" && (
                 <>
                   <label className="fld">
-                    <span>Points per question</span>
+                    <span>Poin per pertanyaan</span>
                     <input type="number" min="0" step="100" value={settings.points}
                       onChange={(e) => patchSettings({ points: Number(e.target.value) })} />
                   </label>
                   <label className="fld">
-                    <span>Time limit (seconds, 0 for none)</span>
+                    <span>Batas waktu default (detik, 0 = tanpa batas)</span>
                     <input type="number" min="0" step="5" value={settings.timeLimit}
                       onChange={(e) => patchSettings({ timeLimit: Number(e.target.value) })} />
                   </label>
-                  <Check label="Speed bonus" checked={settings.speedBonus}
+                  <Check label="Bonus kecepatan" checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
-                    hint="A correct answer earns half the points, plus up to half again for answering early." />
-                  <Check label="Reveal automatically when time runs out" checked={settings.autoReveal}
+                    hint="Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat." />
+                  <Check label="Buka jawaban otomatis saat waktu habis" checked={settings.autoReveal}
                     onChange={(v) => patchSettings({ autoReveal: v })}
-                    hint="Closes answering and moves the room to discussion the moment the clock hits zero." />
-                  <Check label="Show leaderboard" checked={settings.leaderboard}
+                    hint="Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol." />
+                  <Check label="Tampilkan peringkat" checked={settings.leaderboard}
                     onChange={(v) => patchSettings({ leaderboard: v })}
-                    hint="Ranking units against each other can make people defensive rather than candid. Off is the safer default for a first exercise." />
+                    hint="Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan." />
                 </>
               )}
 
-              <Check label="Show operator names" checked={settings.showNames}
+              <Check label="Tampilkan nama operator" checked={settings.showNames}
                 onChange={(v) => patchSettings({ showNames: v })}
-                hint="Off hides who is sitting at each unit's device." />
-              <Check label="Show unit names" checked={settings.showUnits}
+                hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
+              <Check label="Tampilkan nama unit" checked={settings.showUnits}
                 onChange={(v) => patchSettings({ showUnits: v })}
-                hint="Off replaces every Peran with a neutral label on your screen. Useful when you're projecting and don't want the room to see which unit gave which answer." />
+                hint="Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa." />
             </div>
 
             {settings.mode === "auto" && (
               <>
-                <h3>Time per inject</h3>
+                <h3>Waktu per inject</h3>
                 <p className="hint">
-                  How long each unit gets to answer. Blank uses the {settings.timeLimit}s
-                  default. Seeded from the Window column if your sheet has one, and editable
-                  during the exercise.
+                  Lama tiap unit boleh menjawab. Kosong berarti memakai default {settings.timeLimit} detik.
+                  Diisi dari kolom Waktu kalau sheet Anda punya, dan bisa diubah saat latihan berjalan.
                 </p>
                 <ul className="codelist">
                   {model.injects.map((i) => (
@@ -856,18 +879,18 @@ function Host({ onExit }) {
                         placeholder={String(settings.timeLimit)}
                         value={times[i.id] ?? ""}
                         onChange={(e) => setTimes((t) => ({ ...t, [i.id]: e.target.value }))} />
-                      <span className="unit">sec</span>
+                      <span className="unit">detik</span>
                     </li>
                   ))}
                 </ul>
               </>
             )}
 
-            <h3>Seats</h3>
+            <h3>Kursi</h3>
             <p className="hint">
-              One seat per business unit. The code decides the unit, and the first device to
-              use it holds the seat — a second device on the same code is refused. Edit any
-              code, or generate a new one.
+              Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang
+              memakainya memegang kursi itu — perangkat kedua dengan kode sama akan ditolak.
+              Ubah kode mana pun, atau buat yang baru.
             </p>
             <ul className="codelist">
               {model.roles.map((r, i) => (
@@ -877,7 +900,7 @@ function Host({ onExit }) {
                   <input className="cinput" maxLength={8} value={draftCodes[r] || ""}
                     onChange={(e) => setDraftCodes((d) => ({ ...d, [r]: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") }))} />
                   <button className="btn quiet" onClick={() => setDraftCodes((d) => ({ ...d, [r]: rand(4) }))}>
-                    Random
+                    Acak
                   </button>
                 </li>
               ))}
@@ -885,17 +908,17 @@ function Host({ onExit }) {
 
             {keyRequired && (
               <>
-                <h3>Facilitator passcode</h3>
+                <h3>Kata sandi fasilitator</h3>
                 <label className="fld">
-                  <span>Set by whoever deployed this</span>
+                  <span>Ditentukan oleh yang men-deploy aplikasi ini</span>
                   <input type="password" value={keyIn} autoComplete="off"
                     onChange={(e) => { setKeyIn(e.target.value); setDenied(false); }} />
                 </label>
               </>
             )}
-            {denied && <div className="err">That passcode was not accepted.</div>}
+            {denied && <div className="err">Kata sandi itu tidak diterima.</div>}
             <button className="btn wide" onClick={start}
-              disabled={keyRequired && !keyIn}>Open the room</button>
+              disabled={keyRequired && !keyIn}>Buka ruangan</button>
           </div>
         </main>
       </>
@@ -912,11 +935,11 @@ function Host({ onExit }) {
   if (!model || !inject) {
     return (
       <>
-        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Back" conn={status} />
+        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Kembali" conn={status} />
         <div className="crash">
-          <h1>This session is no longer on the server</h1>
-          <p className="muted">It may have expired, or the service restarted without a volume.</p>
-          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>Start fresh</button>
+          <h1>Sesi ini sudah tidak ada di server</h1>
+          <p className="muted">Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.</p>
+          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>Mulai baru</button>
         </div>
       </>
     );
@@ -941,16 +964,16 @@ function Host({ onExit }) {
         </>}
         right={<>
           <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
-            title={settings.showUnits ? "Hide unit names" : "Show unit names"}
-            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Units</button>
+            title={settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit"}
+            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
           <button className={`btn quiet pill ${settings.showNames ? "" : "off"}`}
-            title={settings.showNames ? "Hide operator names" : "Show operator names"}
-            onClick={() => patchSettings({ showNames: !settings.showNames })}>Names</button>
+            title={settings.showNames ? "Sembunyikan nama operator" : "Tampilkan nama operator"}
+            onClick={() => patchSettings({ showNames: !settings.showNames })}>Nama</button>
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
-            Seats · {people.length}/{model.roles.length}
+            Kursi · {people.length}/{model.roles.length}
           </button>
-          <button className="btn quiet" onClick={openProjector} title="Open the projector view">Project</button>
-          <button className="btn quiet" onClick={() => setScreen("report")}>Report</button>
+          <button className="btn quiet" onClick={openProjector} title="Buka tampilan proyektor">Proyektor</button>
+          <button className="btn quiet" onClick={() => setScreen("report")}>Laporan</button>
         </>} />
 
       {roomOpen && (
@@ -995,11 +1018,11 @@ function Host({ onExit }) {
           ) : (
             <>
               {inject.condition
-                ? <blockquote className="scenario"><span className="eyebrow">Condition</span>{inject.condition}</blockquote>
-                : <div className="empty">No scenario text for this inject. Brief the room from your notes.</div>}
+                ? <blockquote className="scenario"><span className="eyebrow">Kondisi</span>{inject.condition}</blockquote>
+                : <div className="empty">Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.</div>}
 
               <div className="callon">
-                <span>Asking</span>
+                <span>Ditanyakan ke</span>
                 {inject.roles.map((r) => (
                   <span key={r} className="chip"><Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}</span>
                 ))}
@@ -1007,50 +1030,71 @@ function Host({ onExit }) {
 
               <div className="actbar">
                 {phase === "briefing" && (<>
-                  <span className="msg">On every device now. Read it aloud, then open the window.</span>
+                  <span className="msg">Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab.</span>
                   {settings.mode === "auto" && (
                     <span className="inlinetime">
                       <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
                         value={times[inject.id] ?? ""}
                         onChange={(e) => setInjectTime(inject.id, e.target.value)} />
-                      <span className="unit">sec</span>
+                      <span className="unit">detik</span>
                     </span>
                   )}
                   <button className="btn" onClick={() => {
                     echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
-                  }}>Open for answers</button>
+                  }}>Buka untuk menjawab</button>
                 </>)}
 
                 {phase === "open" && (<>
                   {settings.mode === "auto" && limitOf(inject.id) > 0
                     ? <Ring openedAt={openedAt} limit={limitOf(inject.id)} />
-                    : <span className="msg">Answers are open.</span>}
+                    : <span className="msg">Jawaban sudah dibuka.</span>}
                   <span className="msg">
-                    {seatsHere.length === 0 ? "No unit has taken a seat for this inject"
-                      : allIn ? "All units in"
-                        : `Waiting on answers — ${seatsHere.length} of ${inject.roles.length} units seated`}
+                    {seatsHere.length === 0 ? "Belum ada unit yang mengambil kursi untuk inject ini"
+                      : allIn ? "Semua unit sudah menjawab"
+                        : `Menunggu jawaban — ${seatsHere.length} dari ${inject.roles.length} unit sudah duduk`}
                   </span>
                   <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
-                    Reveal answers
+                    Buka jawaban
                   </button>
                 </>)}
 
                 {phase === "revealed" && (<>
                   <span className="msg">
                     {keyShown
-                      ? "Answer key is on every screen."
-                      : "Discuss first. Reveal the key when the room has argued it out."}
+                      ? "Kunci jawaban sudah tampil di semua layar."
+                      : "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat."}
                   </span>
                   {!keyShown && (
                     <button className="btn" onClick={() => send({ t: "showkey", roomId })}>
-                      Show correct answers
+                      Tampilkan kunci jawaban
                     </button>
                   )}
                   <button className="btn quiet" onClick={() => {
                     echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
-                  }}>Reopen</button>
+                  }}>Buka lagi</button>
                 </>)}
               </div>
+
+              {phase === "briefing" && inject.questions.length > 0 && (
+                <div className="qplan">
+                  <h4>Pertanyaan di inject ini</h4>
+                  <ul>
+                    {inject.questions.map((q) => (
+                      <li key={q.qid}>
+                        <Crest peran={q.peran} idx={roleIdx(q.peran)} />
+                        <span className="qpunit">{unitOf(q.peran)}</span>
+                        <TypeBadge type={q.type} />
+                        <span className="qptext">{q.text}</span>
+                        {q.choices?.length > 0 && (
+                          <span className="qpkeys mono">
+                            {q.choices.filter((c) => c.correct).length}/{q.choices.length} kunci
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {phase === "open" && (
                 <div className="tracker">
@@ -1070,8 +1114,8 @@ function Host({ onExit }) {
                         <span className="tcount mono">{done}/{qs.length}</span>
                         {finishedMs != null
                           ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
-                          : !seat ? <span className="tmiss">seat open</span>
-                            : <span className="tmiss">answering</span>}
+                          : !seat ? <span className="tmiss">kursi kosong</span>
+                            : <span className="tmiss">sedang menjawab</span>}
                       </div>
                     );
                   })}
@@ -1096,33 +1140,33 @@ function Host({ onExit }) {
 
               {phase === "revealed" && (
                 <div className="notes">
-                  <label htmlFor={`n-${inject.id}`}>Facilitator notes</label>
+                  <label htmlFor={`n-${inject.id}`}>Catatan fasilitator</label>
                   <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
-                    placeholder="Gaps, arguments, who hesitated, anything that becomes a finding"
+                    placeholder="Celah, perdebatan, siapa yang ragu — apa pun yang bisa jadi temuan"
                     onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
                 </div>
               )}
 
               <div className="nav">
-                <button className="btn quiet" disabled={activeIdx === 0} onClick={goPrev}>Previous</button>
+                <button className="btn quiet" disabled={activeIdx === 0} onClick={goPrev}>Sebelumnya</button>
                 {activeIdx < model.injects.length - 1 ? (
                   confirmNext ? (
                     <span className="confirm">
-                      <span className="msg">Move everyone to inject {model.injects[activeIdx + 1].id}?</span>
-                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>Cancel</button>
-                      <button className="btn" onClick={goNext}>Yes, move on</button>
+                      <span className="msg">Pindahkan semua ke inject {model.injects[activeIdx + 1].id}?</span>
+                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>Batal</button>
+                      <button className="btn" onClick={goNext}>Ya, lanjut</button>
                     </span>
                   ) : (
-                    <button className="btn" onClick={() => setConfirmNext(true)}>Next inject</button>
+                    <button className="btn" onClick={() => setConfirmNext(true)}>Inject berikutnya</button>
                   )
                 ) : (
-                  <button className="btn" onClick={() => setScreen("report")}>Finish</button>
+                  <button className="btn" onClick={() => setScreen("report")}>Selesai</button>
                 )}
               </div>
 
               <p className="keys">
-                <kbd>Space</kbd> advance · <kbd>R</kbd> reveal · <kbd>K</kbd> show key ·{" "}
-                <kbd>←</kbd> <kbd>→</kbd> injects · <kbd>C</kbd> seats · <kbd>P</kbd> projector
+                <kbd>Spasi</kbd> lanjut · <kbd>R</kbd> buka jawaban · <kbd>K</kbd> tampilkan kunci ·{" "}
+                <kbd>←</kbd> <kbd>→</kbd> pindah inject · <kbd>C</kbd> kursi · <kbd>P</kbd> proyektor
               </p>
             </>
           )}
@@ -1140,14 +1184,14 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
     <div className="lobby">
       <div className="lobbytop">
         <div>
-          <h2>{model.roles.length} units, {model.roles.length} seats</h2>
+          <h2>{model.roles.length} unit, {model.roles.length} kursi</h2>
           <p className="muted">
-            One seat per business unit — the code decides the unit, and the first device to
-            use it holds the seat. A second device on the same code is refused.
+            Satu kursi per unit bisnis — kode menentukan unitnya, dan perangkat pertama yang
+            memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.
           </p>
         </div>
         <div className="dial">
-          <b className="mono">{taken}</b><span>of {model.roles.length} seats</span>
+          <b className="mono">{taken}</b><span>dari {model.roles.length} kursi</span>
         </div>
       </div>
 
@@ -1160,14 +1204,14 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
               <span className="cghead">
                 <Crest peran={r} idx={i} />
                 <b>{unitOf(r)}</b>
-                {!seat && <span className="seatopen">seat open</span>}
+                {!seat && <span className="seatopen">kursi kosong</span>}
               </span>
               <b className="cgcode">{code}</b>
               <span className="cgwho">
-                {!seat ? "code not used yet"
+                {!seat ? "kode belum dipakai"
                   : showNames
                     ? `${seat.name}${seat.live === false ? " · offline" : ""}`
-                    : seat.live === false ? "seated · offline" : "seated"}
+                    : seat.live === false ? "sudah duduk · offline" : "sudah duduk"}
               </span>
             </li>
           );
@@ -1175,11 +1219,11 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
       </ul>
 
       <button className="btn wide" onClick={onBegin}>
-        {injectId ? `Continue to inject ${injectId}` : "Begin the exercise"}
+        {injectId ? `Lanjut ke inject ${injectId}` : "Mulai latihan"}
       </button>
       {taken === 0 && (
         <p className="hint">
-          You can start with nobody in. A unit that joins later lands on the current inject.
+          Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.
         </p>
       )}
     </div>
@@ -1198,12 +1242,13 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
     <div className="scrim" onClick={onClose}>
       <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Seats">
         <div className="phead">
-          <h2>Seats</h2>
-          <button className="btn quiet" onClick={onClose}>Close</button>
+          <h2>Kursi</h2>
+          <button className="btn quiet" onClick={onClose}>Tutup</button>
         </div>
         <p className="hint">
-          One device per unit. A unit that lost its page can re-enter its code and take its own
-          seat back, keeping its answers. Release a seat only if a unit needs to start clean.
+          Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi
+          dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit
+          harus mulai dari nol.
         </p>
         <ul className="codelist big">
           {model.roles.map((r, i) => {
@@ -1215,33 +1260,33 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
                 <span className="cname">{unitOf(r)}</span>
                 <b className="bigcode mono">{code}</b>
                 <span className={seat && seat.live !== false ? "tin" : "tmiss"}>
-                  {!seat ? "open"
+                  {!seat ? "kosong"
                     : settings.showNames
                       ? `${seat.name}${seat.live === false ? " · offline" : ""}`
-                      : seat.live === false ? "offline" : "seated"}
+                      : seat.live === false ? "offline" : "sudah duduk"}
                 </span>
                 {seat && (confirm === r
                   ? <span className="confirm">
-                    <button className="btn quiet" onClick={() => setConfirm("")}>Cancel</button>
-                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>Release</button>
+                    <button className="btn quiet" onClick={() => setConfirm("")}>Batal</button>
+                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>Lepas</button>
                   </span>
-                  : <button className="btn quiet" onClick={() => setConfirm(r)}>Release</button>)}
+                  : <button className="btn quiet" onClick={() => setConfirm(r)}>Lepas</button>)}
               </li>
             );
           })}
         </ul>
 
-        <h3>On-screen display</h3>
-        <Check label="Unit names" checked={settings.showUnits}
+        <h3>Tampilan di layar</h3>
+        <Check label="Nama unit" checked={settings.showUnits}
           onChange={(v) => onSetting({ showUnits: v })}
-          hint="Off shows Unit A, Unit B instead of the real Peran." />
-        <Check label="Operator names" checked={settings.showNames}
+          hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
+        <Check label="Nama operator" checked={settings.showNames}
           onChange={(v) => onSetting({ showNames: v })}
-          hint="Off hides who is sitting at each unit's device." />
+          hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
 
-        <button className="btn quiet wide" onClick={onLobby}>Back to the waiting room</button>
+        <button className="btn quiet wide" onClick={onLobby}>Kembali ke ruang tunggu</button>
         <p className="hint">
-          Sends every device back to standby. Your scores and notes are kept.
+          Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.
         </p>
       </aside>
     </div>
@@ -1267,8 +1312,8 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
 
   return (
     <div className="qcard">
-      <p className="qtext">{q.text}
-        {isCheck && <span className="typetag">Pick all that apply</span>}</p>
+      <p className="qtext">{q.text}</p>
+      <p className="qtypeline"><TypeBadge type={q.type} /></p>
 
       {isAuto ? (
         <>
@@ -1281,15 +1326,15 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
                   <span className="vglyph"><Glyph shape={o.shape} size={14} /></span>
                   <span className="vtrack">
                     <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
-                    <span className="vlabel">{c.text}{isKey && <b> — key</b>}</span>
+                    <span className="vlabel">{c.text}{isKey && <b> — kunci</b>}</span>
                   </span>
-                  <span className="vn mono">{c.n}<em>{c.n === 1 ? "unit" : "units"}</em></span>
+                  <span className="vn mono">{c.n}<em>unit</em></span>
                 </li>
               );
             })}
           </ul>
           {keyShown && correctIdx < 0 && (
-            <p className="hint warnhint">No correct option marked in your sheet, so nobody scored.</p>
+            <p className="hint warnhint">Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.</p>
           )}
           <ul className="who-list">
             {answers.map((p) => {
@@ -1311,13 +1356,13 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
                 </li>
               );
             })}
-            {answers.length === 0 && <li className="none">No answer from this unit.</li>}
+            {answers.length === 0 && <li className="none">Unit ini tidak menjawab.</li>}
           </ul>
         </>
       ) : (
         <>
           {answers.length === 0
-            ? <p className="noanswer">No answer from this unit.</p>
+            ? <p className="noanswer">Unit ini tidak menjawab.</p>
             : <ul className="answers">
               {answers.map((p) => (
                 <li key={p.pid}>
@@ -1331,8 +1376,8 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           <div className="qfoot">
             <div className="dims">
               <div className="dim">
-                <span className="dimlab">Quality</span>
-                <div className="scorer" role="group" aria-label="Quality">
+                <span className="dimlab">Kualitas</span>
+                <div className="scorer" role="group" aria-label="Kualitas">
                   {SCORE_LABELS.map((l, s) => (
                     <button key={s} className={sc.score === s ? "on" : ""} title={l} aria-label={l}
                       onClick={() => onScore({ score: sc.score === s ? null : s })}>{s}</button>
@@ -1341,8 +1386,8 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
                 <span className="scorelab">{sc.score != null ? SCORE_LABELS[sc.score] : "—"}</span>
               </div>
               <div className="dim">
-                <span className="dimlab">Decision</span>
-                <div className="dseg" role="group" aria-label="Decision">
+                <span className="dimlab">Keputusan</span>
+                <div className="dseg" role="group" aria-label="Keputusan">
                   {DECISION_OPTS.map((o) => (
                     <button key={o.k} style={{ "--c": o.color }} className={sc.decision === o.k ? "on" : ""}
                       onClick={() => onScore({ decision: sc.decision === o.k ? null : o.k })}>{o.label}</button>
@@ -1352,7 +1397,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
             </div>
             {q.answerRaw && (
               <button className="link" onClick={toggleExpected}>
-                {showExpected ? "Hide expected" : "Show expected"}
+                {showExpected ? "Sembunyikan jawaban model" : "Lihat jawaban model"}
               </button>
             )}
           </div>
@@ -1376,6 +1421,7 @@ function Participant() {
   const [settings, setSettings] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
+  const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
   const [msg, setMsg] = useState("");
   const [key, setKey] = useState({});
   const [booted, setBooted] = useState(false);
@@ -1389,23 +1435,24 @@ function Participant() {
         possible: m.me.possible || 0, pct: m.me.pct ?? null };
       setMe(rec); lsSet(K_ME, rec);
       setDeck(m.deck); setState(m.state); setSettings(m.settings);
+      if (m.times) setTimes(m.times);
       setMsg(""); setTaken(null); setEvicted(false);
     } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
     else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
     else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
       openedAt: m.openedAt, limit: m.limit, keyShown: !!m.keyShown });
-    else if (m.t === "settings") setSettings(m.settings);
+    else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
     else if (m.t === "ack") {
       setMe((p) => {
         const n = { ...p, answers: m.me.answers, total: m.me.total,
           possible: m.me.possible ?? p.possible, pct: m.me.pct ?? p.pct };
         lsSet(K_ME, n); return n;
       });
-      setMsg("Sent."); setTimeout(() => setMsg(""), 1800);
+      setMsg("Terkirim."); setTimeout(() => setMsg(""), 1800);
     }
-    else if (m.t === "locked") setMsg("Answers are closed.");
-    else if (m.t === "timeup") setMsg("Time is up for this question.");
-    else if (m.t === "nosuch") { setPeek(null); setMsg("No exercise found with that code."); }
+    else if (m.t === "locked") setMsg("Jawaban sudah ditutup.");
+    else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
+    else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
     else if (m.t === "key") setKey(m.key || {});
     else if (m.t === "evicted") {
       lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
@@ -1442,14 +1489,21 @@ function Participant() {
   const phase = state?.phase || "lobby";
   const inject = deck?.injects?.[state?.activeIdx ?? 0];
   const mine = inject?.questions || [];
-  const limit = state?.limit ?? inject?.limit ?? settings?.timeLimit ?? 0;
+  /* Read the window the same way the server does, from the live `times` map, so
+     the facilitator editing it mid-brief changes what this device shows. */
+  const windowOf = (injId) => {
+    const v = times?.[injId];
+    if (v === "" || v == null) return Number(settings?.timeLimit ?? state?.limit ?? 0);
+    return Number(v);
+  };
+  const limit = inject ? windowOf(inject.id) : (state?.limit ?? 0);
   const timeUp = useExpired(
     state?.openedAt,
     settings?.mode === "auto" ? limit : 0,
     phase === "open" && !!me && !!deck
   );
 
-  if (!booted) return <div className="boot">Loading</div>;
+  if (!booted) return <div className="boot">Memuat</div>;
 
   /* ---- join: the front door for everyone but the facilitator ---- */
   if (!me || !deck) {
@@ -1459,13 +1513,13 @@ function Participant() {
     const blocked = taken || (peek && peek.taken ? peek : null);
     return (
       <>
-        <Bar left={<b className="wordmark">Tabletop exercise</b>} conn={status} />
+        <Bar left={<b className="wordmark">Latihan Tabletop</b>} conn={status} />
         <main className="door">
           <div className="doorinner">
-            <h1>Enter your unit's code</h1>
+            <h1>Masukkan kode unit Anda</h1>
             <p className="lede">
-              Four characters from the facilitator. The code puts this device in the right
-              unit — one device per unit, so use the one your unit was given.
+              Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang
+              benar — satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.
             </p>
 
             <div className="slots" onClick={() => codeRef.current?.focus()}>
@@ -1476,7 +1530,7 @@ function Participant() {
               ))}
               <input ref={codeRef} className="codeghost" value={codeIn} maxLength={8}
                 autoComplete="off" autoCapitalize="characters" spellCheck="false"
-                aria-label="Your unit's code"
+                aria-label="Kode unit Anda"
                 onChange={(e) => {
                   const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
                   setCodeIn(v); setPeek(null); setTaken(null); setEvicted(false);
@@ -1487,7 +1541,7 @@ function Participant() {
 
             {evicted && (
               <div className="resolved taken">
-                <div><small>Signed out</small><b>Another device took this unit's seat</b></div>
+                <div><small>Keluar</small><b>Perangkat lain mengambil kursi unit ini</b></div>
               </div>
             )}
 
@@ -1495,45 +1549,45 @@ function Participant() {
               <>
                 <div className="resolved taken">
                   <Crest peran={blocked.peran} idx={0} size={34} />
-                  <div><small>Seat already taken</small><b>{blocked.peran}</b></div>
+                  <div><small>Kursi sudah terisi</small><b>{blocked.peran}</b></div>
                 </div>
                 <p className="hint">
-                  {blocked.name || blocked.holder || "Another device"} has held this seat
-                  for {fmtAgo(blocked.sinceMs)}
-                  {blocked.live === false ? ", but is offline right now" : ""}. One unit holds one
-                  seat, so this device cannot join alongside them.
+                  {blocked.name || blocked.holder || "Perangkat lain"} sudah memegang kursi ini
+                  selama {fmtAgo(blocked.sinceMs)}
+                  {blocked.live === false ? ", tapi sedang offline" : ""}. Satu unit hanya punya
+                  satu kursi, jadi perangkat ini tidak bisa ikut bergabung.
                 </p>
                 <button className="btn wide warnbtn" onClick={() => doJoin(true)}>
-                  Take over the seat
+                  Ambil alih kursi
                 </button>
                 <p className="hint">
-                  Taking over signs the other device out and keeps this unit's answers and points.
-                  Use it when your unit switched device or lost the page.
+                  Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit
+                  ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.
                 </p>
               </>
             ) : peek ? (
               <>
                 <div className="resolved">
                   <Crest peran={peek.peran} idx={0} size={34} />
-                  <div><small>Claiming the seat for</small><b>{peek.peran}</b></div>
+                  <div><small>Mengambil kursi untuk</small><b>{peek.peran}</b></div>
                 </div>
                 <label className="fld">
-                  <span>Who is at this device <em>optional</em></span>
+                  <span>Siapa yang memegang perangkat ini <em>opsional</em></span>
                   <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
-                    placeholder="Name or meeting room" autoComplete="off" />
+                    placeholder="Nama atau ruang rapat" autoComplete="off" />
                 </label>
-                <button className="btn wide" onClick={() => doJoin(false)}>Take the seat</button>
+                <button className="btn wide" onClick={() => doJoin(false)}>Ambil kursi</button>
               </>
             ) : (
               <p className="resolve">
-                {msg || (ready ? "Checking…" : "The facilitator reads the codes out, or they are on the projector.")}
+                {msg || (ready ? "Memeriksa…" : "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.")}
               </p>
             )}
 
             <div className="doorfoot">
               {(lsGet(K_ME) || lsGet(K_HOST)) && (
                 <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
-                  Clear saved session
+                  Hapus sesi tersimpan
                 </button>
               )}
             </div>
@@ -1545,13 +1599,13 @@ function Participant() {
 
   return (
     <>
-      <Bar onExit={leave} exitLabel="Leave" conn={status}
+      <Bar onExit={leave} exitLabel="Keluar" conn={status}
         left={<>
           <Crest peran={me.peran} idx={0} />
           <span className="unitblock">
             <b className="unitname">{me.peran}</b>
             <small className="seatline">
-              one seat{me.name && me.name !== me.peran ? ` · ${me.name}` : ""}
+              satu kursi{me.name && me.name !== me.peran ? ` · ${me.name}` : ""}
             </small>
           </span>
         </>}
@@ -1562,8 +1616,8 @@ function Participant() {
           {phase === "lobby" && (
             <div className="standby">
               <span className="pulse" />
-              <h2>Your unit is in</h2>
-              <p className="muted">Waiting for the facilitator to begin.</p>
+              <h2>Unit Anda sudah masuk</h2>
+              <p className="muted">Menunggu fasilitator memulai.</p>
             </div>
           )}
 
@@ -1572,7 +1626,7 @@ function Participant() {
               <div className="eyebrow">{inject.siklus} · Inject {inject.id}</div>
               {inject.condition && (
                 <blockquote className="condition">
-                  <span className="eyebrow">Condition</span>{inject.condition}
+                  <span className="eyebrow">Kondisi</span>{inject.condition}
                 </blockquote>
               )}
 
@@ -1580,15 +1634,15 @@ function Participant() {
                 <div className="standby small">
                   <span className="pulse" />
                   <p className="muted">
-                    Read the scenario. Questions open shortly
-                    {limit > 0 && settings?.mode === "auto" ? ` — your window will be ${fmt(limit)}` : ""}.
+                    Baca skenarionya. Pertanyaan segera dibuka
+                    {limit > 0 ? ` — waktu menjawab unit Anda ${fmt(limit)}` : ""}.
                   </p>
                 </div>
               )}
 
               {phase === "open" && (mine.length === 0 ? (
                 <div className="standby small">
-                  <p className="muted">This inject doesn't involve your unit. Listen in.</p>
+                  <p className="muted">Inject ini tidak melibatkan unit Anda. Simak saja.</p>
                 </div>
               ) : (
                 <>
@@ -1613,14 +1667,12 @@ function Participant() {
                     return (
                       <div className="pq" key={q.qid}>
                         <p className="pqtext">{q.text}</p>
+                        <p className="qtypeline">
+                          <TypeBadge type={q.type} />
+                          <span>{TYPE_HINT[q.type]}</span>
+                        </p>
                         {isMC || isCheck ? (
                           <>
-                            {isCheck && (
-                              <p className="multinote">
-                                <span className="multibadge">Pick all that apply</span>
-                                Wrong ticks cancel out right ones, so only tick what your unit stands behind.
-                              </p>
-                            )}
                             <div className="opts">
                               {q.choices.map((c, i) => {
                                 const o = optOf(i);
@@ -1655,8 +1707,8 @@ function Participant() {
                             {isCheck && !timeUp && (
                               <button className="btn wide" disabled={!cur.length && !sent}
                                 onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: cur } })}>
-                                {!sent ? `Send ${cur.length || "no"} answer${cur.length === 1 ? "" : "s"}`
-                                  : dirty ? `Update — ${cur.length} ticked` : `Sent — ${cur.length} ticked`}
+                                {!sent ? `Kirim ${cur.length} jawaban`
+                                  : dirty ? `Perbarui — ${cur.length} dicentang` : `Terkirim — ${cur.length} dicentang`}
                               </button>
                             )}
                             {timeUp ? (
@@ -1666,7 +1718,7 @@ function Participant() {
                                   <path d="M7 11V8a5 5 0 0110 0v3" />
                                   <rect x="4" y="11" width="16" height="9" rx="2.4" />
                                 </svg>
-                                Window closed — answer locked in
+                                Waktu habis — jawaban terkunci
                               </div>
                             ) : sent ? (
                               <>
@@ -1677,33 +1729,33 @@ function Participant() {
                                       <path d="M4 12.5l5.2 5.2L20 7" />
                                     </svg>
                                   </span>
-                                  Answer in{sent.rank ? ` — ${sent.rank}${ordinal(sent.rank)} unit to answer` : ""}
-                                  {isCheck && dirty ? " · unsent changes" : ""}
+                                  Jawaban masuk{sent.rank ? ` — unit ${nth(sent.rank)} yang menjawab` : ""}
+                                  {isCheck && dirty ? " · ada perubahan belum dikirim" : ""}
                                 </p>
                                 <p className="hint">
-                                  This is the whole unit's answer. {isCheck
-                                    ? "Change the ticks and send again — only your last send counts, and it sets your time."
-                                    : "Tap another tile to change it — only your last choice counts, and it sets your time."}
+                                  Ini jawaban untuk seluruh unit. {isCheck
+                                    ? "Ubah centangnya lalu kirim lagi — hanya kiriman terakhir yang dihitung, dan itu yang menentukan waktu Anda."
+                                    : "Ketuk kotak lain untuk mengubah — hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda."}
                                 </p>
                               </>
                             ) : (
                               <p className="hint centre">
-                                One answer for the whole unit. Decide together, then {isCheck ? "send" : "tap"}.
+                                Satu jawaban untuk seluruh unit. Putuskan bersama, lalu {isCheck ? "kirim" : "ketuk"}.
                               </p>
                             )}
                           </>
                         ) : (
                           <>
-                            <textarea rows={5} placeholder="Type your unit's answer" disabled={timeUp}
+                            <textarea rows={5} placeholder="Tulis jawaban unit Anda" disabled={timeUp}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
                             <button className="btn wide" disabled={timeUp}
                               onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
-                              {sent ? "Update answer" : "Send answer"}
+                              {sent ? "Perbarui jawaban" : "Kirim jawaban"}
                             </button>
                             {timeUp
-                              ? <div className="lockstamp">Window closed</div>
-                              : sent && <p className="hint centre">Sent. You can revise until answers close.</p>}
+                              ? <div className="lockstamp">Waktu habis</div>
+                              : sent && <p className="hint centre">Terkirim. Masih bisa direvisi sampai jawaban ditutup.</p>}
                           </>
                         )}
                       </div>
@@ -1724,7 +1776,7 @@ function Participant() {
                         return (
                           <div className="rescard miss" key={q.qid}>
                             <p className="qtext small">{q.text}</p>
-                            <p className="rline">No answer sent</p>
+                            <p className="rline">Tidak ada jawaban terkirim</p>
                             {keyIdx && <KeyLine idx={keyIdx} text={k.texts ? k.texts.join("; ") : k.text} mine={false} />}
                           </div>
                         );
@@ -1751,12 +1803,12 @@ function Participant() {
                                       strokeWidth="3.4" strokeLinecap="round">
                                       <path d="M6 6l12 12M18 6L6 18" /></svg>}
                             </span>
-                            <b>{!state?.keyShown ? "Answer sent"
-                              : a.correct == null ? "Not auto-scored"
-                                : a.correct ? "Correct"
-                                  : part ? "Partly right" : "Not the key"}</b>
+                            <b>{!state?.keyShown ? "Jawaban terkirim"
+                              : a.correct == null ? "Tidak dinilai otomatis"
+                                : a.correct ? "Benar"
+                                  : part ? "Benar sebagian" : "Bukan kuncinya"}</b>
                             {state?.keyShown && a.acc != null && a.acc < 1 && a.acc > 0 && (
-                              <span className="accpill">{Math.round(a.acc * 100)}% of the key</span>
+                              <span className="accpill">{Math.round(a.acc * 100)}% dari kunci</span>
                             )}
                           </div>
                           <p className="qtext small">{q.text}</p>
@@ -1764,11 +1816,11 @@ function Participant() {
                             <div className="ptsbig mono">{a.points ? `+${a.points.toLocaleString()}` : "0"}</div>
                           )}
                           <div className="metarow">
-                            <span>Answered in <b className="mono">{(a.ms / 1000).toFixed(1)}s</b></span>
-                            {a.rank && <span><b className="mono">{a.rank}{ordinal(a.rank)}</b> to answer</span>}
+                            <span>Dijawab dalam <b className="mono">{(a.ms / 1000).toFixed(1)} dtk</b></span>
+                            {a.rank && <span>unit <b className="mono">{nth(a.rank)}</b> yang menjawab</span>}
                             {state?.keyShown && keyIdx && q.type === "checkbox" && (
-                              <span><b className="mono">{hits}</b> of {keyIdx.length} right
-                                {wrong ? <>, <b className="mono">{wrong}</b> wrong</> : null}</span>
+                              <span><b className="mono">{hits}</b> dari {keyIdx.length} kunci benar
+                                {wrong ? <>, <b className="mono">{wrong}</b> salah</> : null}</span>
                             )}
                           </div>
                           <KeyLine idx={mineIdx} text={a.text} mine />
@@ -1783,16 +1835,16 @@ function Participant() {
                         <b className="mono">{me.pct == null ? `${(me.total || 0).toLocaleString()} pts` : `${Math.round(me.pct)}%`}</b>
                         <span className="mono">
                           {(me.total || 0).toLocaleString()}
-                          {me.possible ? ` of ${me.possible.toLocaleString()} available to your unit` : " pts total"}
+                          {me.possible ? ` dari ${me.possible.toLocaleString()} poin yang tersedia untuk unit Anda` : " poin total"}
                         </span>
                       </div>
                     )}
-                    <p className="hint centre">The facilitator is leading the discussion.</p>
+                    <p className="hint centre">Fasilitator sedang memimpin diskusi.</p>
                   </div>
                 ) : (
                   <div className="standby small">
-                    <h2>Answers are in</h2>
-                    <p className="muted">The facilitator is leading the discussion.</p>
+                    <h2>Jawaban sudah masuk</h2>
+                    <p className="muted">Fasilitator sedang memimpin diskusi.</p>
                   </div>
                 )
               )}
@@ -1822,7 +1874,7 @@ const KeyLine = ({ idx, text, mine }) => {
         })}
       </span>
       <span>
-        {mine ? (many ? "You ticked " : "You chose the ") : (many ? "The key was " : "The key was the ")}
+        {mine ? (many ? "Anda mencentang " : "Anda memilih ") : (many ? "Kuncinya adalah " : "Kuncinya adalah ")}
         <b>{names}</b>{text ? ` — ${text}` : ""}
       </span>
     </div>
@@ -1862,10 +1914,10 @@ function Screen() {
   if (!roomId) {
     return (
       <div className="crash">
-        <h1>No exercise in the address</h1>
+        <h1>Alamatnya tidak memuat latihan</h1>
         <p className="muted">
-          Open the projector view from the facilitator screen — the <b>Project</b> button —
-          so it carries the exercise id.
+          Buka tampilan proyektor dari layar fasilitator — tombol <b>Proyektor</b> —
+          supaya id latihannya ikut terbawa.
         </p>
       </div>
     );
@@ -1874,8 +1926,8 @@ function Screen() {
     return (
       <div className="projwait">
         <span className="pulse" />
-        <h1>Waiting for the exercise</h1>
-        <p className="muted">{status === "live" ? "Connected." : "Reconnecting…"}</p>
+        <h1>Menunggu latihan</h1>
+        <p className="muted">{status === "live" ? "Tersambung." : "Menyambung ulang…"}</p>
       </div>
     );
   }
@@ -1895,18 +1947,18 @@ function Screen() {
         </div>
         <span className={`projphase ${phase}`}>
           <span className="pulse" />
-          {phase === "lobby" ? "Waiting"
-            : phase === "briefing" ? "Read the scenario"
-              : phase === "open" ? "Answering"
-                : state.keyShown ? "Answer key" : "Discussing"}
+          {phase === "lobby" ? "Menunggu"
+            : phase === "briefing" ? "Baca skenario"
+              : phase === "open" ? "Sedang menjawab"
+                : state.keyShown ? "Kunci jawaban" : "Diskusi"}
         </span>
       </div>
 
       <div className="projbody">
         {phase === "lobby" ? (
           <div className="projlobby">
-            <h2>Enter your unit's code</h2>
-            <p className="muted">One device per business unit.</p>
+            <h2>Masukkan kode unit Anda</h2>
+            <p className="muted">Satu perangkat per unit bisnis.</p>
           </div>
         ) : (
           <div className="projmid">
@@ -1917,7 +1969,7 @@ function Screen() {
                 return (
                   <div className="projq" key={q.qid}>
                     <p className="projqtext">{q.text}</p>
-                    {q.type === "checkbox" && <p className="projtype">Pick all that apply</p>}
+                    <p className="projtype">{TYPE_LABEL[q.type]}</p>
                     {q.choices?.length > 0 && (
                       <div className="projopts">
                         {q.choices.map((c, i) => {
@@ -1946,7 +1998,7 @@ function Screen() {
         )}
 
         <div className="projstrip">
-          <span className="lab">Join</span>
+          <span className="lab">Kode</span>
           {deck.roles.map((r, i) => {
             const code = Object.keys(codes).find((c) => codes[c] === r);
             const seat = seatOf(r);
@@ -1963,7 +2015,7 @@ function Screen() {
               </span>
             );
           })}
-          {status !== "live" && <span className="offline">Reconnecting</span>}
+          {status !== "live" && <span className="offline">Menyambung ulang</span>}
         </div>
       </div>
     </div>
@@ -2019,9 +2071,9 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const head = ["Siklus", "Inject", "Peran", "Question", "Type", "Expected", "Operator", "Answer",
-      "Correct", "Accuracy", "Seconds", "Points", "Unit points", "Unit max", "Unit score %",
-      "Quality", "Decision", "Answer window (s)", "Notes"];
+    const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Operator",
+      "Jawaban unit", "Benar", "Akurasi", "Detik", "Poin", "Poin unit", "Maks unit", "Skor unit %",
+      "Kualitas", "Keputusan", "Waktu menjawab (detik)", "Catatan"];
     const lines = [head.map(esc).join(",")];
     model.injects.forEach((inj) => {
       const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
@@ -2033,7 +2085,7 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
           const poss = possibleOf(q.peran);
           lines.push([inj.siklus, inj.id, q.peran, q.text, q.type, q.answerRaw,
             p ? (settings.showNames ? p.name : unitOf(p.peran)) : "", a?.text || "",
-            a?.correct == null ? "" : a.correct ? "Yes" : a.acc > 0 ? "Partly" : "No",
+            a?.correct == null ? "" : a.correct ? "Ya" : a.acc > 0 ? "Sebagian" : "Tidak",
             a?.acc == null ? "" : Math.round(a.acc * 100) + "%",
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
             p ? p.total ?? "" : "", poss || "",
@@ -2061,26 +2113,26 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
 
   return (
     <>
-      <Bar left={<b className="wordmark">Debrief · {fileName}</b>} onExit={onBack} exitLabel="Back" />
+      <Bar left={<b className="wordmark">Debrief · {fileName}</b>} onExit={onBack} exitLabel="Kembali" />
       <main className="report">
         <div className="repinner">
-          <h1>Exercise results</h1>
+          <h1>Hasil latihan</h1>
           <div className="kpis">
-            <div><b className="mono">{people.length}</b><span>units seated</span></div>
-            <div><b className="mono">{all.length}</b><span>questions</span></div>
-            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>answered correctly</span></div>
+            <div><b className="mono">{people.length}</b><span>unit ikut</span></div>
+            <div><b className="mono">{all.length}</b><span>pertanyaan</span></div>
+            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>jawaban benar</span></div>
             <div><b className="mono">{avgPct == null ? "—" : `${Math.round(avgPct)}%`}</b>
-              <span>average unit score</span>
-              <em className="kpisub mono">{totalPts.toLocaleString()} pts total</em></div>
+              <span>rata-rata skor unit</span>
+              <em className="kpisub mono">{totalPts.toLocaleString()} poin total</em></div>
           </div>
 
           {settings.mode === "auto" && settings.leaderboard && board.length > 0 && (
             <>
-              <h3>Where the room stood</h3>
+              <h3>Posisi tiap unit</h3>
               <p className="hint boardnote">
-                Ranked by each unit's percentage of its own maximum, because units are
-                not asked the same number of questions.{uneven
-                  ? " They were not, in this exercise — the counts differ, so raw points would have favoured whoever was asked more."
+                Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah
+                pertanyaan per unit tidak selalu sama.{uneven
+                  ? " Di latihan ini memang tidak sama — poin mentah akan menguntungkan yang ditanya lebih banyak."
                   : ""}
               </p>
               <ol className="board">
@@ -2103,12 +2155,12 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             </>
           )}
 
-          <h3>By Peran</h3>
+          <h3>Rincian per Peran</h3>
           <div className="tblwrap">
             <table className="tbl">
-              <thead><tr><th>Peran</th><th>Asked</th><th>Correct</th><th>Partly</th>
-                <th>Points</th><th>Max</th><th>Score</th>
-                {settings.mode === "manual" && <th>Quality</th>}</tr></thead>
+              <thead><tr><th>Peran</th><th>Ditanya</th><th>Benar</th><th>Sebagian</th>
+                <th>Poin</th><th>Maks</th><th>Skor</th>
+                {settings.mode === "manual" && <th>Kualitas</th>}</tr></thead>
               <tbody>
                 {Object.entries(byRole).map(([role, d]) => (
                   <tr key={role}>
@@ -2128,11 +2180,11 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
           </div>
 
           <div className="repactions">
-            <button className="btn" onClick={exportCSV}>Download CSV</button>
-            <button className="btn quiet" onClick={onBack}>Back to the run</button>
-            <button className="btn danger" onClick={onEnd}>End session</button>
+            <button className="btn" onClick={exportCSV}>Unduh CSV</button>
+            <button className="btn quiet" onClick={onBack}>Kembali ke latihan</button>
+            <button className="btn danger" onClick={onEnd}>Akhiri sesi</button>
           </div>
-          <p className="hint">Ending clears the room for everyone. Download the CSV first.</p>
+          <p className="hint">Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.</p>
         </div>
       </main>
     </>
@@ -2394,19 +2446,22 @@ html,body{background:var(--ink)}
 .ring svg{transform:rotate(-90deg);display:block;overflow:visible}
 .ring .rtrack{fill:none;stroke:var(--edge2);stroke-width:9}
 .ring .rfill{fill:none;stroke:var(--live);stroke-width:9;stroke-linecap:round;transition:stroke .4s}
-.ring .rnum{position:absolute;font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
-  letter-spacing:-.03em;color:var(--txt)}
-.ring .rcap{position:absolute;bottom:-2px;font-size:9px;letter-spacing:.12em;text-transform:uppercase;
-  color:var(--faint);font-weight:700}
+.ring .rlabel{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;pointer-events:none}
+.ring .rnum{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
+  letter-spacing:-.03em;color:var(--txt);line-height:1}
+.ring .rcap{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+  font-weight:700;line-height:1}
 .ring.warn .rfill{stroke:var(--warn)} .ring.warn .rnum{color:var(--warn)}
 .ring.urgent .rfill{stroke:var(--wrong)} .ring.urgent .rnum{color:var(--wrong)}
 .ring.urgent{animation:tense 1s ease-in-out infinite}
 .ring.done .rnum{color:var(--wrong)}
 @keyframes tense{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
 .ring.s72 svg{width:72px;height:72px} .ring.s72 .rnum{font-size:17px}
-.ring.s150 svg{width:150px;height:150px} .ring.s150 .rnum{font-size:38px;margin-bottom:6px}
+.ring.s150 svg{width:150px;height:150px} .ring.s150 .rnum{font-size:38px}
 .ring.s150 .rtrack,.ring.s150 .rfill{stroke-width:7}
-.ring.s220 svg{width:220px;height:220px} .ring.s220 .rnum{font-size:58px;margin-bottom:8px}
+.ring.s220 svg{width:220px;height:220px} .ring.s220 .rnum{font-size:58px}
+.ring.s220 .rcap{font-size:12px}
 .ring.s220 .rtrack,.ring.s220 .rfill{stroke-width:6}
 .ringwrap{display:flex;justify-content:center;margin-bottom:6px}
 
@@ -2543,14 +2598,27 @@ html,body{background:var(--ink)}
   display:grid;place-items:center;box-shadow:inset 0 0 0 1.5px var(--edge);color:transparent}
 .otick.on{background:var(--slab);color:var(--c);box-shadow:inset 0 0 0 1.5px var(--slab)}
 .ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
-.multinote{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
-  color:var(--faint);line-height:1.5;margin:0}
-.multibadge{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
-  color:var(--signal-ink);background:var(--signal);border-radius:20px;padding:3px 9px;flex:none}
-.typetag{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
-  color:var(--dim);background:var(--ink);box-shadow:inset 0 0 0 1px var(--edge2);
-  border-radius:20px;padding:3px 9px;margin-left:9px;vertical-align:3px;font-family:var(--body)}
-.projtype{font-size:13px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--signal-text);margin-top:-8px}
+.qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
+  color:var(--faint);line-height:1.5;margin:-4px 0 0}
+.typebadge{font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  border-radius:20px;padding:3px 9px;flex:none;font-family:var(--body);white-space:nowrap}
+.typebadge.choice{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
+.typebadge.checkbox{color:var(--signal-ink);background:var(--signal)}
+.typebadge.open{color:var(--on-opt);background:var(--oC)}
+.projtype{font-size:13px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--signal-text);margin-top:-8px}
+/* what is coming, so the facilitator is not surprised by an essay mid-run */
+.qplan{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  padding:16px 18px;margin-bottom:22px}
+.qplan h4{font-family:var(--body);font-size:11px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--faint);margin:0 0 11px}
+.qplan ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.qplan li{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;
+  padding-bottom:9px;border-bottom:1px solid var(--edge2)}
+.qplan li:last-child{padding-bottom:0;border-bottom:none}
+.qpunit{font-weight:600;min-width:150px}
+.qptext{flex:1;color:var(--dim);min-width:180px}
+.qpkeys{font-size:11px;color:var(--faint);white-space:nowrap}
 .ttx .opt.picked{background:var(--c);box-shadow:inset 0 0 0 1.5px var(--c)}
 .ttx .opt.picked .otxt{color:var(--on-opt);font-weight:600}
 .ttx .opt.picked .oglyph{background:var(--slab);color:var(--c)}
