@@ -95,29 +95,34 @@ const lsDel = (k) => { try { localStorage.removeItem(k); } catch (e) { /* privat
 
 /* ---------------------------- theme ---------------------------- */
 
-function readTheme() {
-  try {
-    const v = localStorage.getItem(K_THEME);
-    if (v === "light" || v === "dark" || v === "auto") return v;
-  } catch (e) { /* private mode */ }
-  return "auto";
-}
 function applyTheme(mode) {
   const root = document.documentElement;
   if (mode === "auto") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme", mode);
   try { localStorage.setItem(K_THEME, mode); } catch (e) { /* private mode */ }
 }
-function ThemeToggle({ compact }) {
-  const [mode, setMode] = useState(readTheme);
-  useEffect(() => { applyTheme(mode); }, [mode]);
+/* One button. Until someone presses it the app follows the device's own setting;
+   the first press pins a theme and it is remembered from then on. The icon shows
+   where the press will take you, not where you are. */
+function ThemeToggle() {
+  const dark = useIsDark();
+  const next = dark ? "light" : "dark";
   return (
-    <div className={`themes ${compact ? "compact" : ""}`} role="group" aria-label="Theme">
-      {[["light", "Light"], ["dark", "Dark"], ["auto", "Auto"]].map(([k, label]) => (
-        <button key={k} aria-pressed={mode === k} title={`${label} theme`}
-          onClick={() => setMode(k)}>{compact ? label[0] : label}</button>
-      ))}
-    </div>
+    <button className="themebtn" onClick={() => applyTheme(next)}
+      title={`Switch to ${next} theme`} aria-label={`Switch to ${next} theme`}>
+      {dark ? (
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.1M12 19.3v2.1M4.4 4.4l1.5 1.5M18.1 18.1l1.5 1.5M2.6 12h2.1M19.3 12h2.1M4.4 19.6l1.5-1.5M18.1 5.9l1.5-1.5" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20.6 14.4A8.6 8.6 0 019.6 3.4a8.6 8.6 0 1011 11z" />
+        </svg>
+      )}
+    </button>
   );
 }
 
@@ -504,7 +509,7 @@ function Bar({ left, right, onExit, exitLabel = "Exit", conn, theme = true }) {
       <div className="barright">
         {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
         {right}
-        {theme && <ThemeToggle compact />}
+        {theme && <ThemeToggle />}
         <span className="build">{BUILD}</span>
         {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel}</button>}
       </div>
@@ -2266,12 +2271,11 @@ html,body{background:var(--ink)}
 .ptsbadge{font-size:14px;font-weight:700;color:var(--signal-text)}
 
 /* ---------- theme switch ---------- */
-.themes{display:flex;gap:2px;padding:3px;border-radius:10px;background:var(--ink2);
-  box-shadow:inset 0 0 0 1px var(--edge2);flex:none}
-.themes button{padding:4px 10px;border-radius:7px;font-size:12px;font-weight:700;color:var(--dim)}
-.themes button:hover{color:var(--txt)}
-.themes button[aria-pressed="true"]{background:var(--signal);color:var(--signal-ink)}
-.themes.compact button{padding:4px 8px;font-size:11px}
+.themebtn{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;
+  color:var(--dim);background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);
+  transition:color .14s,box-shadow .14s}
+.themebtn:hover{color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint)}
+.themebtn:active{transform:translateY(1px)}
 
 /* ---------- phase stepper ---------- */
 .phases{display:flex;gap:3px;flex-wrap:wrap}
