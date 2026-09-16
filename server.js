@@ -319,6 +319,15 @@ wss.on("connection", (ws) => {
         /* points-per-question or the mode may have moved — every unit's ceiling shifts */
         Object.values(byId.people).forEach((p) => retally(byId, p));
         toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times });
+        /* The window for the inject on screen may have just moved. Push the new
+           limit to every device and re-arm the auto-reveal against it, otherwise
+           the phones keep counting to the old number. */
+        const cur = byId.deck.injects[byId.state.activeIdx];
+        if (cur) {
+          byId.state = { ...byId.state, limit: limitFor(byId, cur.id) };
+          toRoom(byId.id, { t: "state", ...byId.state });
+          if (byId.state.phase === "open") armReveal(byId);
+        }
         markSnapshot();
         break;
       }
@@ -374,7 +383,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid });
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
-          settings: room.settings, me: room.people[pid] });
+          settings: room.settings, times: room.times || {}, me: room.people[pid] });
         if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
@@ -391,7 +400,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid: m.pid });
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
-          settings: room.settings, me });
+          settings: room.settings, times: room.times || {}, me });
         if (room.state.keyShown) sendKey(room);
         markDirty(room.id);
         break;
@@ -402,7 +411,7 @@ wss.on("connection", (ws) => {
         if (!byId) return send(ws, { t: "gone" });
         sockets.set(ws, { roomId: byId.id, isScreen: true });
         send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
-          settings: byId.settings, state: byId.state, codes: byId.codes });
+          settings: byId.settings, times: byId.times || {}, state: byId.state, codes: byId.codes });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;
