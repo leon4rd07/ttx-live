@@ -152,21 +152,33 @@ function useIsDark() {
   return dark;
 }
 
+let loggedMissingLogo = false;
 function BrandLogo({ className = "" }) {
   const dark = useIsDark();
   const chain = dark ? [LOGO_DARK, LOGO_LIGHT] : [LOGO_LIGHT];
   const [i, setI] = useState(0);
   useEffect(() => { setI(0); }, [dark]);
-  if (i >= chain.length) return null;
+  if (i >= chain.length) return null;  // no asset in place: render nothing at all
   return (
     <img className={`brandlogo ${className}`} src={chain[i]} alt=""
-      onError={() => setI((n) => n + 1)} />
+      onError={() => setI((n) => {
+        const next = n + 1;
+        if (next >= chain.length && !loggedMissingLogo) {
+          loggedMissingLogo = true;
+          console.info(
+            `[TTX] No logo shown. Put the file at public/${LOGO_LIGHT.replace(/^\//, "")}` +
+            ` (optionally public/${LOGO_DARK.replace(/^\//, "")} for the dark theme) and rebuild.`
+          );
+        }
+        return next;
+      })} />
   );
 }
 
-/* Shown small and quiet wherever someone might reasonably want to know. */
+/* One fixed line in the bottom-left corner, on every screen. Small and quiet:
+   there for anyone who looks, out of the way of anyone running the exercise. */
 const AiNote = () => (
-  <p className="aidisc">This tool was built in-house with AI assistance.</p>
+  <p className="aidisc">Built in-house with AI assistance</p>
 );
 
 /* ---------------------------- transport ---------------------------- */
@@ -447,6 +459,7 @@ export default function App() {
           : route === "host" ? <Host onExit={leaveHost} />
             : <Participant />}
       </Boundary>
+      <AiNote />
     </div>
   );
 }
@@ -750,7 +763,6 @@ function Host({ onExit }) {
             <button className="link" onClick={() => loadRows(SAMPLE, "sample-exercise")}>
               Load a sample exercise instead
             </button>
-            <AiNote />
           </div>
         </main>
       </>
@@ -1519,7 +1531,6 @@ function Participant() {
                   Clear saved session
                 </button>
               )}
-              <AiNote />
             </div>
           </div>
         </main>
@@ -1948,7 +1959,6 @@ function Screen() {
             );
           })}
           {status !== "live" && <span className="offline">Reconnecting</span>}
-          <AiNote />
         </div>
       </div>
     </div>
@@ -2118,7 +2128,6 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             <button className="btn danger" onClick={onEnd}>End session</button>
           </div>
           <p className="hint">Ending clears the room for everyone. Download the CSV first.</p>
-          <AiNote />
         </div>
       </main>
     </>
@@ -2293,10 +2302,10 @@ html,body{background:var(--ink)}
 .resolved b{font-family:var(--disp);font-size:16px;font-weight:800;letter-spacing:-.025em}
 .doorfoot{margin-top:28px;padding-top:18px;border-top:1px solid var(--edge2);
   display:flex;flex-direction:column;gap:12px;align-items:flex-start}
-/* deliberately quiet: present for anyone who looks, invisible to anyone who doesn't */
-.aidisc{font-size:9.5px;line-height:1.4;color:var(--faint);opacity:.62;letter-spacing:.02em;margin-top:14px}
-.projstrip .aidisc{margin:0 0 0 auto;font-size:9px}
-.repinner .aidisc{margin-top:10px}
+/* deliberately quiet: present for anyone who looks, invisible to anyone who doesn't.
+   z-index sits below the seats panel scrim (30) so it doesn't float over it. */
+.aidisc{position:fixed;left:11px;bottom:8px;z-index:20;pointer-events:none;
+  font-size:9.5px;line-height:1.4;color:var(--faint);opacity:.55;letter-spacing:.02em;margin:0}
 
 /* ---------- forms ---------- */
 .load{display:flex;justify-content:center;padding:36px 20px 90px}
@@ -2493,6 +2502,7 @@ html,body{background:var(--ink)}
 /* ---------- seats panel ---------- */
 .scrim{position:fixed;inset:0;background:rgba(10,9,6,.44);z-index:30;display:flex;justify-content:flex-end}
 .panel{background:var(--ink);width:min(480px,100%);height:100%;overflow-y:auto;padding:22px 24px 44px;
+  position:relative;z-index:31;
   border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 
@@ -2583,7 +2593,7 @@ html,body{background:var(--ink)}
   letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
 .projphase .pulse{margin:0;width:12px;height:12px}
 .projphase.revealed{color:var(--signal-text)}
-.projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 24px}
+.projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 34px}
 .projlobby{text-align:center;padding:8vh 0}
 .projlobby h2{font-size:40px}
 .projmid{display:flex;gap:36px;align-items:flex-start;flex:1}
