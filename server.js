@@ -194,23 +194,71 @@ function sendKey(room) {
   if (!inj) return;
   const key = {};
   inj.questions.forEach((q) => {
-    const i = (q.choices || []).findIndex((c) => c.correct);
-    if (i >= 0) key[q.qid] = { i, text: q.choices[i].text };
+    const idx = (q.choices || []).map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
+    if (!idx.length) return;
+    /* `i`/`text` stay for single choice; `is`/`texts` carry every key for checkbox */
+    key[q.qid] = { i: idx[0], text: q.choices[idx[0]].text,
+      is: idx, texts: idx.map((i) => q.choices[i].text) };
   });
   toRoom(room.id, { t: "key", injectId: inj.id, key });
 }
 
-/* Quizizz-style: correct answers earn full points, faster ones earn more. */
-function scoreAnswer(room, q, choiceIdx, elapsedMs, limit) {
+/* Accuracy first, then speed. A fully correct answer earns half the points
+   outright and up to half again for answering early; a partly correct checkbox
+   scales the whole thing by how much of the key it got.
+
+   Checkbox is scored (hits − misses) / keys, floored at zero: ticking every box
+   earns nothing, so "select all to be safe" is not a strategy. */
+function scoreAnswer(room, q, val, elapsedMs, limit) {
   const s = room.settings;
-  if (s.mode !== "auto" || q.type !== "choice") return { correct: null, points: 0 };
-  const correctIdx = (q.choices || []).findIndex((c) => c.correct);
-  if (correctIdx < 0) return { correct: null, points: 0 };
-  const correct = choiceIdx === correctIdx;
-  if (!correct) return { correct: false, points: 0 };
-  if (!s.speedBonus || !limit) return { correct: true, points: s.points };
-  const frac = Math.max(0, 1 - elapsedMs / (limit * 1000));
-  return { correct: true, points: Math.round(s.points * (0.5 + 0.5 * frac)) };
+  const isChoice = q.type === "choice", isCheck = q.type === "checkbox";
+  if (s.mode !== "auto" || (!isChoice && !isCheck)) return { correct: null, points: 0, acc: null };
+
+  const keys = (q.choices || []).map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
+  if (!keys.length) return { correct: null, points: 0, acc: null };  // no key marked in the sheet
+
+  let acc, correct;
+  if (isCheck) {
+    const picked = Array.isArray(val) ? val : [];
+    const hit = picked.filter((i) => keys.includes(i)).length;
+    const miss = picked.length - hit;
+    acc = Math.max(0, (hit - miss) / keys.length);
+    correct = hit === keys.length && miss === 0;
+  } else {
+    correct = val === keys[0];
+    acc = correct ? 1 : 0;
+  }
+  if (acc <= 0) return { correct: false, points: 0, acc: 0 };
+
+  const speed = s.speedBonus && limit ? Math.max(0, 1 - elapsedMs / (limit * 1000)) : null;
+  const mult = speed == null ? 1 : 0.5 + 0.5 * speed;
+  return { correct, partial: !correct, acc: Math.round(acc * 1000) / 1000,
+    points: Math.round(s.points * acc * mult) };
+}
+
+/* Units are not asked the same number of questions — one may get ten across the
+   exercise and another three — so raw points cannot be compared. Every unit also
+   carries what it could possibly have scored, and the percentage of it earned.
+   Questions with no key marked in the sheet are left out of the denominator, so a
+   spreadsheet mistake never counts against a unit. */
+function possibleFor(room, peran) {
+  if (room.settings.mode !== "auto") return 0;
+  let n = 0;
+  for (const inj of room.deck.injects) {
+    for (const q of inj.questions) {
+      if (q.peran !== peran) continue;
+      if (q.type !== "choice" && q.type !== "checkbox") continue;
+      if (!(q.choices || []).some((c) => c.correct)) continue;
+      n += 1;
+    }
+  }
+  return n * (Number(room.settings.points) || 0);
+}
+function retally(room, p) {
+  p.total = Object.values(p.answers).reduce((a, b) => a + (b.points || 0), 0);
+  p.possible = possibleFor(room, p.peran);
+  p.pct = p.possible ? Math.round((p.total / p.possible) * 1000) / 10 : null;
+  return p;
 }
 
 /* --------------------------- connections --------------------------- */
@@ -268,6 +316,8 @@ wss.on("connection", (ws) => {
         if (!byId || !sockets.get(ws)?.isHost) return;
         if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
         if (m.times) byId.times = { ...byId.times, ...m.times };
+        /* points-per-question or the mode may have moved — every unit's ceiling shifts */
+        Object.values(byId.people).forEach((p) => retally(byId, p));
         toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times });
         markSnapshot();
         break;
@@ -319,6 +369,7 @@ wss.on("connection", (ws) => {
             name: (m.name || "").trim() || hit.peran,
             answers: {}, total: 0, claimedAt: Date.now() };
         }
+        retally(room, room.people[pid]);
 
         sockets.set(ws, { roomId: room.id, pid });
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
@@ -401,12 +452,21 @@ wss.on("connection", (ws) => {
         for (const [qid, val] of Object.entries(m.answers || {})) {
           const q = inj?.questions.find((x) => x.qid === qid);
           if (!q || q.peran !== p.peran) continue;
-          if (q.type === "choice" && room.settings.mode === "auto") {
+          if (q.type === "checkbox" && room.settings.mode === "auto") {
+            const n = (q.choices || []).length;
+            const picks = [...new Set((Array.isArray(val) ? val : [val]).map(Number))]
+              .filter((i) => Number.isInteger(i) && i >= 0 && i < n).sort((a, b) => a - b);
+            const sc = scoreAnswer(room, q, picks, elapsed, limit);
+            const prev = p.answers[qid];
+            p.answers[qid] = { picks, choice: picks[0] ?? null,
+              text: picks.map((i) => q.choices[i]?.text).filter(Boolean).join("; "),
+              ms: elapsed, changed: (prev?.changed || 0) + (prev ? 1 : 0), ...sc };
+          } else if (q.type === "choice" && room.settings.mode === "auto") {
             const idx = Number(val);
-            const { correct, points } = scoreAnswer(room, q, idx, elapsed, limit);
+            const sc = scoreAnswer(room, q, idx, elapsed, limit);
             const prev = p.answers[qid];
             p.answers[qid] = { choice: idx, text: q.choices[idx]?.text || "",
-              ms: elapsed, correct, points, changed: (prev?.changed || 0) + (prev ? 1 : 0) };
+              ms: elapsed, changed: (prev?.changed || 0) + (prev ? 1 : 0), ...sc };
           } else {
             const text = String(val).trim();
             if (!text) continue;
@@ -419,7 +479,7 @@ wss.on("connection", (ws) => {
             .filter((o) => o.pid !== p.pid && o.answers[qid] && o.answers[qid].ms < p.answers[qid].ms).length;
           p.answers[qid].rank = earlier + 1;
         }
-        p.total = Object.values(p.answers).reduce((a, b) => a + (b.points || 0), 0);
+        retally(room, p);
         send(ws, { t: "ack", me: p });
         markDirty(room.id);
         markSnapshot();

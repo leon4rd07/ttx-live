@@ -92,6 +92,12 @@ segitiga?"* out loud and the whole room knows which option you mean.
 **Themes** — light and dark, switchable in the header on every surface, remembered
 per device. Dark is the sensible choice for a dim room with a projector.
 
+**Your logo** — drop the official Maybank asset at `public/brand/logo.svg`, and
+optionally a reversed version at `public/brand/logo-dark.svg` for the dark theme.
+It appears in the header on every surface and on the projector. With the folder
+empty the app renders no logo and the wordmark stands alone, so nothing breaks.
+Use the approved file from whoever owns the brand — not a redrawn copy.
+
 ---
 
 ## The inject sheet
@@ -105,7 +111,8 @@ One row per question. First row must be the headers.
 | Peran | yes | The unit(s) asked. Several in one cell, or one per row — both work |
 | Siklus | | Groups injects into phases |
 | Question | yes | |
-| Answer | | Model answer, `A.`/`B.` options, or comma-separated keywords |
+| Tipe | | `pg`, `checkbox` or `esai`. Blank or absent = guessed from the Answer cell |
+| Answer | | Options one per line, or a model answer for an essay |
 | Window | | Answering time for that inject, in minutes |
 
 Indonesian header names are recognised too (Kondisi, Pertanyaan, Jawaban,
@@ -114,10 +121,36 @@ Tahap, Waktu).
 Blank cells in Inject No., Condition, Siklus and Window carry down from the row
 above, so merged-looking sheets import correctly.
 
-Answer type is guessed per row: two or more lines starting `A.` or `1)` are
-treated as choices; two or more short comma-separated fragments as keywords;
-anything else as a model answer. For choices, mark the correct one with `*` or
-`[x]` — otherwise they're shown for reference and you score manually.
+### Question types
+
+| Type | `Tipe` value | Answer cell |
+|---|---|---|
+| Single choice | `pg`, `pilihan`, `choice`, `mc` | Options one per line, **one** marked `*` |
+| Tick all that apply | `checkbox`, `centang`, `multi` | Options one per line, **two or more** marked `*` |
+| Essay | `esai`, `uraian`, `open` | Free text — scored by you after the discussion |
+
+The `Tipe` column is optional and wins when present. With it blank or absent the
+Answer cell decides: two or more lines starting `A.` or `1)` are choices, and if
+more than one of them is starred it becomes a checkbox question. Anything else is
+an essay. Sheets written before b20 import exactly as they did.
+
+Note that `multiple choice` maps to **single** choice, because that is what people
+mean by it. Use `checkbox` for tick-all-that-apply.
+
+### How answers score
+
+Single choice is right or wrong. Checkbox gets partial credit with a penalty:
+`(right ticks − wrong ticks) ÷ number of keys`, floored at zero — so ticking every
+box earns nothing and "select all to be safe" is not a strategy. Accuracy scales
+the points; the speed bonus then works exactly as it does for single choice.
+
+**Units are not asked the same number of questions.** One unit may get ten across
+the exercise and another three, so raw points cannot be compared. Every unit
+carries what it could have scored, and the leaderboard and the By Peran table rank
+on the percentage of that maximum — with raw points shown beside it. Questions with
+no key marked in the sheet are excluded from the maximum, so a spreadsheet mistake
+never counts against a unit. The importer warns you before the run if the counts
+are uneven.
 
 ---
 

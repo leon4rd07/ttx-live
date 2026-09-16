@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b19";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b20";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -121,6 +121,54 @@ function ThemeToggle({ compact }) {
   );
 }
 
+/* ---------------------------- brand mark ---------------------------- */
+
+/* The logo is an asset you drop in, not something the app draws. Put the
+   official file at public/brand/logo.svg (and optionally logo-dark.svg for a
+   knockout version on the dark theme). If neither is there, nothing renders
+   and the wordmark stands alone — so the app never ships a broken image. */
+const LOGO_LIGHT = "/brand/logo.svg";
+const LOGO_DARK = "/brand/logo-dark.svg";
+
+function useIsDark() {
+  const read = () => {
+    const a = document.documentElement.getAttribute("data-theme");
+    if (a === "dark") return true;
+    if (a === "light") return false;
+    return window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)").matches : false;
+  };
+  const [dark, setDark] = useState(read);
+  useEffect(() => {
+    const upd = () => setDark(read());
+    const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    if (mq?.addEventListener) mq.addEventListener("change", upd);
+    const mo = new MutationObserver(upd);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      if (mq?.removeEventListener) mq.removeEventListener("change", upd);
+      mo.disconnect();
+    };
+  }, []);
+  return dark;
+}
+
+function BrandLogo({ className = "" }) {
+  const dark = useIsDark();
+  const chain = dark ? [LOGO_DARK, LOGO_LIGHT] : [LOGO_LIGHT];
+  const [i, setI] = useState(0);
+  useEffect(() => { setI(0); }, [dark]);
+  if (i >= chain.length) return null;
+  return (
+    <img className={`brandlogo ${className}`} src={chain[i]} alt=""
+      onError={() => setI((n) => n + 1)} />
+  );
+}
+
+/* Shown small and quiet wherever someone might reasonably want to know. */
+const AiNote = () => (
+  <p className="aidisc">This tool was built in-house with AI assistance.</p>
+);
+
 /* ---------------------------- transport ---------------------------- */
 
 /* True once the answering window has closed. Recomputed on a tick so the
@@ -199,6 +247,25 @@ const HEADER_ALIASES = {
   jawabanyangdiharapkan: "answer", kuncijawaban: "answer", key: "answer",
   window: "window", windowmin: "window", waktu: "window",
   decisionwindow: "window", bataswaktu: "window", windowminutes: "window",
+  tipe: "qtype", type: "qtype", jenis: "qtype", format: "qtype",
+  tipesoal: "qtype", jenissoal: "qtype", questiontype: "qtype", answertype: "qtype",
+};
+
+/* An optional Tipe column decides the question type outright. Leave it blank, or
+   leave the column out entirely, and the shape of the Answer cell decides — so
+   every sheet written before b20 still imports unchanged.
+
+   Note "multiple choice" maps to single choice, because that is what people mean
+   by it. Ticking several boxes is "checkbox" / "centang" / "pilih banyak". */
+const TYPE_ALIASES = {
+  pg: "choice", pilihan: "choice", pilihanganda: "choice", choice: "choice", mc: "choice",
+  multiplechoice: "choice", single: "choice", singlechoice: "choice", radio: "choice",
+  tunggal: "choice", pgtunggal: "choice", satujawaban: "choice",
+  checkbox: "checkbox", kotakcentang: "checkbox", centang: "checkbox", multi: "checkbox",
+  multiselect: "checkbox", multipleselect: "checkbox", pilihbanyak: "checkbox",
+  pgmulti: "checkbox", banyakjawaban: "checkbox", pilihsemua: "checkbox",
+  esai: "open", essay: "open", uraian: "open", terbuka: "open", open: "open",
+  text: "open", teks: "open", isian: "open", jawabansingkat: "open", shortanswer: "open",
 };
 const normKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 /* Split only on unambiguous list separators. "&", "/", "dan" and "and" all
@@ -213,8 +280,6 @@ function detectAnswerType(raw) {
   const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const bare = lines.map((l) => l.replace(/^\s*\*+\s*/, ""));
   if (bare.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
-  const parts = t.split(/[;,]/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length >= 2 && parts.every((p) => p.split(/\s+/).length <= 5)) return "keywords";
   return "open";
 }
 const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -228,7 +293,6 @@ const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim
       .trim(),
     correct: /^\s*\*|\*\s*$|\(correct\)|\[x\]/i.test(s),
   }));
-const parseKeywords = (raw) => String(raw || "").split(/[;,]|\r?\n/).map((s) => s.trim()).filter(Boolean);
 
 function buildModel(rows) {
   if (!rows.length) return { injects: [], roles: [], warnings: ["The sheet has no rows."] };
@@ -261,6 +325,7 @@ function buildModel(rows) {
       siklus: get(row, "siklus") || lastSiklus || "(no siklus)",
       window: get(row, "window") || lastWindow,
       question, answer: get(row, "answer"), roles: splitPeran(peranRaw),
+      qtype: TYPE_ALIASES[normKey(get(row, "qtype"))] || "",
     });
   });
 
@@ -269,6 +334,7 @@ function buildModel(rows) {
 
   const byInject = new Map();
   let noKey = 0;
+  const badCheck = [];
   flat.forEach((r) => {
     if (!byInject.has(r.inject)) {
       byInject.set(r.inject, { id: r.inject, siklus: r.siklus, window: r.window, conditions: [], questions: [] });
@@ -277,14 +343,17 @@ function buildModel(rows) {
     if (r.condition && !inj.conditions.includes(r.condition)) inj.conditions.push(r.condition);
     if (!inj.window && r.window) inj.window = r.window;
     if (!r.question) return;
-    const type = detectAnswerType(r.answer);
-    const choices = type === "choice" ? parseChoices(r.answer) : [];
-    if (type === "choice" && !choices.some((c) => c.correct)) noKey += 1;
+    /* The Tipe column wins; otherwise fall back to reading the Answer cell, and
+       treat two or more starred options as a checkbox question. */
+    let type = r.qtype || detectAnswerType(r.answer);
+    let choices = type === "choice" || type === "checkbox" ? parseChoices(r.answer) : [];
+    if (!r.qtype && type === "choice" && choices.filter((c) => c.correct).length > 1) type = "checkbox";
+    if (r.qtype === "checkbox" && !choices.length) { type = "open"; choices = []; badCheck.push(r.inject); }
+    if ((type === "choice" || type === "checkbox") && !choices.some((c) => c.correct)) noKey += 1;
     (r.roles.length ? r.roles : ["(untargeted)"]).forEach((peran, k) => {
       inj.questions.push({
         qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
         peran, text: r.question, answerRaw: r.answer, type, choices,
-        keywords: type === "keywords" ? parseKeywords(r.answer) : [],
       });
     });
   });
@@ -296,7 +365,11 @@ function buildModel(rows) {
     return { ...inj, roles: rs, condition: inj.conditions[0] || "", splitNarrative: inj.conditions.length > 1 };
   }).sort((a, b) => num(a.siklus) - num(b.siklus) || num(a.id) - num(b.id));
 
-  const mc = injects.flatMap((i) => i.questions).filter((q) => q.type === "choice").length;
+  const allQ = injects.flatMap((i) => i.questions);
+  const mc = allQ.filter((q) => q.type === "choice" || q.type === "checkbox").length;
+  if (badCheck.length) {
+    warnings.push(`${[...new Set(badCheck)].join(", ")}: marked as checkbox but the Answer cell has no options, so it falls back to an essay question.`);
+  }
   if (noKey > 0) {
     warnings.push(`${noKey} multiple-choice question${noKey > 1 ? "s have" : " has"} no correct option marked. Put * at the start of the right answer, or those questions score zero.`);
   }
@@ -304,13 +377,28 @@ function buildModel(rows) {
     if (i.splitNarrative) warnings.push(`Inject ${i.id} has more than one Condition. Only the first is shown.`);
     if (!i.condition) warnings.push(`Inject ${i.id} has no Condition text.`);
   });
+  /* Units are not asked the same number of questions, so say so before the run
+     rather than letting it surface as a lopsided leaderboard afterwards. */
+  const perRole = {};
+  allQ.forEach((q) => {
+    if (q.type !== "choice" && q.type !== "checkbox") return;
+    if (!(q.choices || []).some((c) => c.correct)) return;
+    perRole[q.peran] = (perRole[q.peran] || 0) + 1;
+  });
+  const counts = Object.values(perRole);
+  if (counts.length > 1 && Math.max(...counts) !== Math.min(...counts)) {
+    const spread = Object.entries(perRole).sort((a, b) => b[1] - a[1])
+      .map(([r, n]) => `${r} ${n}`).join(", ");
+    warnings.push(`Units are asked different numbers of scored questions (${spread}). Points alone would favour whoever gets more, so the leaderboard ranks by percentage of each unit's own maximum. Raw points are still shown.`);
+  }
   return { injects, roles, warnings, mcCount: mc };
 }
 
 const SAMPLE = [
   { "Inject No.": "1", Siklus: "Siklus 1 - Detection", Window: "2", Condition: "At 02:14 the SOC monitoring tool raises a burst of failed authentications against the core banking admin portal, originating from an internal subnet assigned to a third-party maintenance vendor. The on-call analyst has not yet escalated.", Peran: "SOC, IT Operations", Question: "What is your first action in the next 15 minutes?", Answer: "A. Wait for a second alert before acting\n*B. Verify the alert, disable the vendor account, notify the IR lead\nC. Call the vendor and ask what they are doing\nD. Open a ticket and hand over at shift change" },
   { "Inject No.": "", Siklus: "", Condition: "", Peran: "Vendor Management", Question: "Do you have current after-hours contact details and a contractual notification window for this vendor?", Answer: "A. No, we would have to wait for business hours\n*B. Yes, both are in the contract register and reachable now\nC. We have a contact but no defined window" },
-  { "Inject No.": "2", Siklus: "Siklus 1 - Detection", Window: "1.5", Condition: "Thirty minutes later the vendor account is confirmed compromised. Logs show successful access to a database holding customer identity documents. The volume of records touched is not yet known.", Peran: "Risk Management", Question: "Has this crossed your threshold for declaring a major incident?", Answer: "A. Not yet, wait for the record count\n*B. Yes, declare immediately on confirmed unauthorised access to customer data\nC. Escalate to the CISO for a decision\nD. Log it as a security event and review at the weekly forum" },
+  { "Inject No.": "2", Siklus: "Siklus 1 - Detection", Window: "1.5", Condition: "Thirty minutes later the vendor account is confirmed compromised. Logs show successful access to a database holding customer identity documents. The volume of records touched is not yet known.", Peran: "Risk Management", Tipe: "pg", Question: "Has this crossed your threshold for declaring a major incident?", Answer: "A. Not yet, wait for the record count\n*B. Yes, declare immediately on confirmed unauthorised access to customer data\nC. Escalate to the CISO for a decision\nD. Log it as a security event and review at the weekly forum" },
+  { "Inject No.": "", Siklus: "", Condition: "", Peran: "SOC", Tipe: "checkbox", Question: "Which of these must be preserved before you rebuild the host? Tick all that apply.", Answer: "*A. Authentication logs for the vendor account\n*B. A memory image of the affected host\nC. The vendor's own ticket history\n*D. Database access logs for the period" },
   { "Inject No.": "", Siklus: "", Condition: "", Peran: "Hukum & Kepatuhan", Question: "What regulatory notification clock has now started?", Answer: "*A. The clock started at confirmation of unauthorised access to personal data\nB. It starts once the record count is final\nC. It starts when the board is briefed" },
   { "Inject No.": "3", Siklus: "Siklus 2 - Response", Window: "2", Condition: "A journalist emails corporate communications at 08:40 asking to confirm a data breach affecting customer identity documents. They cite a post on a criminal forum and want a response within two hours.", Peran: "Corporate Communications, Hukum & Kepatuhan", Question: "What goes in the first response?", Answer: "A. A full account of what happened so far\n*B. A holding statement, legally reviewed, from one named spokesperson\nC. No response until the investigation closes" },
   { "Inject No.": "", Siklus: "", Condition: "", Peran: "Executive", Question: "Do you notify the board now or wait for confirmed scope?", Answer: "*A. Now, covering what is known, what is not, and decisions taken\nB. Wait until scope is confirmed\nC. Delegate to the CISO at the next scheduled meeting" },
@@ -399,7 +487,7 @@ const Crest = ({ peran, idx, size }) => (
 function Bar({ left, right, onExit, exitLabel = "Exit", conn, theme = true }) {
   return (
     <header className="bar striped">
-      <div className="brand">{left}</div>
+      <div className="brand"><BrandLogo />{left}</div>
       <div className="barright">
         {conn && conn !== "live" && <span className="offline">Reconnecting</span>}
         {right}
@@ -643,7 +731,13 @@ function Host({ onExit }) {
             <p className="lede">
               For multiple choice, put each option on its own line in the Answer cell
               (<code>A. …</code> / <code>B. …</code>) and mark the correct one with a
-              leading <code>*</code>.
+              leading <code>*</code>. Star <b>two or more</b> options and it becomes a
+              tick-all-that-apply question.
+            </p>
+            <p className="lede">
+              An optional <b>Tipe</b> column settles it outright — <code>pg</code>,{" "}
+              <code>checkbox</code> or <code>esai</code>. Leave it blank, or leave the
+              column out, and the Answer cell decides as before.
             </p>
             <div className="drop" onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}>
@@ -656,6 +750,7 @@ function Host({ onExit }) {
             <button className="link" onClick={() => loadRows(SAMPLE, "sample-exercise")}>
               Load a sample exercise instead
             </button>
+            <AiNote />
           </div>
         </main>
       </>
@@ -1136,21 +1231,27 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
   );
 }
 
+const picksOf = (a) => (a ? (a.picks || (a.choice != null ? [a.choice] : [])) : []);
+
 function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, keyShown, unitOf }) {
-  const isAuto = settings.mode === "auto" && q.type === "choice";
+  const isCheck = q.type === "checkbox";
+  const isAuto = settings.mode === "auto" && (q.type === "choice" || isCheck);
   const correctIdx = q.choices ? q.choices.findIndex((c) => c.correct) : -1;
 
   const dist = useMemo(() => {
     if (!q.choices?.length) return [];
     return q.choices.map((c, i) => ({
-      ...c, i, n: answers.filter((p) => p.answers[q.qid]?.choice === i).length,
+      ...c, i, n: answers.filter((p) => picksOf(p.answers[q.qid]).includes(i)).length,
     }));
   }, [q, answers]);
-  const total = Math.max(1, dist.reduce((a, b) => a + b.n, 0));
+  /* The bar is share of responding units, not share of ticks — on a checkbox
+     question the ticks add up to more than the number of units. */
+  const total = Math.max(1, answers.length);
 
   return (
     <div className="qcard">
-      <p className="qtext">{q.text}</p>
+      <p className="qtext">{q.text}
+        {isCheck && <span className="typetag">Pick all that apply</span>}</p>
 
       {isAuto ? (
         <>
@@ -1176,12 +1277,18 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           <ul className="who-list">
             {answers.map((p) => {
               const a = p.answers[q.qid];
-              const o = optOf(a.choice ?? 0);
+              const picks = picksOf(a);
+              const part = a.correct === false && a.acc > 0;
               return (
-                <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : ""}>
+                <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : ""}>
                   {a.rank && <span className="rk mono">{a.rank}</span>}
                   <span className="wname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
-                  <span className="wopt" style={{ color: o.c }}><Glyph shape={o.shape} size={11} /></span>
+                  <span className="wopt">
+                    {picks.map((i) => {
+                      const o = optOf(i);
+                      return <span key={i} style={{ color: o.c }}><Glyph shape={o.shape} size={11} /></span>;
+                    })}
+                  </span>
                   <span className="ms mono">{(a.ms / 1000).toFixed(1)}s</span>
                   <span className="pts mono">{keyShown ? (a.points ? `+${a.points}` : "0") : "—"}</span>
                 </li>
@@ -1251,6 +1358,7 @@ function Participant() {
   const [state, setState] = useState(null);
   const [settings, setSettings] = useState(null);
   const [drafts, setDrafts] = useState({});
+  const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
   const [msg, setMsg] = useState("");
   const [key, setKey] = useState({});
   const [booted, setBooted] = useState(false);
@@ -1260,7 +1368,8 @@ function Participant() {
   const onMsg = useCallback((m) => {
     if (m.t === "joined") {
       const rec = { pid: m.pid, roomId: m.roomId, peran: m.peran, name: m.me.name,
-        seat: m.me.claimedAt, answers: m.me.answers || {}, total: m.me.total || 0 };
+        seat: m.me.claimedAt, answers: m.me.answers || {}, total: m.me.total || 0,
+        possible: m.me.possible || 0, pct: m.me.pct ?? null };
       setMe(rec); lsSet(K_ME, rec);
       setDeck(m.deck); setState(m.state); setSettings(m.settings);
       setMsg(""); setTaken(null); setEvicted(false);
@@ -1270,7 +1379,11 @@ function Participant() {
       openedAt: m.openedAt, limit: m.limit, keyShown: !!m.keyShown });
     else if (m.t === "settings") setSettings(m.settings);
     else if (m.t === "ack") {
-      setMe((p) => { const n = { ...p, answers: m.me.answers, total: m.me.total }; lsSet(K_ME, n); return n; });
+      setMe((p) => {
+        const n = { ...p, answers: m.me.answers, total: m.me.total,
+          possible: m.me.possible ?? p.possible, pct: m.me.pct ?? p.pct };
+        lsSet(K_ME, n); return n;
+      });
       setMsg("Sent."); setTimeout(() => setMsg(""), 1800);
     }
     else if (m.t === "locked") setMsg("Answers are closed.");
@@ -1400,13 +1513,14 @@ function Participant() {
               </p>
             )}
 
-            {(lsGet(K_ME) || lsGet(K_HOST)) && (
-              <div className="doorfoot">
+            <div className="doorfoot">
+              {(lsGet(K_ME) || lsGet(K_HOST)) && (
                 <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
                   Clear saved session
                 </button>
-              </div>
-            )}
+              )}
+              <AiNote />
+            </div>
           </div>
         </main>
       </>
@@ -1469,28 +1583,66 @@ function Participant() {
                   )}
                   {mine.map((q) => {
                     const sent = me.answers?.[q.qid];
-                    const isMC = q.type === "choice" && q.choices?.length && settings.mode === "auto";
+                    const auto = settings.mode === "auto" && q.choices?.length;
+                    const isMC = q.type === "choice" && auto;
+                    const isCheck = q.type === "checkbox" && auto;
+                    /* Single choice commits on tap. Checkbox collects ticks locally and
+                       commits on Send, because there is no single tap that means "done". */
+                    const cur = ticks[q.qid] ?? sent?.picks ?? [];
+                    const toggle = (i) => setTicks((t) => ({
+                      ...t,
+                      [q.qid]: cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort((a, b) => a - b),
+                    }));
+                    const dirty = JSON.stringify(cur) !== JSON.stringify(sent?.picks ?? []);
                     return (
                       <div className="pq" key={q.qid}>
                         <p className="pqtext">{q.text}</p>
-                        {isMC ? (
+                        {isMC || isCheck ? (
                           <>
+                            {isCheck && (
+                              <p className="multinote">
+                                <span className="multibadge">Pick all that apply</span>
+                                Wrong ticks cancel out right ones, so only tick what your unit stands behind.
+                              </p>
+                            )}
                             <div className="opts">
                               {q.choices.map((c, i) => {
                                 const o = optOf(i);
-                                const picked = sent && sent.choice === i;
+                                const picked = isCheck ? cur.includes(i) : sent && sent.choice === i;
+                                const dim = isCheck
+                                  ? (timeUp && !picked)
+                                  : ((sent || timeUp) && !picked);
                                 return (
                                   <button key={i} disabled={timeUp}
-                                    className={`opt ${picked ? "picked" : ""} ${sent && !picked ? "faded" : ""} ${timeUp && !picked ? "faded" : ""}`}
+                                    className={`opt ${picked ? "picked" : ""} ${dim ? "faded" : ""}`}
                                     style={{ "--c": o.c }}
-                                    onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
+                                    aria-pressed={isCheck ? picked : undefined}
+                                    onClick={() => isCheck
+                                      ? toggle(i)
+                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
                                     <span className="oglyph"><Glyph shape={o.shape} /></span>
                                     <span className="otxt">{c.text}</span>
-                                    <span className="oltr mono">{o.ltr}</span>
+                                    {isCheck
+                                      ? <span className={`otick ${picked ? "on" : ""}`} aria-hidden="true">
+                                        {picked && (
+                                          <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+                                            stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M4 12.5l5.2 5.2L20 7" />
+                                          </svg>
+                                        )}
+                                      </span>
+                                      : <span className="oltr mono">{o.ltr}</span>}
                                   </button>
                                 );
                               })}
                             </div>
+                            {isCheck && !timeUp && (
+                              <button className="btn wide" disabled={!cur.length && !sent}
+                                onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: cur } })}>
+                                {!sent ? `Send ${cur.length || "no"} answer${cur.length === 1 ? "" : "s"}`
+                                  : dirty ? `Update — ${cur.length} ticked` : `Sent — ${cur.length} ticked`}
+                              </button>
+                            )}
                             {timeUp ? (
                               <div className="lockstamp">
                                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
@@ -1510,14 +1662,18 @@ function Participant() {
                                     </svg>
                                   </span>
                                   Answer in{sent.rank ? ` — ${sent.rank}${ordinal(sent.rank)} unit to answer` : ""}
+                                  {isCheck && dirty ? " · unsent changes" : ""}
                                 </p>
                                 <p className="hint">
-                                  This is the whole unit's answer. Tap another tile to change it —
-                                  only your last choice counts, and it sets your time.
+                                  This is the whole unit's answer. {isCheck
+                                    ? "Change the ticks and send again — only your last send counts, and it sets your time."
+                                    : "Tap another tile to change it — only your last choice counts, and it sets your time."}
                                 </p>
                               </>
                             ) : (
-                              <p className="hint centre">One answer for the whole unit. Decide together, then tap.</p>
+                              <p className="hint centre">
+                                One answer for the whole unit. Decide together, then {isCheck ? "send" : "tap"}.
+                              </p>
                             )}
                           </>
                         ) : (
@@ -1547,35 +1703,45 @@ function Participant() {
                     {mine.map((q) => {
                       const a = me.answers?.[q.qid];
                       const k = key[q.qid];
-                      const ko = k ? optOf(k.i) : null;
+                      const keyIdx = k ? (k.is || [k.i]) : null;
                       if (!a) {
                         return (
                           <div className="rescard miss" key={q.qid}>
                             <p className="qtext small">{q.text}</p>
                             <p className="rline">No answer sent</p>
-                            {ko && <KeyLine o={ko} text={k.text} mine={false} />}
+                            {keyIdx && <KeyLine idx={keyIdx} text={k.texts ? k.texts.join("; ") : k.text} mine={false} />}
                           </div>
                         );
                       }
-                      const ao = optOf(a.choice ?? 0);
-                      const cls = !state?.keyShown ? "" : a.correct ? "ok" : a.correct === false ? "no" : "";
+                      const mineIdx = a.picks || (a.choice != null ? [a.choice] : []);
+                      const part = a.correct === false && a.acc > 0;
+                      const cls = !state?.keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : "";
+                      const hits = keyIdx ? mineIdx.filter((i) => keyIdx.includes(i)).length : 0;
+                      const wrong = mineIdx.length - hits;
                       return (
                         <div className={`rescard ${cls}`} key={q.qid}>
                           <div className="verdict">
                             <span className="badge">
                               {!state?.keyShown
-                                ? <Glyph shape={ao.shape} size={15} />
+                                ? <Glyph shape={optOf(mineIdx[0] ?? 0).shape} size={15} />
                                 : a.correct
                                   ? <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
                                     strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
                                     <path d="M4 12.5l5.2 5.2L20 7" /></svg>
-                                  : <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                                    strokeWidth="3.4" strokeLinecap="round">
-                                    <path d="M6 6l12 12M18 6L6 18" /></svg>}
+                                  : part
+                                    ? <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                      strokeWidth="3.4" strokeLinecap="round"><path d="M6 12h12" /></svg>
+                                    : <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                      strokeWidth="3.4" strokeLinecap="round">
+                                      <path d="M6 6l12 12M18 6L6 18" /></svg>}
                             </span>
                             <b>{!state?.keyShown ? "Answer sent"
                               : a.correct == null ? "Not auto-scored"
-                                : a.correct ? "Correct" : "Not the key"}</b>
+                                : a.correct ? "Correct"
+                                  : part ? "Partly right" : "Not the key"}</b>
+                            {state?.keyShown && a.acc != null && a.acc < 1 && a.acc > 0 && (
+                              <span className="accpill">{Math.round(a.acc * 100)}% of the key</span>
+                            )}
                           </div>
                           <p className="qtext small">{q.text}</p>
                           {state?.keyShown && (
@@ -1584,14 +1750,26 @@ function Participant() {
                           <div className="metarow">
                             <span>Answered in <b className="mono">{(a.ms / 1000).toFixed(1)}s</b></span>
                             {a.rank && <span><b className="mono">{a.rank}{ordinal(a.rank)}</b> to answer</span>}
+                            {state?.keyShown && keyIdx && q.type === "checkbox" && (
+                              <span><b className="mono">{hits}</b> of {keyIdx.length} right
+                                {wrong ? <>, <b className="mono">{wrong}</b> wrong</> : null}</span>
+                            )}
                           </div>
-                          <KeyLine o={ao} text={a.text} mine />
-                          {ko && !a.correct && <KeyLine o={ko} text={k.text} mine={false} />}
+                          <KeyLine idx={mineIdx} text={a.text} mine />
+                          {keyIdx && !a.correct && (
+                            <KeyLine idx={keyIdx} text={k.texts ? k.texts.join("; ") : k.text} mine={false} />
+                          )}
                         </div>
                       );
                     })}
                     {settings?.leaderboard && state?.keyShown && (
-                      <p className="totalline mono">{(me.total || 0).toLocaleString()} pts total</p>
+                      <div className="totalline">
+                        <b className="mono">{me.pct == null ? `${(me.total || 0).toLocaleString()} pts` : `${Math.round(me.pct)}%`}</b>
+                        <span className="mono">
+                          {(me.total || 0).toLocaleString()}
+                          {me.possible ? ` of ${me.possible.toLocaleString()} available to your unit` : " pts total"}
+                        </span>
+                      </div>
                     )}
                     <p className="hint centre">The facilitator is leading the discussion.</p>
                   </div>
@@ -1610,14 +1788,30 @@ function Participant() {
   );
 }
 
-const KeyLine = ({ o, text, mine }) => (
-  <div className="keyline">
-    <span className="kglyph" style={{ "--c": o.c }}><Glyph shape={o.shape} size={11} /></span>
-    <span>
-      {mine ? "You chose the " : "The key was the "}<b>{o.name}</b>{text ? ` — ${text}` : ""}
-    </span>
-  </div>
-);
+const KeyLine = ({ idx, text, mine }) => {
+  const list = idx || [];
+  if (!list.length) return null;
+  const many = list.length > 1;
+  const names = list.map((i) => optOf(i).name).join(", ");
+  return (
+    <div className="keyline">
+      <span className="kglyphs">
+        {list.map((i) => {
+          const o = optOf(i);
+          return (
+            <span key={i} className="kglyph" style={{ "--c": o.c }}>
+              <Glyph shape={o.shape} size={11} />
+            </span>
+          );
+        })}
+      </span>
+      <span>
+        {mine ? (many ? "You ticked " : "You chose the ") : (many ? "The key was " : "The key was the ")}
+        <b>{names}</b>{text ? ` — ${text}` : ""}
+      </span>
+    </div>
+  );
+};
 
 /* ============================= PROJECTOR ============================= */
 
@@ -1678,6 +1872,7 @@ function Screen() {
   return (
     <div className="screen">
       <div className="projtop striped">
+        <BrandLogo className="big" />
         <div>
           <p className="eyebrow">{inject?.siklus}</p>
           <h1>Inject {inject?.id}</h1>
@@ -1706,13 +1901,14 @@ function Screen() {
                 return (
                   <div className="projq" key={q.qid}>
                     <p className="projqtext">{q.text}</p>
+                    {q.type === "checkbox" && <p className="projtype">Pick all that apply</p>}
                     {q.choices?.length > 0 && (
                       <div className="projopts">
                         {q.choices.map((c, i) => {
                           const o = optOf(i);
-                          const isKey = k && k.i === i;
+                          const isKey = !!k && (k.is || [k.i]).includes(i);
                           const n = phase === "revealed"
-                            ? people.filter((p) => p.answers?.[q.qid]?.choice === i).length : null;
+                            ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
                           return (
                             <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
                               <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
@@ -1752,6 +1948,7 @@ function Screen() {
             );
           })}
           {status !== "live" && <span className="offline">Reconnecting</span>}
+          <AiNote />
         </div>
       </div>
     </div>
@@ -1764,30 +1961,52 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
   const all = useMemo(() => model.injects.flatMap((i) =>
     i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
 
-  const board = useMemo(() =>
-    [...people].sort((a, b) => (b.total || 0) - (a.total || 0)), [people]);
+  /* A unit asked ten questions can out-point a unit asked three without being
+     any better at the exercise. Every comparison here is therefore a percentage
+     of what that unit could have scored; raw points stay visible beside it.
+     Questions with no key marked are excluded, so a sheet mistake costs nobody. */
+  const possibleOf = useCallback((role) => {
+    if (settings.mode !== "auto") return 0;
+    const n = model.injects.flatMap((i) => i.questions).filter((q) =>
+      q.peran === role && (q.type === "choice" || q.type === "checkbox") &&
+      (q.choices || []).some((c) => c.correct)).length;
+    return n * (Number(settings.points) || 0);
+  }, [model, settings.mode, settings.points]);
+
+  const board = useMemo(() => [...people]
+    .map((p) => {
+      const possible = p.possible ?? possibleOf(p.peran);
+      return { ...p, possible, pct: possible ? ((p.total || 0) / possible) * 100 : null };
+    })
+    .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || (b.total || 0) - (a.total || 0)),
+  [people, possibleOf]);
 
   const byRole = useMemo(() => {
     const o = {};
     all.forEach((q) => {
-      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, mc: 0, pts: 0 };
+      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0, pts: 0 };
       const b = o[q.peran];
       b.total += 1;
       const sc = scores[q.qid] || {};
       if (sc.score != null) { b.scored += 1; b.sum += sc.score; }
       people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]).forEach((p) => {
         const a = p.answers[q.qid];
-        if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; }
+        if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; if (a.acc > 0 && !a.correct) b.part += 1; }
         b.pts += a.points || 0;
       });
     });
+    Object.entries(o).forEach(([role, b]) => {
+      b.possible = possibleOf(role);
+      b.pct = b.possible ? (b.pts / b.possible) * 100 : null;
+    });
     return o;
-  }, [all, scores, people]);
+  }, [all, scores, people, possibleOf]);
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const head = ["Siklus", "Inject", "Peran", "Question", "Expected", "Operator", "Answer",
-      "Correct", "Seconds", "Points", "Quality", "Decision", "Answer window (s)", "Notes"];
+    const head = ["Siklus", "Inject", "Peran", "Question", "Type", "Expected", "Operator", "Answer",
+      "Correct", "Accuracy", "Seconds", "Points", "Unit points", "Unit max", "Unit score %",
+      "Quality", "Decision", "Answer window (s)", "Notes"];
     const lines = [head.map(esc).join(",")];
     model.injects.forEach((inj) => {
       const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
@@ -1796,10 +2015,14 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
         const rs = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
         (rs.length ? rs : [null]).forEach((p) => {
           const a = p?.answers[q.qid];
-          lines.push([inj.siklus, inj.id, q.peran, q.text, q.answerRaw,
+          const poss = possibleOf(q.peran);
+          lines.push([inj.siklus, inj.id, q.peran, q.text, q.type, q.answerRaw,
             p ? (settings.showNames ? p.name : unitOf(p.peran)) : "", a?.text || "",
-            a?.correct == null ? "" : a.correct ? "Yes" : "No",
+            a?.correct == null ? "" : a.correct ? "Yes" : a.acc > 0 ? "Partly" : "No",
+            a?.acc == null ? "" : Math.round(a.acc * 100) + "%",
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
+            p ? p.total ?? "" : "", poss || "",
+            p && poss ? Math.round(((p.total || 0) / poss) * 100) + "%" : "",
             sc.score != null ? SCORE_LABELS[sc.score] : "",
             sc.decision ? DECISION_OPTS.find((d) => d.k === sc.decision)?.label : "",
             win, notes[inj.id] || ""].map(esc).join(","));
@@ -1817,7 +2040,9 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
   const totalPts = people.reduce((a, p) => a + (p.total || 0), 0);
   const mcAll = Object.values(byRole).reduce((a, b) => a + b.mc, 0);
   const mcRight = Object.values(byRole).reduce((a, b) => a + b.correct, 0);
-  const maxPts = Math.max(1, ...board.map((p) => p.total || 0));
+  const rated = board.filter((p) => p.pct != null);
+  const avgPct = rated.length ? rated.reduce((a, p) => a + p.pct, 0) / rated.length : null;
+  const uneven = new Set(Object.values(byRole).map((b) => b.possible)).size > 1;
 
   return (
     <>
@@ -1829,12 +2054,20 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             <div><b className="mono">{people.length}</b><span>units seated</span></div>
             <div><b className="mono">{all.length}</b><span>questions</span></div>
             <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>answered correctly</span></div>
-            <div><b className="mono">{totalPts.toLocaleString()}</b><span>points</span></div>
+            <div><b className="mono">{avgPct == null ? "—" : `${Math.round(avgPct)}%`}</b>
+              <span>average unit score</span>
+              <em className="kpisub mono">{totalPts.toLocaleString()} pts total</em></div>
           </div>
 
           {settings.mode === "auto" && settings.leaderboard && board.length > 0 && (
             <>
               <h3>Where the room stood</h3>
+              <p className="hint boardnote">
+                Ranked by each unit's percentage of its own maximum, because units are
+                not asked the same number of questions.{uneven
+                  ? " They were not, in this exercise — the counts differ, so raw points would have favoured whoever was asked more."
+                  : ""}
+              </p>
               <ol className="board">
                 {board.map((p, i) => (
                   <li key={p.pid} className={i === 0 ? "first" : ""}>
@@ -1842,10 +2075,13 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
                     <Crest peran={p.peran} idx={roleIdx(p.peran)} />
                     <span className="bname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
                     <span className="bbar"><i style={{
-                      width: `${((p.total || 0) / maxPts) * 100}%`,
+                      width: `${Math.max(0, Math.min(100, p.pct ?? 0))}%`,
                       background: UNIT_VARS[(roleIdx(p.peran) < 0 ? 0 : roleIdx(p.peran)) % 6],
                     }} /></span>
-                    <b className="mono">{(p.total || 0).toLocaleString()}</b>
+                    <span className="bscore">
+                      <b className="mono">{p.pct == null ? "—" : `${Math.round(p.pct)}%`}</b>
+                      <em className="mono">{(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}</em>
+                    </span>
                   </li>
                 ))}
               </ol>
@@ -1855,14 +2091,19 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
           <h3>By Peran</h3>
           <div className="tblwrap">
             <table className="tbl">
-              <thead><tr><th>Peran</th><th>Correct</th><th>Points</th>
+              <thead><tr><th>Peran</th><th>Asked</th><th>Correct</th><th>Partly</th>
+                <th>Points</th><th>Max</th><th>Score</th>
                 {settings.mode === "manual" && <th>Quality</th>}</tr></thead>
               <tbody>
                 {Object.entries(byRole).map(([role, d]) => (
                   <tr key={role}>
                     <td><Crest peran={role} idx={roleIdx(role)} /> {unitOf(role)}</td>
+                    <td className="mono">{d.total}</td>
                     <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "—"}</td>
+                    <td className="mono">{d.part || "—"}</td>
                     <td className="mono">{d.pts ? d.pts.toLocaleString() : "—"}</td>
+                    <td className="mono dimcell">{d.possible ? d.possible.toLocaleString() : "—"}</td>
+                    <td className="mono strong">{d.pct == null ? "—" : `${Math.round(d.pct)}%`}</td>
                     {settings.mode === "manual" &&
                       <td className="mono">{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>}
                   </tr>
@@ -1877,6 +2118,7 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             <button className="btn danger" onClick={onEnd}>End session</button>
           </div>
           <p className="hint">Ending clears the room for everyone. Download the CSV first.</p>
+          <AiNote />
         </div>
       </main>
     </>
@@ -1999,6 +2241,8 @@ html,body{background:var(--ink)}
 .wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
 .barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
 .build{font-family:var(--mono);font-size:10px;opacity:.55}
+.brandlogo{height:22px;width:auto;max-width:132px;display:block;flex:none;object-fit:contain}
+.brandlogo.big{height:38px;max-width:190px}
 .offline{color:var(--wrong);font-weight:700;font-size:12px}
 .crumb{color:var(--faint);font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
 .injno{font-family:var(--disp);font-weight:800;white-space:nowrap;font-size:16px;letter-spacing:-.03em}
@@ -2047,7 +2291,12 @@ html,body{background:var(--ink)}
 .resolved small{display:block;font-size:11px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;font-weight:700}
 .resolved.taken small{color:var(--warn)}
 .resolved b{font-family:var(--disp);font-size:16px;font-weight:800;letter-spacing:-.025em}
-.doorfoot{margin-top:28px;padding-top:18px;border-top:1px solid var(--edge2)}
+.doorfoot{margin-top:28px;padding-top:18px;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:12px;align-items:flex-start}
+/* deliberately quiet: present for anyone who looks, invisible to anyone who doesn't */
+.aidisc{font-size:9.5px;line-height:1.4;color:var(--faint);opacity:.62;letter-spacing:.02em;margin-top:14px}
+.projstrip .aidisc{margin:0 0 0 auto;font-size:9px}
+.repinner .aidisc{margin-top:10px}
 
 /* ---------- forms ---------- */
 .load{display:flex;justify-content:center;padding:36px 20px 90px}
@@ -2208,7 +2457,8 @@ html,body{background:var(--ink)}
 .who-list .wname{flex:1}
 .who-list li.ok .wname{color:var(--live);font-weight:600}
 .who-list li.no .wname{color:var(--wrong)}
-.wopt{display:grid;place-items:center}
+.who-list li.part .wname{color:var(--warn);font-weight:600}
+.wopt{display:flex;align-items:center;gap:4px}
 .rk{font-size:10.5px;color:var(--faint);width:16px;flex:none}
 .who-list .ms{font-size:12px;color:var(--faint)}
 .who-list .pts{font-size:12.5px;font-weight:700;min-width:56px;text-align:right}
@@ -2269,6 +2519,19 @@ html,body{background:var(--ink)}
   flex:none;color:var(--on-opt)}
 .otxt{font-size:14.5px;font-weight:500;line-height:1.4}
 .oltr{position:absolute;top:15px;right:15px;font-size:11px;font-weight:700;color:var(--faint)}
+/* checkbox: a real tick box, so "several may be right" is legible before anyone taps */
+.otick{position:absolute;top:14px;right:14px;width:19px;height:19px;border-radius:6px;
+  display:grid;place-items:center;box-shadow:inset 0 0 0 1.5px var(--edge);color:transparent}
+.otick.on{background:var(--slab);color:var(--c);box-shadow:inset 0 0 0 1.5px var(--slab)}
+.ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
+.multinote{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
+  color:var(--faint);line-height:1.5;margin:0}
+.multibadge{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--signal-ink);background:var(--signal);border-radius:20px;padding:3px 9px;flex:none}
+.typetag{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--dim);background:var(--ink);box-shadow:inset 0 0 0 1px var(--edge2);
+  border-radius:20px;padding:3px 9px;margin-left:9px;vertical-align:3px;font-family:var(--body)}
+.projtype{font-size:13px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--signal-text);margin-top:-8px}
 .ttx .opt.picked{background:var(--c);box-shadow:inset 0 0 0 1.5px var(--c)}
 .ttx .opt.picked .otxt{color:var(--on-opt);font-weight:600}
 .ttx .opt.picked .oglyph{background:var(--slab);color:var(--c)}
@@ -2286,6 +2549,11 @@ html,body{background:var(--ink)}
   padding:17px;display:flex;flex-direction:column;gap:11px}
 .rescard.ok{background:var(--live-soft);box-shadow:inset 0 0 0 1.5px var(--live-edge)}
 .rescard.no{background:var(--wrong-soft);box-shadow:inset 0 0 0 1.5px var(--wrong-edge)}
+.rescard.part{background:var(--warn-soft);box-shadow:inset 0 0 0 1.5px var(--warn-edge)}
+.rescard.part .badge{background:var(--warn)}
+.accpill{margin-left:auto;font-size:10.5px;font-weight:800;letter-spacing:.06em;color:var(--warn);
+  background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px}
+.kglyphs{display:flex;gap:4px;flex:none;margin-top:1px}
 .rescard.miss{opacity:.7}
 .verdict{display:flex;align-items:center;gap:11px}
 .verdict .badge{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;flex:none;
@@ -2301,7 +2569,9 @@ html,body{background:var(--ink)}
 .kglyph{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;flex:none;
   color:var(--on-opt);background:var(--c);margin-top:1px}
 .rline{margin:0;font-size:12.5px;color:var(--faint)}
-.totalline{text-align:center;font-size:26px;font-weight:700;color:var(--signal-text);letter-spacing:-.03em}
+.totalline{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0}
+.totalline b{font-size:34px;font-weight:700;color:var(--signal-text);letter-spacing:-.04em;line-height:1}
+.totalline span{font-size:12px;color:var(--faint)}
 
 /* ---------- projector ---------- */
 .screen{min-height:100vh;display:flex;flex-direction:column;background:var(--ink)}
@@ -2334,6 +2604,7 @@ html,body{background:var(--ink)}
 .projstrip{display:flex;gap:9px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--edge2);
   padding-top:18px;margin-top:auto}
 .projstrip .lab{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:800}
+.projtop .brandlogo{margin-right:4px}
 .jcode{display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:11px;
   background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
 .jcode b{font-size:16px;font-weight:700;letter-spacing:.1em}
@@ -2347,6 +2618,8 @@ html,body{background:var(--ink)}
 .kpis b{display:block;font-size:26px;font-weight:700;letter-spacing:-.035em;line-height:1.1}
 .kpis span{font-size:10.5px;color:var(--faint);display:block;margin-top:6px;letter-spacing:.09em;
   text-transform:uppercase;font-weight:700}
+.kpisub{display:block;font-style:normal;font-size:11px;color:var(--faint);margin-top:5px;opacity:.8}
+.boardnote{margin:0 0 10px;max-width:74ch}
 .board{list-style:none;margin:0;padding:0;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);
   border-radius:14px;overflow:hidden}
 .board li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge2);font-size:14px}
@@ -2355,8 +2628,12 @@ html,body{background:var(--ink)}
 .rank{font-size:12px;color:var(--faint);width:24px}
 .bname{flex:1;font-weight:600;min-width:100px}
 .bbar{flex:1;height:7px;background:var(--edge2);border-radius:4px;overflow:hidden;max-width:200px}
-.bbar i{display:block;height:100%;border-radius:4px}
-.board b{font-weight:700;min-width:64px;text-align:right}
+.bbar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+.bscore{min-width:104px;text-align:right;flex:none}
+.bscore b{display:block;font-weight:700;font-size:16px;letter-spacing:-.02em}
+.bscore em{display:block;font-style:normal;font-size:10.5px;color:var(--faint);margin-top:1px}
+.tbl .dimcell{color:var(--faint)}
+.tbl .strong{font-weight:700}
 .tblwrap{overflow-x:auto;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px}
 .tbl{width:100%;border-collapse:collapse;font-size:14px}
 .tbl th{text-align:left;font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
@@ -2384,6 +2661,7 @@ html,body{background:var(--ink)}
   .projtop,.projbody{padding-inline:18px}
 }
 @media (max-width:420px){
+  .brandlogo{height:18px;max-width:96px}
   .opts{grid-template-columns:1fr}
   .slot{width:52px;height:66px;font-size:26px}
 }
