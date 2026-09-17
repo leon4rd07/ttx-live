@@ -164,8 +164,8 @@ function deckFor(room, peran) {
       questions: i.questions
         .filter((q) => q.peran === peran)
         .map((q) => ({
-          qid: q.qid, peran: q.peran, text: q.text, type: q.type,
-          // never send which option is correct
+          qid: q.qid, peran: q.peran, text: q.text, type: q.type, weighted: !!q.weighted,
+          // never send which option is correct, nor what any option is worth
           choices: (q.choices || []).map((c) => ({ text: c.text })),
         })),
     })),
@@ -181,7 +181,7 @@ function screenDeck(room) {
       id: i.id, siklus: i.siklus, condition: i.condition, roles: i.roles,
       limit: limitFor(room, i.id),
       questions: i.questions.map((q) => ({
-        qid: q.qid, peran: q.peran, text: q.text, type: q.type,
+        qid: q.qid, peran: q.peran, text: q.text, type: q.type, weighted: !!q.weighted,
         choices: (q.choices || []).map((c) => ({ text: c.text })),
       })),
     })),
@@ -224,6 +224,12 @@ function scoreAnswer(room, q, val, elapsedMs, limit) {
     const miss = picked.length - hit;
     acc = Math.max(0, (hit - miss) / keys.length);
     correct = hit === keys.length && miss === 0;
+  } else if (q.weighted) {
+    /* Tiered single choice: the option's own normalised weight is the accuracy,
+       so a workable-but-slower answer scores something and only the top tier
+       scores in full. */
+    acc = Math.max(0, Math.min(1, Number((q.choices || [])[val]?.w) || 0));
+    correct = acc >= 1;
   } else {
     correct = val === keys[0];
     acc = correct ? 1 : 0;
@@ -234,6 +240,41 @@ function scoreAnswer(room, q, val, elapsedMs, limit) {
   const mult = speed == null ? 1 : 0.5 + 0.5 * speed;
   return { correct, partial: !correct, acc: Math.round(acc * 1000) / 1000,
     points: Math.round(s.points * acc * mult) };
+}
+
+/* Which inject a question belongs to — needed to find its answering window
+   when an essay is graded, long after the answer arrived. */
+function injectOfQid(room, qid) {
+  for (const inj of room.deck.injects) {
+    if (inj.questions.some((q) => q.qid === qid)) return inj;
+  }
+  return null;
+}
+
+/* An essay is scored the same shape as everything else: the facilitator's 1-10
+   judgement plays the part accuracy plays for a multiple choice, and speed still
+   earns up to half. Grade 7 answered instantly beats grade 7 answered at the
+   buzzer, and a grade of 1 is worth something while 0 is not offered. */
+function gradeToPoints(room, a, limit, quality) {
+  const s = room.settings;
+  const acc = Math.max(0, Math.min(10, Number(quality) || 0)) / 10;
+  if (!acc) return 0;
+  const speed = s.speedBonus && limit ? Math.max(0, 1 - (a.ms || 0) / (limit * 1000)) : null;
+  const mult = speed == null ? 1 : 0.5 + 0.5 * speed;
+  return Math.round((Number(s.points) || 0) * acc * mult);
+}
+
+/* Points per question or the speed-bonus switch moved: every grade already given
+   has to be recomputed, or the graded essays keep their old arithmetic. */
+function regradeAll(room) {
+  for (const p of Object.values(room.people)) {
+    for (const [qid, a] of Object.entries(p.answers)) {
+      if (a.quality == null) continue;
+      const inj = injectOfQid(room, qid);
+      a.points = gradeToPoints(room, a, limitFor(room, inj?.id), a.quality);
+    }
+    retally(room, p);
+  }
 }
 
 /* Units are not asked the same number of questions — one may get ten across the
@@ -247,8 +288,9 @@ function possibleFor(room, peran) {
   for (const inj of room.deck.injects) {
     for (const q of inj.questions) {
       if (q.peran !== peran) continue;
+      if (q.type === "open") { n += 1; continue; }        // graded 1-10 after the discussion
       if (q.type !== "choice" && q.type !== "checkbox") continue;
-      if (!(q.choices || []).some((c) => c.correct)) continue;
+      if (!(q.choices || []).some((c) => c.correct)) continue;  // no key: costs nobody
       n += 1;
     }
   }
@@ -316,8 +358,16 @@ wss.on("connection", (ws) => {
         if (!byId || !sockets.get(ws)?.isHost) return;
         if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
         if (m.times) byId.times = { ...byId.times, ...m.times };
-        /* points-per-question or the mode may have moved — every unit's ceiling shifts */
-        Object.values(byId.people).forEach((p) => retally(byId, p));
+        /* points-per-question or the mode may have moved — ceilings shift and every
+           grade already given has to be recomputed against the new numbers, then
+           pushed, or the host and the phones keep showing the old arithmetic */
+        regradeAll(byId);
+        toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
+        for (const [sk, st] of sockets) {
+          if (st.roomId !== byId.id || !st.pid) continue;
+          const pp = byId.people[st.pid];
+          if (pp) send(sk, { t: "ack", me: pp });
+        }
         toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times });
         /* The window for the inject on screen may have just moved. Push the new
            limit to every device and re-arm the auto-reveal against it, otherwise
@@ -329,6 +379,16 @@ wss.on("connection", (ws) => {
           if (byId.state.phase === "open") armReveal(byId);
         }
         markSnapshot();
+        break;
+      }
+
+      /* ---- clock offset ----
+         Every countdown is (now - openedAt), and openedAt is server time. A client
+         whose own clock is off by ten seconds therefore drew a countdown ten seconds
+         off — which is exactly the host-versus-phone gap. The client measures the
+         offset against these replies and counts in server time instead. */
+      case "time": {
+        send(ws, { t: "time", c: m.c, s: Date.now() });
         break;
       }
 
@@ -414,6 +474,27 @@ wss.on("connection", (ws) => {
           settings: byId.settings, times: byId.times || {}, state: byId.state, codes: byId.codes });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
+        break;
+      }
+
+      /* ---- facilitator grades one essay answer, 1-10 ---- */
+      case "grade": {
+        if (!byId || !sockets.get(ws)?.isHost) return;
+        const p = byId.people[m.pid];
+        const a = p?.answers[m.qid];
+        if (!a) return;
+        if (m.quality == null) { a.quality = null; a.points = 0; }
+        else {
+          a.quality = Math.max(1, Math.min(10, Math.round(Number(m.quality)) || 1));
+          const inj = injectOfQid(byId, m.qid);
+          a.points = gradeToPoints(byId, a, limitFor(byId, inj?.id), a.quality);
+        }
+        a.correct = null;   // an essay is never right or wrong, only better or worse
+        retally(byId, p);
+        toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
+        /* the unit sees its own number as soon as the key is released */
+        for (const [sock, st] of sockets) if (st.pid === p.pid) send(sock, { t: "ack", me: p });
+        markSnapshot();
         break;
       }
 
