@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b24";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b26";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -1272,15 +1272,20 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
               <span className="cghead">
                 <Crest peran={r} idx={i} />
                 <b>{unitOf(r)}</b>
-                {!seat && <span className="seatopen">kursi kosong</span>}
               </span>
               <b className="cgcode">{code}</b>
-              <span className="cgwho">
-                {!seat ? "kode belum dipakai"
-                  : showNames
+              {/* Baris status memakai satu slot yang sama untuk kursi kosong
+                  maupun kursi terisi, jadi nama unit sepanjang apa pun tidak
+                  pernah mendorong badge keluar dari kartu. */}
+              {!seat ? (
+                <span className="seatopen">kursi kosong</span>
+              ) : (
+                <span className="cgwho">
+                  {showNames
                     ? `${seat.name}${seat.live === false ? " · offline" : ""}`
                     : seat.live === false ? "sudah duduk · offline" : "sudah duduk"}
-              </span>
+                </span>
+              )}
             </li>
           );
         })}
@@ -1380,8 +1385,10 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
 
   return (
     <div className="qcard">
-      <p className="qtext">{q.text}</p>
+      {/* Badge tipe berdiri sebagai label di atas pertanyaan, bukan menggantung
+          di bawahnya, supaya tidak pernah terlihat menempel pada teks. */}
       <p className="qtypeline"><TypeBadge q={q} /></p>
+      <p className="qtext">{q.text}</p>
 
       {isAuto ? (
         <>
@@ -1749,11 +1756,11 @@ function Participant() {
                     };
                     return (
                       <div className="pq" key={q.qid}>
-                        <p className="pqtext">{q.text}</p>
                         <p className="qtypeline">
                           <TypeBadge q={q} />
                           <span>{TYPE_HINT[kindOf(q)]}</span>
                         </p>
+                        <p className="pqtext">{q.text}</p>
                         {isMC || isCheck ? (
                           <>
                             <div className="opts">
@@ -2586,11 +2593,13 @@ html,body{background:var(--ink)}
   padding:16px 17px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
 .codegrid li::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c)}
 .codegrid li.in{background:var(--rise);box-shadow:inset 0 0 0 1px var(--edge)}
-.cghead{display:flex;align-items:center;gap:9px}
-.cghead b{font-size:13.5px;font-weight:700;line-height:1.3}
-.seatopen{margin-left:auto;font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
-  color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
-  border-radius:20px;padding:2px 7px;flex:none}
+.cghead{display:flex;align-items:center;gap:9px;min-width:0}
+.cghead b{font-size:13.5px;font-weight:700;line-height:1.3;min-width:0;overflow-wrap:anywhere}
+/* Badge kursi kosong duduk di baris status, sejajar dengan teks "sudah duduk",
+   dan lebarnya mengikuti isinya sendiri. */
+.seatopen{align-self:flex-start;max-width:100%;font-size:9.5px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--warn);background:var(--warn-soft);
+  box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px;white-space:nowrap}
 .cgcode{display:block;font-family:var(--mono);font-size:29px;font-weight:700;letter-spacing:.13em;
   color:var(--c);line-height:1}
 .cgwho{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2720,9 +2729,10 @@ html,body{background:var(--ink)}
 .ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
 .qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
   color:var(--faint);line-height:1.5;margin:0}
-/* Di layar host badge duduk di bawah pertanyaan, jadi ia butuh jarak sendiri
-   supaya tidak menempel pada teks pertanyaan maupun pada daftar jawaban. */
-.qcard .qtypeline{margin:11px 0 16px}
+/* Badge tipe adalah label di atas pertanyaan, jadi jaraknya diatur di sini:
+   aturan reset .ttx p{margin:0} mengalahkan margin pada .qtypeline sendiri. */
+.qcard .qtypeline{margin:0 0 10px}
+.qcard .qtext{margin:0 0 15px}
 .typebadge{font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
   border-radius:20px;padding:3px 9px;flex:none;font-family:var(--body);white-space:nowrap}
 .typebadge.choice{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
