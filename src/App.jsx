@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b21";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b23";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -68,25 +68,30 @@ function monogram(s) {
    a unit that happens to be asked only single-choice never learns the others exist. */
 const TYPE_LABEL = {
   choice: "Pilihan tunggal",
+  weighted: "Pilihan berbobot",
   checkbox: "Pilih semua yang sesuai",
   open: "Esai",
 };
 const TYPE_HINT = {
   choice: "Pilih satu jawaban.",
+  weighted: "Pilih satu jawaban. Ada pilihan yang lebih tepat dan ada yang kurang tepat.",
   checkbox: "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.",
   open: "Jawaban teks bebas, dinilai fasilitator setelah diskusi.",
 };
-const TypeBadge = ({ type }) => (
-  <span className={`typebadge ${type}`}>{TYPE_LABEL[type] || type}</span>
-);
+const kindOf = (q) => (q.type === "choice" && q.weighted ? "weighted" : q.type);
+const TypeBadge = ({ q }) => {
+  const k = kindOf(q);
+  return <span className={`typebadge ${k}`}>{TYPE_LABEL[k] || k}</span>;
+};
 
-const SCORE_LABELS = ["Tidak dijawab", "Sebagian", "Memadai", "Kuat"];
-const DECISION_OPTS = [
-  { k: "reached", label: "Diputuskan", color: "var(--live)" },
-  { k: "deferred", label: "Ditunda", color: "var(--warn)" },
-  { k: "none", label: "Tidak ada keputusan", color: "var(--wrong)" },
-  { k: "na", label: "Tidak relevan", color: "var(--faint)" },
-];
+/* Essays are graded 1-10 by the facilitator. The number is not the score: the
+   server turns it into points, and answering early still earns up to half again,
+   so the same grade is worth more to whoever committed sooner. */
+const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const qualityWord = (v) =>
+  v == null ? "belum dinilai"
+    : v >= 9 ? "sangat kuat" : v >= 7 ? "kuat" : v >= 5 ? "memadai" : v >= 3 ? "sebagian" : "lemah";
+const gradeCls = (v) => (v == null ? "" : v >= 7 ? "ok" : v >= 4 ? "part" : "no");
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const rand = (n = 4) => Array.from({ length: n }, () => ALPHABET[Math.floor(Math.random() * 32)]).join("");
@@ -204,6 +209,32 @@ const AiNote = () => (
   <p className="aidisc">Dibuat internal dengan bantuan AI</p>
 );
 
+/* ------------------------- the one true clock -------------------------- *
+ * Every countdown is (now - openedAt) and openedAt is stamped by the server.
+ * Each end was subtracting its OWN Date.now(), so a laptop ten seconds off the
+ * server drew a countdown ten seconds off the phones. Measure the offset once
+ * per connection and count in server time everywhere.
+ * ---------------------------------------------------------------------- */
+let clockOffset = 0, bestRtt = Infinity;
+const serverNow = () => Date.now() + clockOffset;
+function noteTimeSample(c, srv) {
+  const now = Date.now(), rtt = now - c;
+  if (rtt < 0 || rtt > 4000) return;
+  if (rtt <= bestRtt) { bestRtt = rtt; clockOffset = srv + rtt / 2 - now; }
+}
+/* Four probes on every (re)connect; the round trip with the least latency gives
+   the least-wrong offset. */
+function useClockSync(send, gen) {
+  useEffect(() => {
+    if (!gen) return;
+    bestRtt = Infinity;
+    let n = 0, t;
+    const probe = () => { send({ t: "time", c: Date.now() }); if (++n < 4) t = setTimeout(probe, 350); };
+    probe();
+    return () => clearTimeout(t);
+  }, [send, gen]);
+}
+
 /* ---------------------------- transport ---------------------------- */
 
 /* True once the answering window has closed. Recomputed on a tick so the
@@ -212,7 +243,7 @@ function useExpired(openedAt, limit, active) {
   const [over, setOver] = useState(false);
   useEffect(() => {
     if (!active || !limit || !openedAt) { setOver(false); return; }
-    const check = () => setOver(Date.now() - openedAt >= limit * 1000);
+    const check = () => setOver(serverNow() - openedAt >= limit * 1000);
     check();
     const iv = setInterval(check, 250);
     return () => clearInterval(iv);
@@ -287,7 +318,7 @@ const HEADER_ALIASES = {
 };
 
 /* An optional Tipe column decides the question type outright. Leave it blank, or
-   leave the column out entirely, and the shape of the Answer cell decides — so
+   leave the column out entirely, and the shape of the Answer cell decides, so
    every sheet written before b20 still imports unchanged.
 
    Note "multiple choice" maps to single choice, because that is what people mean
@@ -317,22 +348,38 @@ function detectAnswerType(raw) {
   if (bare.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
   return "open";
 }
+/* Stars are tiers, not a yes or no. Three stars is the best answer, two is
+   workable, one is weak, none is wrong. A sheet written with a single star per
+   question still behaves exactly as before, because one star is then the top
+   tier and everything else is zero. */
 const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-  .map((s) => ({
-    /* strip the correct-marker first, then the A./1) prefix — the other
-       order leaves the letter in the text and the UI renders it twice */
-    text: s
-      .replace(/^\s*\*+\s*/, "").replace(/\s*\*+\s*$/, "")
-      .replace(/\(correct\)|\[x\]/gi, "")
-      .replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "")
-      .trim(),
-    correct: /^\s*\*|\*\s*$|\(correct\)|\[x\]/i.test(s),
-  }));
+  .map((s) => {
+    const lead = (s.match(/^\s*(\*+)/) || [null, ""])[1].length;
+    const trail = (s.match(/(\*+)\s*$/) || [null, ""])[1].length;
+    const flagged = /\(correct\)|\[x\]/i.test(s);
+    const stars = Math.max(lead, trail) || (flagged ? 1 : 0);
+    return {
+      /* strip the markers first, then the A./1) prefix. The other order leaves
+         the letter in the text and the UI renders it twice. */
+      text: s
+        .replace(/^\s*\*+\s*/, "").replace(/\s*\*+\s*$/, "")
+        .replace(/\(correct\)|\[x\]/gi, "")
+        .replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "")
+        .trim(),
+      stars,
+      correct: stars > 0,
+    };
+  });
 
 function buildModel(rows) {
   if (!rows.length) return { injects: [], roles: [], warnings: ["Sheet ini tidak berisi baris data."] };
   const hmap = {};
-  Object.keys(rows[0]).forEach((k) => {
+  /* Take the union of every row's keys, not just the first row's. A sheet whose
+     first row leaves an optional column blank can arrive without that key, and
+     reading only row one would drop the column for the whole file. */
+  const headers = [];
+  rows.forEach((r) => Object.keys(r).forEach((k) => { if (!headers.includes(k)) headers.push(k); }));
+  headers.forEach((k) => {
     const hit = HEADER_ALIASES[normKey(k)];
     if (hit && !hmap[hit]) hmap[hit] = k;
   });
@@ -385,13 +432,29 @@ function buildModel(rows) {
        treat two or more starred options as a checkbox question. */
     let type = r.qtype || detectAnswerType(r.answer);
     let choices = type === "choice" || type === "checkbox" ? parseChoices(r.answer) : [];
-    if (!r.qtype && type === "choice" && choices.filter((c) => c.correct).length > 1) type = "checkbox";
+    const topStars = choices.length ? Math.max(...choices.map((c) => c.stars)) : 0;
+    /* Two or more stars on one option means graded tiers, so it stays a single
+       choice. Several options at one star each is the tick-all-that-apply case. */
+    const tiered = topStars >= 2;
+    if (!r.qtype && type === "choice" && !tiered && choices.filter((c) => c.correct).length > 1) {
+      type = "checkbox";
+    }
     if (r.qtype === "checkbox" && !choices.length) { type = "open"; choices = []; badCheck.push(r.inject); }
+    let weighted = false;
+    if (type === "choice" && topStars > 0) {
+      weighted = tiered;
+      /* Normalised against the best tier in this question, so 3/2/1 and 30/20/10
+         score identically. Only the top tier counts as the correct answer, which
+         keeps the answer key, the report and the projector unchanged. */
+      choices.forEach((c) => { c.w = c.stars / topStars; c.correct = c.stars === topStars; });
+    } else {
+      choices.forEach((c) => { c.w = c.correct ? 1 : 0; });
+    }
     if ((type === "choice" || type === "checkbox") && !choices.some((c) => c.correct)) noKey += 1;
     (r.roles.length ? r.roles : ["(untargeted)"]).forEach((peran, k) => {
       inj.questions.push({
         qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
-        peran, text: r.question, answerRaw: r.answer, type, choices,
+        peran, text: r.question, answerRaw: r.answer, type, choices, weighted,
       });
     });
   });
@@ -433,7 +496,7 @@ function buildModel(rows) {
 }
 
 const SAMPLE = [
-  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n*B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\nC. Menelepon vendor dan menanyakan aktivitas mereka\nD. Membuat tiket dan menyerahkan saat pergantian shift" },
+  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift" },
   { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?", Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati" },
   { "Inject No.": "2", Siklus: "Siklus 1 - Deteksi", Waktu: "1.5", Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.", Peran: "Risk Management", Tipe: "pg", Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?", Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
   { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox", Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.", Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
@@ -455,7 +518,7 @@ class Boundary extends React.Component {
         <h1>Ada yang rusak</h1>
         <p className="muted">
           Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi,
-          bukan perangkat Anda — kirimkan pesan ini ke penyelenggara latihan.
+          bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.
         </p>
         <pre>{String(this.state.err?.message || this.state.err)}</pre>
         <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>
@@ -496,7 +559,7 @@ export default function App() {
 function Ring({ openedAt, limit, size = "s72", cap }) {
   const [left, setLeft] = useState(limit);
   useEffect(() => {
-    const tick = () => setLeft(Math.max(0, limit - (Date.now() - (openedAt || Date.now())) / 1000));
+    const tick = () => setLeft(Math.max(0, limit - (serverNow() - (openedAt || serverNow())) / 1000));
     tick();
     const iv = setInterval(tick, 200);
     return () => clearInterval(iv);
@@ -587,7 +650,6 @@ function Host({ onExit }) {
   const [openedAt, setOpenedAt] = useState(null);
   const [keyShown, setKeyShown] = useState(false);
   const [people, setPeople] = useState([]);
-  const [scores, setScores] = useState({});
   const [notes, setNotes] = useState({});
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
@@ -614,11 +676,13 @@ function Host({ onExit }) {
       if (m.openedAt) setOpenedAt(m.openedAt);
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
     else if (m.t === "denied") { setDenied(true); lsDel(K_KEY); }
     else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
   }, []);
   const { send, status, gen } = useSocket(onMsg);
+  useClockSync(send, gen);
 
   /* re-attach after any reconnect */
   useEffect(() => {
@@ -629,7 +693,7 @@ function Host({ onExit }) {
     const s = lsGet(K_HOST);
     if (s?.roomId && s?.model) {
       setRoomId(s.roomId); setModel(s.model); setFileName(s.fileName || "");
-      setScores(s.scores || {}); setNotes(s.notes || {});
+      setNotes(s.notes || {});
       setCodes(s.codes || {}); setSettings(s.settings || settings); setTimes(s.times || {});
       setScreen("run");
       send({ t: "rehost", roomId: s.roomId });
@@ -641,10 +705,10 @@ function Host({ onExit }) {
   useEffect(() => {
     if (!booted || !model || !roomId) return;
     const t = setTimeout(() => {
-      lsSet(K_HOST, { roomId, model, fileName, scores, notes, codes, settings, times });
+      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times });
     }, 500);
     return () => clearTimeout(t);
-  }, [booted, model, roomId, fileName, scores, notes, codes, settings, times]);
+  }, [booted, model, roomId, fileName, notes, codes, settings, times]);
 
   useEffect(() => {
     if (!roomId || screen !== "run") return;
@@ -662,7 +726,7 @@ function Host({ onExit }) {
     setWarnings(built.warnings); setFileName(name); setParseError("");
     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
     setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
-    setScores({}); setNotes({}); setActiveIdx(0); setPhase("lobby");
+    setNotes({}); setActiveIdx(0); setPhase("lobby");
     setScreen("config");
   }
 
@@ -703,9 +767,6 @@ function Host({ onExit }) {
     setModel(null); setRoomId(""); setPeople([]); setScreen("setup"); onExit();
   }
 
-  const setScore = (qid, patch) =>
-    setScores((s) => ({ ...s, [qid]: { score: null, decision: null, ...(s[qid] || {}), ...patch } }));
-
   const inject = model?.injects[activeIdx];
   const unitOf = (peran) => {
     if (settings.showUnits) return peran;
@@ -732,7 +793,7 @@ function Host({ onExit }) {
   const advance = useCallback(() => {
     echo.current = "";
     if (phase === "lobby") setPhase("briefing");
-    else if (phase === "briefing") { setOpenedAt(Date.now()); setPhase("open"); }
+    else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
     else if (phase === "open") setPhase("revealed");
     else goNext();
   }, [phase, goNext]);
@@ -774,10 +835,17 @@ function Host({ onExit }) {
               Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban
               (<code>A. …</code> / <code>B. …</code>) dan beri tanda <code>*</code> di depan
               opsi yang benar. Beri tanda pada <b>dua opsi atau lebih</b> dan pertanyaan itu
-              menjadi centang-semua-yang-sesuai.
+              menjadi centang semua yang sesuai.
             </p>
             <p className="lede">
-              Kolom <b>Tipe</b> opsional menentukan langsung — <code>pg</code>,{" "}
+              Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang
+              kurang tepat. <code>***</code> untuk yang terbaik, <code>**</code> untuk yang
+              masih bisa diterima, <code>*</code> untuk yang lemah, tanpa bintang untuk yang
+              salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi
+              <code>3 2 1</code> dan <code>30 20 10</code> memberi hasil yang sama.
+            </p>
+            <p className="lede">
+              Kolom <b>Tipe</b> opsional menentukan langsung: <code>pg</code>,{" "}
               <code>checkbox</code> atau <code>esai</code>. Kosongkan, atau hilangkan
               kolomnya, dan bentuk sel Jawaban yang menentukan.
             </p>
@@ -889,7 +957,7 @@ function Host({ onExit }) {
             <h3>Kursi</h3>
             <p className="hint">
               Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang
-              memakainya memegang kursi itu — perangkat kedua dengan kode sama akan ditolak.
+              memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.
               Ubah kode mana pun, atau buat yang baru.
             </p>
             <ul className="codelist">
@@ -927,7 +995,7 @@ function Host({ onExit }) {
 
   /* ---- report ---- */
   if (screen === "report") {
-    return <Report {...{ model, scores, notes, people, settings, roleIdx, fileName, unitOf }}
+    return <Report {...{ model, notes, people, settings, roleIdx, fileName, unitOf }}
       onBack={() => setScreen("run")} onEnd={endSession} />;
   }
 
@@ -958,7 +1026,7 @@ function Host({ onExit }) {
           <b className="injno">Inject {inject.id}</b>
           <PhaseSteps phase={phase} onPick={(k) => {
             echo.current = "";
-            if (k === "open" && phase !== "open") setOpenedAt(Date.now());
+            if (k === "open" && phase !== "open") setOpenedAt(serverNow());
             setPhase(k);
           }} />
         </>}
@@ -998,7 +1066,7 @@ function Host({ onExit }) {
                     <button onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
                       <span className="tldot" aria-hidden="true" />
                       <span className="tlno">{inj.id}</span>
-                      <span className="tltext">{words}{words ? "…" : "—"}</span>
+                      <span className="tltext">{words}{words ? "…" : "·"}</span>
                     </button>
                   </li>
                 </React.Fragment>
@@ -1040,7 +1108,7 @@ function Host({ onExit }) {
                     </span>
                   )}
                   <button className="btn" onClick={() => {
-                    echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
+                    echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
                   }}>Buka untuk menjawab</button>
                 </>)}
 
@@ -1051,7 +1119,7 @@ function Host({ onExit }) {
                   <span className="msg">
                     {seatsHere.length === 0 ? "Belum ada unit yang mengambil kursi untuk inject ini"
                       : allIn ? "Semua unit sudah menjawab"
-                        : `Menunggu jawaban — ${seatsHere.length} dari ${inject.roles.length} unit sudah duduk`}
+                        : `Menunggu jawaban, ${seatsHere.length} dari ${inject.roles.length} unit sudah duduk`}
                   </span>
                   <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
                     Buka jawaban
@@ -1070,7 +1138,7 @@ function Host({ onExit }) {
                     </button>
                   )}
                   <button className="btn quiet" onClick={() => {
-                    echo.current = ""; setOpenedAt(Date.now()); setPhase("open");
+                    echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
                   }}>Buka lagi</button>
                 </>)}
               </div>
@@ -1083,11 +1151,13 @@ function Host({ onExit }) {
                       <li key={q.qid}>
                         <Crest peran={q.peran} idx={roleIdx(q.peran)} />
                         <span className="qpunit">{unitOf(q.peran)}</span>
-                        <TypeBadge type={q.type} />
+                        <TypeBadge q={q} />
                         <span className="qptext">{q.text}</span>
                         {q.choices?.length > 0 && (
                           <span className="qpkeys mono">
-                            {q.choices.filter((c) => c.correct).length}/{q.choices.length} kunci
+                            {q.weighted
+                              ? `${Math.max(...q.choices.map((c) => c.stars))} tingkat`
+                              : `${q.choices.filter((c) => c.correct).length}/${q.choices.length} kunci`}
                           </span>
                         )}
                       </li>
@@ -1130,8 +1200,7 @@ function Host({ onExit }) {
                   {inject.questions.filter((q) => q.peran === peran).map((q) => (
                     <QuestionResult key={q.qid} {...{ q, settings, keyShown, unitOf }}
                       answers={answeredBy(q)}
-                      sc={scores[q.qid] || {}}
-                      onScore={(patch) => setScore(q.qid, patch)}
+                      onGrade={(pid, qid, quality) => send({ t: "grade", roomId, pid, qid, quality })}
                       showExpected={revealKey[q.qid]}
                       toggleExpected={() => setRevealKey((v) => ({ ...v, [q.qid]: !v[q.qid] }))} />
                   ))}
@@ -1142,7 +1211,7 @@ function Host({ onExit }) {
                 <div className="notes">
                   <label htmlFor={`n-${inject.id}`}>Catatan fasilitator</label>
                   <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
-                    placeholder="Celah, perdebatan, siapa yang ragu — apa pun yang bisa jadi temuan"
+                    placeholder="Celah, perdebatan, siapa yang ragu, apa pun yang bisa jadi temuan"
                     onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
                 </div>
               )}
@@ -1186,7 +1255,7 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
         <div>
           <h2>{model.roles.length} unit, {model.roles.length} kursi</h2>
           <p className="muted">
-            Satu kursi per unit bisnis — kode menentukan unitnya, dan perangkat pertama yang
+            Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang
             memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.
           </p>
         </div>
@@ -1295,7 +1364,7 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
 
 const picksOf = (a) => (a ? (a.picks || (a.choice != null ? [a.choice] : [])) : []);
 
-function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggleExpected, keyShown, unitOf }) {
+function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExpected, keyShown, unitOf }) {
   const isCheck = q.type === "checkbox";
   const isAuto = settings.mode === "auto" && (q.type === "choice" || isCheck);
   const correctIdx = q.choices ? q.choices.findIndex((c) => c.correct) : -1;
@@ -1313,7 +1382,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
   return (
     <div className="qcard">
       <p className="qtext">{q.text}</p>
-      <p className="qtypeline"><TypeBadge type={q.type} /></p>
+      <p className="qtypeline"><TypeBadge q={q} /></p>
 
       {isAuto ? (
         <>
@@ -1321,12 +1390,21 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
             {dist.map((c) => {
               const o = optOf(c.i);
               const isKey = keyShown && c.correct;
+              const tier = q.weighted && c.stars > 0 ? "★".repeat(c.stars) : "";
               return (
                 <li key={c.i} className={`vrow ${isKey ? "correct" : ""}`} style={{ "--c": o.c }}>
                   <span className="vglyph"><Glyph shape={o.shape} size={14} /></span>
                   <span className="vtrack">
                     <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
-                    <span className="vlabel">{c.text}{isKey && <b> — kunci</b>}</span>
+                    <span className="vlabel">
+                      {c.text}
+                      {q.weighted && (
+                        <span className={`tier ${c.correct ? "top" : c.stars ? "mid" : "zero"}`}>
+                          {tier || "tanpa nilai"}{c.correct ? " terbaik" : ""}
+                        </span>
+                      )}
+                      {isKey && !q.weighted && <b> kunci</b>}
+                    </span>
                   </span>
                   <span className="vn mono">{c.n}<em>unit</em></span>
                 </li>
@@ -1352,7 +1430,7 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
                     })}
                   </span>
                   <span className="ms mono">{(a.ms / 1000).toFixed(1)}s</span>
-                  <span className="pts mono">{keyShown ? (a.points ? `+${a.points}` : "0") : "—"}</span>
+                  <span className="pts mono">{keyShown ? (a.points ? `+${a.points}` : "0") : "·"}</span>
                 </li>
               );
             })}
@@ -1364,37 +1442,38 @@ function QuestionResult({ q, answers, settings, sc, onScore, showExpected, toggl
           {answers.length === 0
             ? <p className="noanswer">Unit ini tidak menjawab.</p>
             : <ul className="answers">
-              {answers.map((p) => (
-                <li key={p.pid}>
-                  <span className="who">
-                    {settings.showNames ? p.name : unitOf(p.peran)} · {(p.answers[q.qid].ms / 1000).toFixed(0)}s
-                  </span>
-                  <p>{p.answers[q.qid].text}</p>
-                </li>
-              ))}
+              {answers.map((p) => {
+                const a = p.answers[q.qid];
+                return (
+                  <li key={p.pid}>
+                    <span className="who">
+                      {settings.showNames ? p.name : unitOf(p.peran)} · {(a.ms / 1000).toFixed(0)} dtk
+                    </span>
+                    <p>{a.text}</p>
+                    <div className="grade">
+                      <span className="dimlab">Nilai</span>
+                      <div className="gscale" role="group" aria-label="Nilai 1 sampai 10">
+                        {GRADES.map((v) => (
+                          <button key={v} className={a.quality === v ? `on ${gradeCls(v)}` : ""}
+                            title={qualityWord(v)}
+                            onClick={() => onGrade(p.pid, q.qid, a.quality === v ? null : v)}>{v}</button>
+                        ))}
+                      </div>
+                      <span className="gout">
+                        {a.quality == null ? "belum dinilai"
+                          : <>{qualityWord(a.quality)} · <b className="mono">+{(a.points || 0).toLocaleString()}</b> poin</>}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>}
           <div className="qfoot">
-            <div className="dims">
-              <div className="dim">
-                <span className="dimlab">Kualitas</span>
-                <div className="scorer" role="group" aria-label="Kualitas">
-                  {SCORE_LABELS.map((l, s) => (
-                    <button key={s} className={sc.score === s ? "on" : ""} title={l} aria-label={l}
-                      onClick={() => onScore({ score: sc.score === s ? null : s })}>{s}</button>
-                  ))}
-                </div>
-                <span className="scorelab">{sc.score != null ? SCORE_LABELS[sc.score] : "—"}</span>
-              </div>
-              <div className="dim">
-                <span className="dimlab">Keputusan</span>
-                <div className="dseg" role="group" aria-label="Keputusan">
-                  {DECISION_OPTS.map((o) => (
-                    <button key={o.k} style={{ "--c": o.color }} className={sc.decision === o.k ? "on" : ""}
-                      onClick={() => onScore({ decision: sc.decision === o.k ? null : o.k })}>{o.label}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <p className="hint">
+              Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih
+              menambah hingga separuh. Unit melihat angkanya begitu Anda menekan
+              <b> Tampilkan kunci jawaban</b>.
+            </p>
             {q.answerRaw && (
               <button className="link" onClick={toggleExpected}>
                 {showExpected ? "Sembunyikan jawaban model" : "Lihat jawaban model"}
@@ -1454,6 +1533,7 @@ function Participant() {
     else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
     else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
     else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "evicted") {
       lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
     }
@@ -1462,6 +1542,7 @@ function Participant() {
     }
   }, []);
   const { send, status, gen } = useSocket(onMsg);
+  useClockSync(send, gen);
 
   const meRoom = me?.roomId, mePid = me?.pid, meSeat = me?.seat;
   useEffect(() => {
@@ -1519,7 +1600,7 @@ function Participant() {
             <h1>Masukkan kode unit Anda</h1>
             <p className="lede">
               Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang
-              benar — satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.
+              benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.
             </p>
 
             <div className="slots" onClick={() => codeRef.current?.focus()}>
@@ -1635,7 +1716,7 @@ function Participant() {
                   <span className="pulse" />
                   <p className="muted">
                     Baca skenarionya. Pertanyaan segera dibuka
-                    {limit > 0 ? ` — waktu menjawab unit Anda ${fmt(limit)}` : ""}.
+                    {limit > 0 ? `. Waktu menjawab unit Anda ${fmt(limit)}` : ""}.
                   </p>
                 </div>
               )}
@@ -1656,20 +1737,23 @@ function Participant() {
                     const auto = settings.mode === "auto" && q.choices?.length;
                     const isMC = q.type === "choice" && auto;
                     const isCheck = q.type === "checkbox" && auto;
-                    /* Single choice commits on tap. Checkbox collects ticks locally and
-                       commits on Send, because there is no single tap that means "done". */
+                    /* Both kinds commit on tap. A checkbox sends the whole set on every
+                       tick, so there is no button to forget — and the server re-stamps the
+                       time each send, exactly as it does when a unit changes a single choice. */
                     const cur = ticks[q.qid] ?? sent?.picks ?? [];
-                    const toggle = (i) => setTicks((t) => ({
-                      ...t,
-                      [q.qid]: cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i].sort((a, b) => a - b),
-                    }));
-                    const dirty = JSON.stringify(cur) !== JSON.stringify(sent?.picks ?? []);
+                    const toggle = (i) => {
+                      const next = cur.includes(i)
+                        ? cur.filter((x) => x !== i)
+                        : [...cur, i].sort((a, b) => a - b);
+                      setTicks((t) => ({ ...t, [q.qid]: next }));
+                      send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: next } });
+                    };
                     return (
                       <div className="pq" key={q.qid}>
                         <p className="pqtext">{q.text}</p>
                         <p className="qtypeline">
-                          <TypeBadge type={q.type} />
-                          <span>{TYPE_HINT[q.type]}</span>
+                          <TypeBadge q={q} />
+                          <span>{TYPE_HINT[kindOf(q)]}</span>
                         </p>
                         {isMC || isCheck ? (
                           <>
@@ -1704,13 +1788,6 @@ function Participant() {
                                 );
                               })}
                             </div>
-                            {isCheck && !timeUp && (
-                              <button className="btn wide" disabled={!cur.length && !sent}
-                                onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: cur } })}>
-                                {!sent ? `Kirim ${cur.length} jawaban`
-                                  : dirty ? `Perbarui — ${cur.length} dicentang` : `Terkirim — ${cur.length} dicentang`}
-                              </button>
-                            )}
                             {timeUp ? (
                               <div className="lockstamp">
                                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
@@ -1718,7 +1795,7 @@ function Participant() {
                                   <path d="M7 11V8a5 5 0 0110 0v3" />
                                   <rect x="4" y="11" width="16" height="9" rx="2.4" />
                                 </svg>
-                                Waktu habis — jawaban terkunci
+                                Waktu habis, jawaban terkunci
                               </div>
                             ) : sent ? (
                               <>
@@ -1729,18 +1806,18 @@ function Participant() {
                                       <path d="M4 12.5l5.2 5.2L20 7" />
                                     </svg>
                                   </span>
-                                  Jawaban masuk{sent.rank ? ` — unit ${nth(sent.rank)} yang menjawab` : ""}
-                                  {isCheck && dirty ? " · ada perubahan belum dikirim" : ""}
+                                  Jawaban masuk{isCheck ? ` · ${cur.length} dicentang` : ""}
+                                  {sent.rank ? `, unit ${nth(sent.rank)} yang menjawab` : ""}
                                 </p>
                                 <p className="hint">
                                   Ini jawaban untuk seluruh unit. {isCheck
-                                    ? "Ubah centangnya lalu kirim lagi — hanya kiriman terakhir yang dihitung, dan itu yang menentukan waktu Anda."
-                                    : "Ketuk kotak lain untuk mengubah — hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda."}
+                                    ? "Centang atau lepas kapan saja. Setiap perubahan langsung terkirim, dan waktu Anda mengikuti perubahan terakhir."
+                                    : "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda."}
                                 </p>
                               </>
                             ) : (
                               <p className="hint centre">
-                                Satu jawaban untuk seluruh unit. Putuskan bersama, lalu {isCheck ? "kirim" : "ketuk"}.
+                                Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.
                               </p>
                             )}
                           </>
@@ -1766,7 +1843,7 @@ function Participant() {
               ))}
 
               {phase === "revealed" && (
-                settings?.mode === "auto" && mine.length > 0 ? (
+                mine.length > 0 ? (
                   <div className="myresult">
                     {mine.map((q) => {
                       const a = me.answers?.[q.qid];
@@ -1781,8 +1858,37 @@ function Participant() {
                           </div>
                         );
                       }
+                      if (q.type === "open") {
+                        const shown = state?.keyShown;
+                        const graded = shown && a.quality != null;
+                        return (
+                          <div className={`rescard ${graded ? gradeCls(a.quality) : ""}`} key={q.qid}>
+                            <div className="verdict">
+                              <span className="badge">
+                                {graded
+                                  ? <b className="gnum mono">{a.quality}</b>
+                                  : <Glyph shape="circle" size={13} />}
+                              </span>
+                              <b>{!shown ? "Jawaban terkirim"
+                                : a.quality == null ? "Belum dinilai" : `Nilai ${a.quality} dari 10`}</b>
+                              {graded && <span className="accpill">{qualityWord(a.quality)}</span>}
+                            </div>
+                            <p className="qtext small">{q.text}</p>
+                            {graded && <div className="ptsbig mono">+{(a.points || 0).toLocaleString()}</div>}
+                            <div className="metarow">
+                              <span>Dijawab dalam <b className="mono">{(a.ms / 1000).toFixed(1)} dtk</b></span>
+                              {graded && <span>Nilai fasilitator <b className="mono">{a.quality}/10</b></span>}
+                            </div>
+                            {shown && a.quality == null && (
+                              <p className="hint">Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.</p>
+                            )}
+                            <p className="essayback">{a.text}</p>
+                          </div>
+                        );
+                      }
                       const mineIdx = a.picks || (a.choice != null ? [a.choice] : []);
                       const part = a.correct === false && a.acc > 0;
+                      const tiered = q.weighted;
                       const cls = !state?.keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : "";
                       const hits = keyIdx ? mineIdx.filter((i) => keyIdx.includes(i)).length : 0;
                       const wrong = mineIdx.length - hits;
@@ -1805,9 +1911,10 @@ function Participant() {
                             </span>
                             <b>{!state?.keyShown ? "Jawaban terkirim"
                               : a.correct == null ? "Tidak dinilai otomatis"
-                                : a.correct ? "Benar"
-                                  : part ? "Benar sebagian" : "Bukan kuncinya"}</b>
-                            {state?.keyShown && a.acc != null && a.acc < 1 && a.acc > 0 && (
+                                : a.correct ? (tiered ? "Jawaban terbaik" : "Benar")
+                                  : part ? (tiered ? "Belum optimal" : "Benar sebagian")
+                                    : "Salah"}</b>
+                            {state?.keyShown && !tiered && a.acc != null && a.acc < 1 && a.acc > 0 && (
                               <span className="accpill">{Math.round(a.acc * 100)}% dari kunci</span>
                             )}
                           </div>
@@ -1875,7 +1982,7 @@ const KeyLine = ({ idx, text, mine }) => {
       </span>
       <span>
         {mine ? (many ? "Anda mencentang " : "Anda memilih ") : (many ? "Kuncinya adalah " : "Kuncinya adalah ")}
-        <b>{names}</b>{text ? ` — ${text}` : ""}
+        <b>{names}</b>{text ? `, yaitu ${text}` : ""}
       </span>
     </div>
   );
@@ -1905,9 +2012,11 @@ function Screen() {
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") setSettings(m.settings);
     else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "gone" || m.t === "ended") { setDeck(null); setState(null); }
   }, []);
   const { send, status, gen } = useSocket(onMsg);
+  useClockSync(send, gen);
 
   useEffect(() => { if (roomId) send({ t: "watch", roomId }); }, [roomId, gen, send]);
 
@@ -1916,7 +2025,7 @@ function Screen() {
       <div className="crash">
         <h1>Alamatnya tidak memuat latihan</h1>
         <p className="muted">
-          Buka tampilan proyektor dari layar fasilitator — tombol <b>Proyektor</b> —
+          Buka tampilan proyektor dari layar fasilitator lewat tombol <b>Proyektor</b>,
           supaya id latihannya ikut terbawa.
         </p>
       </div>
@@ -1969,7 +2078,7 @@ function Screen() {
                 return (
                   <div className="projq" key={q.qid}>
                     <p className="projqtext">{q.text}</p>
-                    <p className="projtype">{TYPE_LABEL[q.type]}</p>
+                    <p className="projtype">{TYPE_LABEL[kindOf(q)]}</p>
                     {q.choices?.length > 0 && (
                       <div className="projopts">
                         {q.choices.map((c, i) => {
@@ -2024,7 +2133,7 @@ function Screen() {
 
 /* ============================= REPORT ============================= */
 
-function Report({ model, scores, notes, people, settings, roleIdx, fileName, unitOf, onBack, onEnd }) {
+function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onBack, onEnd }) {
   const all = useMemo(() => model.injects.flatMap((i) =>
     i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
 
@@ -2051,14 +2160,14 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
   const byRole = useMemo(() => {
     const o = {};
     all.forEach((q) => {
-      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0, pts: 0 };
+      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0, pts: 0, essays: 0, ungraded: 0 };
       const b = o[q.peran];
       b.total += 1;
-      const sc = scores[q.qid] || {};
-      if (sc.score != null) { b.scored += 1; b.sum += sc.score; }
       people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]).forEach((p) => {
         const a = p.answers[q.qid];
         if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; if (a.acc > 0 && !a.correct) b.part += 1; }
+        if (a.quality != null) { b.scored += 1; b.sum += a.quality; }
+        if (q.type === "open") { b.essays += 1; if (a.quality == null) b.ungraded += 1; }
         b.pts += a.points || 0;
       });
     });
@@ -2067,18 +2176,17 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
       b.pct = b.possible ? (b.pts / b.possible) * 100 : null;
     });
     return o;
-  }, [all, scores, people, possibleOf]);
+  }, [all, people, possibleOf]);
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Operator",
       "Jawaban unit", "Benar", "Akurasi", "Detik", "Poin", "Poin unit", "Maks unit", "Skor unit %",
-      "Kualitas", "Keputusan", "Waktu menjawab (detik)", "Catatan"];
+      "Nilai esai (1-10)", "Waktu menjawab (detik)", "Catatan"];
     const lines = [head.map(esc).join(",")];
     model.injects.forEach((inj) => {
       const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
       inj.questions.forEach((q) => {
-        const sc = scores[q.qid] || {};
         const rs = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
         (rs.length ? rs : [null]).forEach((p) => {
           const a = p?.answers[q.qid];
@@ -2090,8 +2198,7 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
             p ? p.total ?? "" : "", poss || "",
             p && poss ? Math.round(((p.total || 0) / poss) * 100) + "%" : "",
-            sc.score != null ? SCORE_LABELS[sc.score] : "",
-            sc.decision ? DECISION_OPTS.find((d) => d.k === sc.decision)?.label : "",
+            a?.quality ?? "",
             win, notes[inj.id] || ""].map(esc).join(","));
         });
       });
@@ -2120,8 +2227,8 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
           <div className="kpis">
             <div><b className="mono">{people.length}</b><span>unit ikut</span></div>
             <div><b className="mono">{all.length}</b><span>pertanyaan</span></div>
-            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "—"}</b><span>jawaban benar</span></div>
-            <div><b className="mono">{avgPct == null ? "—" : `${Math.round(avgPct)}%`}</b>
+            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "·"}</b><span>jawaban benar</span></div>
+            <div><b className="mono">{avgPct == null ? "·" : `${Math.round(avgPct)}%`}</b>
               <span>rata-rata skor unit</span>
               <em className="kpisub mono">{totalPts.toLocaleString()} poin total</em></div>
           </div>
@@ -2132,7 +2239,7 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
               <p className="hint boardnote">
                 Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah
                 pertanyaan per unit tidak selalu sama.{uneven
-                  ? " Di latihan ini memang tidak sama — poin mentah akan menguntungkan yang ditanya lebih banyak."
+                  ? " Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak."
                   : ""}
               </p>
               <ol className="board">
@@ -2146,7 +2253,7 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
                       background: UNIT_VARS[(roleIdx(p.peran) < 0 ? 0 : roleIdx(p.peran)) % 6],
                     }} /></span>
                     <span className="bscore">
-                      <b className="mono">{p.pct == null ? "—" : `${Math.round(p.pct)}%`}</b>
+                      <b className="mono">{p.pct == null ? "·" : `${Math.round(p.pct)}%`}</b>
                       <em className="mono">{(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}</em>
                     </span>
                   </li>
@@ -2160,19 +2267,21 @@ function Report({ model, scores, notes, people, settings, roleIdx, fileName, uni
             <table className="tbl">
               <thead><tr><th>Peran</th><th>Ditanya</th><th>Benar</th><th>Sebagian</th>
                 <th>Poin</th><th>Maks</th><th>Skor</th>
-                {settings.mode === "manual" && <th>Kualitas</th>}</tr></thead>
+<th>Nilai esai</th></tr></thead>
               <tbody>
                 {Object.entries(byRole).map(([role, d]) => (
                   <tr key={role}>
                     <td><Crest peran={role} idx={roleIdx(role)} /> {unitOf(role)}</td>
                     <td className="mono">{d.total}</td>
-                    <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "—"}</td>
-                    <td className="mono">{d.part || "—"}</td>
-                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "—"}</td>
-                    <td className="mono dimcell">{d.possible ? d.possible.toLocaleString() : "—"}</td>
-                    <td className="mono strong">{d.pct == null ? "—" : `${Math.round(d.pct)}%`}</td>
-                    {settings.mode === "manual" &&
-                      <td className="mono">{d.scored ? (d.sum / d.scored).toFixed(1) : "—"}</td>}
+                    <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "·"}</td>
+                    <td className="mono">{d.part || "·"}</td>
+                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "·"}</td>
+                    <td className="mono dimcell">{d.possible ? d.possible.toLocaleString() : "·"}</td>
+                    <td className="mono strong">{d.pct == null ? "·" : `${Math.round(d.pct)}%`}</td>
+                    <td className="mono">
+                      {d.scored ? `${(d.sum / d.scored).toFixed(1)}/10` : "·"}
+                      {d.ungraded ? <em className="ungraded"> {d.ungraded} belum dinilai</em> : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2518,6 +2627,12 @@ html,body{background:var(--ink)}
   box-shadow:inset 0 0 0 1px var(--edge2);overflow:hidden;display:flex;align-items:center}
 .vfill{position:absolute;inset:0 auto 0 0;background:var(--c);opacity:.22;transition:width .5s}
 .vlabel{position:relative;padding-inline:13px;font-size:13.5px;line-height:1.35;z-index:1}
+.tier{display:inline-block;margin-left:9px;font-size:9.5px;font-weight:800;letter-spacing:.08em;
+  text-transform:uppercase;border-radius:20px;padding:2px 8px;vertical-align:1px;white-space:nowrap}
+.tier.top{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
+.tier.mid{color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge)}
+.tier.zero{color:var(--faint);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
+.typebadge.weighted{color:var(--on-opt);background:var(--oB)}
 .vrow.correct .vtrack{box-shadow:inset 0 0 0 2px var(--live)}
 .vrow.correct .vlabel{color:var(--live);font-weight:600}
 .vrow.correct .vn{color:var(--live)}
@@ -2537,7 +2652,7 @@ html,body{background:var(--ink)}
 .who-list .pts{font-size:12.5px;font-weight:700;min-width:56px;text-align:right}
 .who-list .none{color:var(--faint);font-style:italic}
 .answers{list-style:none;margin:0 0 13px;padding:0;display:flex;flex-direction:column;gap:8px}
-.answers li{background:var(--ink);border-radius:12px;padding:11px 13px}
+.answers li{background:var(--ink);border-radius:12px;padding:12px 14px}
 .answers .who{font-size:11px;font-weight:700;color:var(--faint);display:block;margin-bottom:4px}
 .answers p{margin:0;font-size:14.5px;line-height:1.55}
 .noanswer{margin:0 0 12px;color:var(--wrong);font-size:13.5px;font-style:italic}
@@ -2545,15 +2660,22 @@ html,body{background:var(--ink)}
 .dims{display:flex;gap:22px;flex-wrap:wrap}
 .dim{display:flex;align-items:center;gap:7px}
 .dimlab{font-size:11px;color:var(--faint);font-weight:700}
-.scorer{display:flex;gap:3px}
-.scorer button{width:28px;height:28px;border-radius:8px;font-family:var(--mono);font-size:13px;
-  color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge)}
-.scorer button.on{background:var(--signal);color:var(--signal-ink);box-shadow:none;font-weight:700}
-.scorelab{font-size:12.5px;color:var(--faint);min-width:76px}
-.dseg{display:flex;gap:3px;flex-wrap:wrap}
-.dseg button{padding:6px 11px;border-radius:8px;font-size:12.5px;color:var(--dim);
-  box-shadow:inset 0 0 0 1px var(--edge);white-space:nowrap}
-.dseg button.on{background:var(--c);color:#fff;font-weight:700;box-shadow:none}
+.grade{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:11px;
+  padding-top:11px;border-top:1px solid var(--edge2)}
+.gscale{display:flex;gap:3px;flex-wrap:wrap}
+.gscale button{width:30px;height:30px;border-radius:8px;font-family:var(--mono);font-size:12.5px;
+  font-weight:600;color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge);transition:background .12s}
+.gscale button:hover{color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint)}
+.gscale button.on{color:var(--on-opt);box-shadow:none;font-weight:700}
+.gscale button.on.ok{background:var(--live)}
+.gscale button.on.part{background:var(--warn)}
+.gscale button.on.no{background:var(--wrong)}
+.gout{font-size:12.5px;color:var(--faint)}
+.gout b{color:var(--txt)}
+.gnum{font-size:15px;font-weight:700}
+.ungraded{font-style:normal;font-size:11px;color:var(--warn);font-family:var(--body)}
+.essayback{font-size:13.5px;line-height:1.55;color:var(--dim);background:var(--ink);
+  border-radius:12px;padding:11px 13px;white-space:pre-line}
 .model{margin:13px 0 0;padding-top:13px;border-top:1px solid var(--edge2);white-space:pre-line;
   font-size:14.5px;line-height:1.6;color:var(--dim)}
 .notes{margin-top:26px}
@@ -2640,6 +2762,8 @@ html,body{background:var(--ink)}
 .rescard.part .badge{background:var(--warn)}
 .accpill{margin-left:auto;font-size:10.5px;font-weight:800;letter-spacing:.06em;color:var(--warn);
   background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px}
+.rescard.ok .accpill{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
+.rescard.no .accpill{color:var(--wrong);background:var(--wrong-soft);box-shadow:inset 0 0 0 1px var(--wrong-edge)}
 .kglyphs{display:flex;gap:4px;flex:none;margin-top:1px}
 .rescard.miss{opacity:.7}
 .verdict{display:flex;align-items:center;gap:11px}
