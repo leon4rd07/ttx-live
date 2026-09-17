@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b23";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b24";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -1211,7 +1211,6 @@ function Host({ onExit }) {
                 <div className="notes">
                   <label htmlFor={`n-${inject.id}`}>Catatan fasilitator</label>
                   <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
-                    placeholder="Celah, perdebatan, siapa yang ragu, apa pun yang bisa jadi temuan"
                     onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
                 </div>
               )}
@@ -1398,10 +1397,10 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                     <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
                     <span className="vlabel">
                       {c.text}
-                      {q.weighted && (
-                        <span className={`tier ${c.correct ? "top" : c.stars ? "mid" : "zero"}`}>
-                          {tier || "tanpa nilai"}{c.correct ? " terbaik" : ""}
-                        </span>
+                      {/* Bobot hanya muncul setelah fasilitator menekan tombol
+                          tampilkan jawaban. Opsi tanpa bobot tidak diberi label. */}
+                      {q.weighted && keyShown && c.stars > 0 && (
+                        <span className={`tier ${c.correct ? "top" : "mid"}`}>{tier}</span>
                       )}
                       {isKey && !q.weighted && <b> kunci</b>}
                     </span>
@@ -2631,7 +2630,6 @@ html,body{background:var(--ink)}
   text-transform:uppercase;border-radius:20px;padding:2px 8px;vertical-align:1px;white-space:nowrap}
 .tier.top{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
 .tier.mid{color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge)}
-.tier.zero{color:var(--faint);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
 .typebadge.weighted{color:var(--on-opt);background:var(--oB)}
 .vrow.correct .vtrack{box-shadow:inset 0 0 0 2px var(--live)}
 .vrow.correct .vlabel{color:var(--live);font-weight:600}
@@ -2721,7 +2719,10 @@ html,body{background:var(--ink)}
 .otick.on{background:var(--slab);color:var(--c);box-shadow:inset 0 0 0 1.5px var(--slab)}
 .ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
 .qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
-  color:var(--faint);line-height:1.5;margin:-4px 0 0}
+  color:var(--faint);line-height:1.5;margin:0}
+/* Di layar host badge duduk di bawah pertanyaan, jadi ia butuh jarak sendiri
+   supaya tidak menempel pada teks pertanyaan maupun pada daftar jawaban. */
+.qcard .qtypeline{margin:11px 0 16px}
 .typebadge{font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
   border-radius:20px;padding:3px 9px;flex:none;font-family:var(--body);white-space:nowrap}
 .typebadge.choice{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
