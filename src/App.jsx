@@ -20,10 +20,11 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b27";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b28";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
+const K_NAME = `ttx:${V}:hostname`;
 const K_THEME = "ttx:theme";
 
 const isHostRoute = () =>
@@ -315,6 +316,9 @@ const HEADER_ALIASES = {
   jawabanyangdiharapkan: "answer", kuncijawaban: "answer", key: "answer",
   window: "window", windowmin: "window", waktu: "window",
   decisionwindow: "window", bataswaktu: "window", windowminutes: "window",
+  waktuesai: "ewindow", waktuessay: "ewindow", essaywindow: "ewindow",
+  waktuuraian: "ewindow", essaytime: "ewindow", waktujawabanesai: "ewindow",
+  windowesai: "ewindow", essaywindowminutes: "ewindow",
   tipe: "qtype", type: "qtype", jenis: "qtype", format: "qtype",
   tipesoal: "qtype", jenissoal: "qtype", questiontype: "qtype", answertype: "qtype",
 };
@@ -405,15 +409,16 @@ function buildModel(rows) {
   });
   const get = (row, f) => (hmap[f] ? String(row[hmap[f]] ?? "").trim() : "");
 
-  let lastInject = "", lastCondition = "", lastSiklus = "", lastWindow = "";
+  let lastInject = "", lastCondition = "", lastSiklus = "", lastWindow = "", lastEWindow = "";
   const flat = [];
   rows.forEach((row, i) => {
     const rawInject = get(row, "inject");
     const inject = rawInject || lastInject;
-    if (rawInject) { lastInject = rawInject; lastCondition = ""; lastWindow = ""; }
+    if (rawInject) { lastInject = rawInject; lastCondition = ""; lastWindow = ""; lastEWindow = ""; }
     if (get(row, "condition")) lastCondition = get(row, "condition");
     if (get(row, "siklus")) lastSiklus = get(row, "siklus");
     if (get(row, "window")) lastWindow = get(row, "window");
+    if (get(row, "ewindow")) lastEWindow = get(row, "ewindow");
     const question = get(row, "question");
     const peranRaw = get(row, "peran");
     if (!question && !peranRaw && !inject) return;
@@ -422,6 +427,7 @@ function buildModel(rows) {
       condition: get(row, "condition") || lastCondition,
       siklus: get(row, "siklus") || lastSiklus || "(no siklus)",
       window: get(row, "window") || lastWindow,
+      ewindow: get(row, "ewindow") || lastEWindow,
       question, answer: get(row, "answer"), roles: splitPeran(peranRaw),
       qtype: TYPE_ALIASES[normKey(get(row, "qtype"))] || "",
     });
@@ -435,11 +441,13 @@ function buildModel(rows) {
   const badCheck = [];
   flat.forEach((r) => {
     if (!byInject.has(r.inject)) {
-      byInject.set(r.inject, { id: r.inject, siklus: r.siklus, window: r.window, conditions: [], questions: [] });
+      byInject.set(r.inject, { id: r.inject, siklus: r.siklus, window: r.window,
+        ewindow: r.ewindow, conditions: [], questions: [] });
     }
     const inj = byInject.get(r.inject);
     if (r.condition && !inj.conditions.includes(r.condition)) inj.conditions.push(r.condition);
     if (!inj.window && r.window) inj.window = r.window;
+    if (!inj.ewindow && r.ewindow) inj.ewindow = r.ewindow;
     if (!r.question) return;
     /* The Tipe column wins; otherwise fall back to reading the Answer cell, and
        treat two or more starred options as a checkbox question. */
@@ -639,11 +647,24 @@ function PhaseSteps({ phase, onPick }) {
     <div className="phases" role="group" aria-label="Phase">
       {PHASES.map((p, i) => (
         <button key={p.k} className={i === at ? "on" : i < at ? "past" : ""}
-          onClick={() => onPick(p.k)}>{p.label}</button>
+          disabled={!onPick} onClick={() => onPick && onPick(p.k)}>{p.label}</button>
       ))}
     </div>
   );
 }
+
+/* Peran fasilitator, ditentukan pemilik ruangan lewat kode yang ia bagikan. */
+const ROLE_LABEL = {
+  owner: "Pemilik ruangan",
+  full: "Kendali penuh",
+  grader: "Penilai",
+  viewer: "Pemantau",
+};
+const ROLE_HINT = {
+  full: "Bisa memajukan fase, membuka jawaban, menampilkan kunci, dan menilai esai.",
+  grader: "Bisa menilai esai dan menulis catatan. Tidak bisa memajukan fase.",
+  viewer: "Hanya melihat jalannya latihan.",
+};
 
 const Check = ({ label, checked, onChange, hint }) => (
   <label className="chk span2">
@@ -660,10 +681,11 @@ function Host({ onExit }) {
   const [codes, setCodes] = useState({});
   const [draftCodes, setDraftCodes] = useState({});
   const [settings, setSettings] = useState({
-    mode: "auto", timeLimit: 60, points: 1000,
+    mode: "auto", timeLimit: 60, essayLimit: 300, points: 1000,
     speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
   });
   const [times, setTimes] = useState({});
+  const [etimes, setEtimes] = useState({});     // jendela esai per inject
   const [model, setModel] = useState(null);
   const [warnings, setWarnings] = useState([]);
   const [fileName, setFileName] = useState("");
@@ -682,14 +704,43 @@ function Host({ onExit }) {
   const [keyRequired, setKeyRequired] = useState(false);
   const [keyIn, setKeyIn] = useState(() => lsGet(K_KEY) || "");
   const [denied, setDenied] = useState(false);
+  /* Beberapa fasilitator dalam satu ruangan. Yang membuka ruangan adalah pemilik
+     dan dialah yang menentukan peran tiap kode co-host. */
+  const [role, setRole] = useState("owner");
+  const [ownerKey, setOwnerKey] = useState("");
+  const [hostCode, setHostCode] = useState("");
+  const [hostCodes, setHostCodes] = useState({});
+  const [hosts, setHosts] = useState([]);
+  const [hostName, setHostName] = useState(() => lsGet(K_NAME) || "");
+  const [joinCode, setJoinCode] = useState("");
+  const [joinErr, setJoinErr] = useState("");
+  const [teamOpen, setTeamOpen] = useState(false);
   const fileRef = useRef(null);
 
   const onMsg = useCallback((m) => {
     if (m.t === "hosted") {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
+      setEtimes(m.etimes || {});
+      setRole(m.role || "owner");
+      if (m.ownerKey) setOwnerKey(m.ownerKey);
+      setHostCodes(m.hostCodes || {});
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setKeyShown(!!m.state.keyShown);
       setOpenedAt(m.state.openedAt); setScreen("run");
+    } else if (m.t === "cohosted") {
+      /* Fasilitator tambahan tidak memuat sheet apa pun: decknya datang dari server. */
+      setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
+      setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
+      setRole(m.role || "viewer"); setOwnerKey("");
+      setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
+      setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
+      setJoinErr(""); setScreen("run");
+    } else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
+    else if (m.t === "hosts") setHosts(m.hosts || []);
+    else if (m.t === "nosuchhost") setJoinErr("Kode fasilitator itu tidak dikenali.");
+    else if (m.t === "hostgone") {
+      lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup");
+      setJoinErr("Akses Anda dicabut oleh pemilik ruangan.");
     } else if (m.t === "state") {
       /* remember what arrived so the push effect below doesn't echo it back */
       echo.current = `${m.activeIdx}:${m.phase}`;
@@ -698,7 +749,11 @@ function Host({ onExit }) {
       setKeyShown(!!m.keyShown);
       if (m.openedAt) setOpenedAt(m.openedAt);
     } else if (m.t === "roster") setPeople(m.people || []);
-    else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
+    else if (m.t === "settings") {
+      setSettings(m.settings);
+      if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
+    }
     else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
     else if (m.t === "denied") { setDenied(true); lsDel(K_KEY); }
@@ -709,8 +764,10 @@ function Host({ onExit }) {
 
   /* re-attach after any reconnect */
   useEffect(() => {
-    if (gen > 1 && roomId) send({ t: "rehost", roomId });
-  }, [gen, roomId, send]);
+    if (gen <= 1 || !roomId) return;
+    if (hostCode) send({ t: "cohost", roomId, code: hostCode, name: hostName });
+    else send({ t: "rehost", roomId, ownerKey, hostName });
+  }, [gen, roomId, send, hostCode, ownerKey, hostName]);
 
   useEffect(() => {
     const s = lsGet(K_HOST);
@@ -718,8 +775,11 @@ function Host({ onExit }) {
       setRoomId(s.roomId); setModel(s.model); setFileName(s.fileName || "");
       setNotes(s.notes || {});
       setCodes(s.codes || {}); setSettings(s.settings || settings); setTimes(s.times || {});
+      setEtimes(s.etimes || {}); setRole(s.role || "owner");
+      setOwnerKey(s.ownerKey || ""); setHostCode(s.hostCode || "");
       setScreen("run");
-      send({ t: "rehost", roomId: s.roomId });
+      if (s.hostCode) send({ t: "cohost", roomId: s.roomId, code: s.hostCode, name: s.hostName || "" });
+      else send({ t: "rehost", roomId: s.roomId, ownerKey: s.ownerKey || "", hostName: s.hostName || "" });
     }
     setBooted(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -728,17 +788,25 @@ function Host({ onExit }) {
   useEffect(() => {
     if (!booted || !model || !roomId) return;
     const t = setTimeout(() => {
-      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times });
+      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times, etimes,
+        role, ownerKey, hostCode, hostName });
     }, 500);
     return () => clearTimeout(t);
-  }, [booted, model, roomId, fileName, notes, codes, settings, times]);
+  }, [booted, model, roomId, fileName, notes, codes, settings, times, etimes,
+      role, ownerKey, hostCode, hostName]);
 
   useEffect(() => {
-    if (!roomId || screen !== "run") return;
+    if (!roomId || screen !== "run" || !canDrive) return;
     const sig = `${activeIdx}:${phase}`;
     if (echo.current === sig) return; // this change came from the server
     send({ t: "state", roomId, activeIdx, phase });
-  }, [roomId, screen, activeIdx, phase, send]);
+  }, [roomId, screen, activeIdx, phase, send, canDrive]);
+
+  /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
+     latihan, penilai hanya menilai esai dan menulis catatan, pemantau melihat. */
+  const isOwner = role === "owner";
+  const canDrive = role === "owner" || role === "full";
+  const canGrade = canDrive || role === "grader";
 
   const roleIdx = useCallback((p) => (model ? model.roles.indexOf(p) : -1), [model]);
 
@@ -749,6 +817,7 @@ function Host({ onExit }) {
     setWarnings(built.warnings); setFileName(name); setParseError("");
     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
     setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
+    setEtimes(Object.fromEntries(built.injects.map((i) => [i.id, i.ewindow ? String(Math.round(Number(i.ewindow) * 60)) : ""])));
     setNotes({}); setActiveIdx(0); setPhase("lobby");
     setScreen("config");
   }
@@ -767,16 +836,44 @@ function Host({ onExit }) {
   const start = () => {
     setDenied(false);
     if (keyIn) lsSet(K_KEY, keyIn);
-    send({ t: "host", deck: model, settings, codes: draftCodes, times, key: keyIn });
+    if (hostName) lsSet(K_NAME, hostName);
+    send({ t: "host", deck: model, settings, codes: draftCodes, times, etimes,
+      key: keyIn, hostName });
   };
 
   const setInjectTime = (id, v) => {
     setTimes((t) => ({ ...t, [id]: v }));
     if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
   };
+  const setInjectETime = (id, v) => {
+    setEtimes((t) => ({ ...t, [id]: v }));
+    if (roomId) send({ t: "settings", roomId, etimes: { [id]: v } });
+  };
   const limitOf = (id) => {
     const v = times[id];
     return v === "" || v == null ? settings.timeLimit : Number(v);
+  };
+  /* Esai memakai jendelanya sendiri: override inject, lalu default esai, lalu
+     jendela biasa. Dibaca sama persis seperti di server. */
+  const elimitOf = (id) => {
+    const v = etimes[id];
+    if (v !== "" && v != null) return Number(v);
+    const g = settings.essayLimit;
+    return g === "" || g == null ? limitOf(id) : Number(g);
+  };
+  const hasEssay = (inj) => (inj?.questions || []).some((q) => q.type === "open");
+  /* Inject selesai ketika pertanyaan paling lambat selesai. */
+  const longestOf = (inj) => {
+    const a = limitOf(inj?.id);
+    if (!hasEssay(inj)) return a;
+    const b = elimitOf(inj?.id);
+    return !a || !b ? 0 : Math.max(a, b);
+  };
+  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan. */
+  const addTime = (id, secs, essay) => {
+    const cur = essay ? elimitOf(id) : limitOf(id);
+    const next = String(Math.max(0, Math.round(cur + secs)));
+    if (essay) setInjectETime(id, next); else setInjectTime(id, next);
   };
 
   const patchSettings = (patch) => {
@@ -827,18 +924,18 @@ function Host({ onExit }) {
       if (e.target.closest && e.target.closest("input, textarea, select")) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = String(e.key).toLowerCase();
-      if (e.key === " ") { e.preventDefault(); advance(); }
-      else if (k === "r" && phase === "open") { echo.current = ""; setPhase("revealed"); }
-      else if (k === "k" && phase === "revealed" && !keyShown) send({ t: "showkey", roomId });
+      if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
+      else if (k === "r" && phase === "open" && canDrive) { echo.current = ""; setPhase("revealed"); }
+      else if (k === "k" && phase === "revealed" && !keyShown && canDrive) send({ t: "showkey", roomId });
       else if (k === "c") setRoomOpen((v) => !v);
       else if (k === "p") openProjector();
-      else if (e.key === "ArrowRight") goNext();
-      else if (e.key === "ArrowLeft") goPrev();
+      else if (e.key === "ArrowRight") { if (canDrive) goNext(); }
+      else if (e.key === "ArrowLeft") { if (canDrive) goPrev(); }
       else if (e.key === "Escape") setRoomOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector]);
+  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector, canDrive]);
 
   /* ---- setup ---- */
   if (screen === "setup") {
@@ -889,6 +986,27 @@ function Host({ onExit }) {
             <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
               Muat contoh latihan saja
             </button>
+
+            {/* Fasilitator kedua tidak memuat sheet. Ia masuk dengan kode dari
+                pemilik ruangan, dan kode itu yang menentukan haknya. */}
+            <div className="joinhost">
+              <h3>Bergabung sebagai fasilitator</h3>
+              <p className="hint">
+                Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan
+                pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.
+              </p>
+              <div className="joinrow">
+                <input className="cinput" maxLength={8} placeholder="KODE" value={joinCode}
+                  autoComplete="off"
+                  onChange={(e) => { setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")); setJoinErr(""); }}
+                  onKeyDown={(e) => e.key === "Enter" && joinCode.length >= 4 && send({ t: "cohost", code: joinCode, name: hostName })} />
+                <input placeholder="Nama Anda, opsional" value={hostName} autoComplete="off"
+                  onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
+                <button className="btn" disabled={joinCode.length < 4}
+                  onClick={() => send({ t: "cohost", code: joinCode, name: hostName })}>Masuk</button>
+              </div>
+              {joinErr && <div className="err">{joinErr}</div>}
+            </div>
           </div>
         </main>
       </>
@@ -941,6 +1059,16 @@ function Host({ onExit }) {
                     <input type="number" min="0" step="5" value={settings.timeLimit}
                       onChange={(e) => patchSettings({ timeLimit: Number(e.target.value) })} />
                   </label>
+                  <label className="fld">
+                    <span>Batas waktu esai (detik, 0 = tanpa batas)</span>
+                    <input type="number" min="0" step="30" value={settings.essayLimit}
+                      onChange={(e) => patchSettings({ essayLimit: Number(e.target.value) })} />
+                  </label>
+                  <p className="hint span2">
+                    Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam
+                    sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu
+                    dan menunggu, dan inject baru tertutup setelah jam terpanjang habis.
+                  </p>
                   <Check label="Bonus kecepatan" checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
                     hint="Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat." />
@@ -965,10 +1093,17 @@ function Host({ onExit }) {
               <>
                 <h3>Waktu per inject</h3>
                 <p className="hint">
-                  Lama tiap unit boleh menjawab. Kosong berarti memakai default {settings.timeLimit} detik.
-                  Diisi dari kolom Waktu kalau sheet Anda punya, dan bisa diubah saat latihan berjalan.
+                  Lama tiap unit boleh menjawab. Kosong berarti memakai default,
+                  {" "}{settings.timeLimit} detik untuk pilihan dan {settings.essayLimit} detik untuk esai.
+                  Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya
+                  bisa diubah saat latihan berjalan.
                 </p>
                 <ul className="codelist">
+                  <li className="cohead">
+                    <span className="cname">Inject</span>
+                    <span className="colcap">Pilihan</span>
+                    <span className="colcap">Esai</span>
+                  </li>
                   {model.injects.map((i) => (
                     <li key={i.id}>
                       <span className="cname"><b className="mono">{i.id}</b> {i.siklus}</span>
@@ -976,6 +1111,11 @@ function Host({ onExit }) {
                         placeholder={String(settings.timeLimit)}
                         value={times[i.id] ?? ""}
                         onChange={(e) => setTimes((t) => ({ ...t, [i.id]: e.target.value }))} />
+                      <input className={`cinput narrow ${hasEssay(i) ? "" : "dim"}`} type="number" min="0" step="30"
+                        placeholder={String(settings.essayLimit)}
+                        title={hasEssay(i) ? "Waktu esai untuk inject ini" : "Inject ini tidak punya esai"}
+                        value={etimes[i.id] ?? ""}
+                        onChange={(e) => setEtimes((t) => ({ ...t, [i.id]: e.target.value }))} />
                       <span className="unit">detik</span>
                     </li>
                   ))}
@@ -1002,6 +1142,13 @@ function Host({ onExit }) {
                 </li>
               ))}
             </ul>
+
+            <h3>Nama Anda</h3>
+            <label className="fld">
+              <span>Muncul di daftar fasilitator, opsional</span>
+              <input value={hostName} autoComplete="off"
+                onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
+            </label>
 
             {keyRequired && (
               <>
@@ -1053,19 +1200,24 @@ function Host({ onExit }) {
         left={<>
           <span className="crumb">{inject.siklus}</span>
           <b className="injno">Inject {inject.id}</b>
-          <PhaseSteps phase={phase} onPick={(k) => {
+          <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
             echo.current = "";
             if (k === "open" && phase !== "open") setOpenedAt(serverNow());
             setPhase(k);
-          }} />
+          } : null} />
+          {role !== "owner" && <span className={`rolepill ${role}`}>{ROLE_LABEL[role]}</span>}
         </>}
         right={<>
-          <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
-            title={settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit"}
-            onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
-          <button className={`btn quiet pill ${settings.showNames ? "" : "off"}`}
-            title={settings.showNames ? "Sembunyikan nama operator" : "Tampilkan nama operator"}
-            onClick={() => patchSettings({ showNames: !settings.showNames })}>Nama</button>
+          {canDrive && (<>
+            <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
+              title={settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit"}
+              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
+            <button className={`btn quiet pill ${settings.showNames ? "" : "off"}`}
+              title={settings.showNames ? "Sembunyikan nama operator" : "Tampilkan nama operator"}
+              onClick={() => patchSettings({ showNames: !settings.showNames })}>Nama</button>
+          </>)}
+          <button className="btn quiet" onClick={() => setTeamOpen(true)}
+            title="Fasilitator di ruangan ini">Tim · {hosts.length || 1}</button>
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
             Kursi · {people.length}/{model.roles.length}
           </button>
@@ -1074,11 +1226,18 @@ function Host({ onExit }) {
         </>} />
 
       {roomOpen && (
-        <RoomPanel {...{ codes, model, settings, unitOf, seatOf }}
+        <RoomPanel {...{ codes, model, settings, unitOf, seatOf, canDrive }}
           onSetting={patchSettings}
           onRelease={(peran) => send({ t: "release", roomId, peran })}
           onClose={() => setRoomOpen(false)}
           onLobby={() => { echo.current = ""; setPhase("lobby"); setRoomOpen(false); }} />
+      )}
+
+      {teamOpen && (
+        <TeamPanel {...{ hosts, hostCodes, isOwner, role }}
+          onAdd={(r, label) => send({ t: "cohost_add", roomId, role: r, label })}
+          onRemove={(code) => send({ t: "cohost_remove", roomId, code })}
+          onClose={() => setTeamOpen(false)} />
       )}
 
       <main className="run">
@@ -1092,7 +1251,8 @@ function Host({ onExit }) {
                 <React.Fragment key={inj.id}>
                   {head && <li className="tlhead">{inj.siklus}</li>}
                   <li className={`tlrow ${state}`}>
-                    <button onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
+                    <button disabled={!canDrive}
+                      onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
                       <span className="tldot" aria-hidden="true" />
                       <span className="tlno">{inj.id}</span>
                       <span className="tltext">{words}{words ? "…" : "·"}</span>
@@ -1111,7 +1271,8 @@ function Host({ onExit }) {
         <section className="stage">
           {phase === "lobby" ? (
             <Lobby {...{ codes, people, model, unitOf, seatOf }} showNames={settings.showNames}
-              onBegin={() => { echo.current = ""; setPhase("briefing"); }} injectId={inject.id} />
+              onBegin={canDrive ? () => { echo.current = ""; setPhase("briefing"); } : null}
+              injectId={inject.id} />
           ) : (
             <>
               {inject.condition
@@ -1127,32 +1288,63 @@ function Host({ onExit }) {
 
               <div className="actbar">
                 {phase === "briefing" && (<>
-                  <span className="msg">Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab.</span>
-                  {settings.mode === "auto" && (
+                  <span className="msg">
+                    {canDrive
+                      ? "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab."
+                      : "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab."}
+                  </span>
+                  {settings.mode === "auto" && canDrive && (
                     <span className="inlinetime">
                       <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
                         value={times[inject.id] ?? ""}
                         onChange={(e) => setInjectTime(inject.id, e.target.value)} />
-                      <span className="unit">detik</span>
+                      <span className="unit">pilihan</span>
+                      {hasEssay(inject) && (<>
+                        <input type="number" min="0" step="30" placeholder={String(settings.essayLimit)}
+                          value={etimes[inject.id] ?? ""}
+                          onChange={(e) => setInjectETime(inject.id, e.target.value)} />
+                        <span className="unit">esai</span>
+                      </>)}
                     </span>
                   )}
-                  <button className="btn" onClick={() => {
-                    echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
-                  }}>Buka untuk menjawab</button>
+                  {canDrive && (
+                    <button className="btn" onClick={() => {
+                      echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
+                    }}>Buka untuk menjawab</button>
+                  )}
                 </>)}
 
                 {phase === "open" && (<>
                   {settings.mode === "auto" && limitOf(inject.id) > 0
-                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)} />
+                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)}
+                        cap={hasEssay(inject) ? "pilihan" : ""} />
                     : <span className="msg">Jawaban sudah dibuka.</span>}
+                  {settings.mode === "auto" && hasEssay(inject) && elimitOf(inject.id) > 0 && (
+                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap="esai" />
+                  )}
                   <span className="msg">
                     {seatsHere.length === 0 ? "Belum ada unit yang mengambil kursi untuk inject ini"
                       : allIn ? "Semua unit sudah menjawab"
                         : `Menunggu jawaban, ${seatsHere.length} dari ${inject.roles.length} unit sudah duduk`}
                   </span>
-                  <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
-                    Buka jawaban
-                  </button>
+                  {canDrive && settings.mode === "auto" && (
+                    <span className="addtime">
+                      <span className="unit">Tambah</span>
+                      {[60, 120, 300].map((sec) => (
+                        <button key={sec} className="btn quiet pill"
+                          title={hasEssay(inject) ? "Menambah kedua jam" : "Menambah waktu menjawab"}
+                          onClick={() => {
+                            addTime(inject.id, sec, false);
+                            if (hasEssay(inject)) addTime(inject.id, sec, true);
+                          }}>+{sec / 60}m</button>
+                      ))}
+                    </span>
+                  )}
+                  {canDrive && (
+                    <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                      Buka jawaban
+                    </button>
+                  )}
                 </>)}
 
                 {phase === "revealed" && (<>
@@ -1161,14 +1353,16 @@ function Host({ onExit }) {
                       ? "Kunci jawaban sudah tampil di semua layar."
                       : "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat."}
                   </span>
-                  {!keyShown && (
+                  {!keyShown && canDrive && (
                     <button className="btn" onClick={() => send({ t: "showkey", roomId })}>
                       Tampilkan kunci jawaban
                     </button>
                   )}
-                  <button className="btn quiet" onClick={() => {
-                    echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
-                  }}>Buka lagi</button>
+                  {canDrive && (
+                    <button className="btn quiet" onClick={() => {
+                      echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
+                    }}>Buka lagi</button>
+                  )}
                 </>)}
               </div>
 
@@ -1229,7 +1423,9 @@ function Host({ onExit }) {
                   {inject.questions.filter((q) => q.peran === peran).map((q) => (
                     <QuestionResult key={q.qid} {...{ q, settings, keyShown, unitOf }}
                       answers={answeredBy(q)}
-                      onGrade={(pid, qid, quality) => send({ t: "grade", roomId, pid, qid, quality })}
+                      onGrade={canGrade
+                        ? (pid, qid, quality) => send({ t: "grade", roomId, pid, qid, quality })
+                        : null}
                       showExpected={revealKey[q.qid]}
                       toggleExpected={() => setRevealKey((v) => ({ ...v, [q.qid]: !v[q.qid] }))} />
                   ))}
@@ -1240,13 +1436,20 @@ function Host({ onExit }) {
                 <div className="notes">
                   <label htmlFor={`n-${inject.id}`}>Catatan fasilitator</label>
                   <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
+                    readOnly={!canGrade}
                     onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
                 </div>
               )}
 
               <div className="nav">
-                <button className="btn quiet" disabled={activeIdx === 0} onClick={goPrev}>Sebelumnya</button>
-                {activeIdx < model.injects.length - 1 ? (
+                <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>Sebelumnya</button>
+                {!canDrive ? (
+                  <span className="msg">
+                    {role === "grader"
+                      ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
+                      : "Anda memantau. Perpindahan inject dipegang fasilitator utama."}
+                  </span>
+                ) : activeIdx < model.injects.length - 1 ? (
                   confirmNext ? (
                     <span className="confirm">
                       <span className="msg">Pindahkan semua ke inject {model.injects[activeIdx + 1].id}?</span>
@@ -1274,6 +1477,79 @@ function Host({ onExit }) {
 }
 
 /* --------------------------- host pieces --------------------------- */
+
+/* Beberapa fasilitator dalam satu ruangan. Pemilik membuat kode, dan tiap kode
+   membawa perannya sendiri, jadi peran ditentukan saat kode dibuat. */
+function TeamPanel({ hosts, hostCodes, isOwner, role, onAdd, onRemove, onClose }) {
+  const [newRole, setNewRole] = useState("grader");
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  const entries = Object.entries(hostCodes || {});
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Fasilitator">
+        <div className="phead">
+          <h2>Fasilitator</h2>
+          <button className="btn quiet" onClick={onClose}>Tutup</button>
+        </div>
+
+        <h3>Sedang terhubung</h3>
+        <ul className="hostlist">
+          {hosts.length === 0 && <li className="muted">Hanya Anda.</li>}
+          {hosts.map((h, i) => (
+            <li key={i}>
+              <span className={`rolepill ${h.role}`}>{ROLE_LABEL[h.role] || h.role}</span>
+              <span className="hname">{h.name || "tanpa nama"}</span>
+            </li>
+          ))}
+        </ul>
+
+        {isOwner ? (
+          <>
+            <h3>Kode fasilitator</h3>
+            <p className="hint">
+              Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan.
+              Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.
+            </p>
+            <div className="joinrow">
+              <select value={newRole} onChange={(e) => setNewRole(e.target.value)}>
+                <option value="full">{ROLE_LABEL.full}</option>
+                <option value="grader">{ROLE_LABEL.grader}</option>
+                <option value="viewer">{ROLE_LABEL.viewer}</option>
+              </select>
+              <input placeholder="Nama atau keterangan, opsional" value={label}
+                onChange={(e) => setLabel(e.target.value)} autoComplete="off" />
+              <button className="btn" onClick={() => { onAdd(newRole, label); setLabel(""); }}>
+                Buat kode
+              </button>
+            </div>
+            <p className="hint">{ROLE_HINT[newRole]}</p>
+            <ul className="codelist">
+              {entries.length === 0 && <li className="muted">Belum ada kode.</li>}
+              {entries.map(([code, v]) => (
+                <li key={code}>
+                  <b className="mono ccode">{code}</b>
+                  <span className={`rolepill ${v.role}`}>{ROLE_LABEL[v.role] || v.role}</span>
+                  <span className="cname">{v.label || "·"}</span>
+                  <button className="btn quiet" onClick={() => onRemove(code)}>Cabut</button>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="hint">
+            Anda masuk sebagai <b>{ROLE_LABEL[role] || role}</b>. {ROLE_HINT[role]} Hubungi
+            pemilik ruangan kalau Anda perlu hak yang lain.
+          </p>
+        )}
+      </aside>
+    </div>
+  );
+}
 
 function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injectId }) {
   const taken = people.length;
@@ -1320,9 +1596,11 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
         })}
       </ul>
 
-      <button className="btn wide" onClick={onBegin}>
-        {injectId ? `Lanjut ke inject ${injectId}` : "Mulai latihan"}
-      </button>
+      {onBegin && (
+        <button className="btn wide" onClick={onBegin}>
+          {injectId ? `Lanjut ke inject ${injectId}` : "Mulai latihan"}
+        </button>
+      )}
       {taken === 0 && (
         <p className="hint">
           Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.
@@ -1332,7 +1610,8 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
   );
 }
 
-function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onRelease, onClose, onLobby }) {
+function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
+  onSetting, onRelease, onClose, onLobby }) {
   const [confirm, setConfirm] = useState("");
   useEffect(() => {
     const esc = (e) => e.key === "Escape" && onClose();
@@ -1367,7 +1646,7 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
                       ? `${seat.name}${seat.live === false ? " · offline" : ""}`
                       : seat.live === false ? "offline" : "sudah duduk"}
                 </span>
-                {seat && (confirm === r
+                {seat && canDrive && (confirm === r
                   ? <span className="confirm">
                     <button className="btn quiet" onClick={() => setConfirm("")}>Batal</button>
                     <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>Lepas</button>
@@ -1378,18 +1657,20 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, onSetting, onReleas
           })}
         </ul>
 
-        <h3>Tampilan di layar</h3>
-        <Check label="Nama unit" checked={settings.showUnits}
-          onChange={(v) => onSetting({ showUnits: v })}
-          hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
-        <Check label="Nama operator" checked={settings.showNames}
-          onChange={(v) => onSetting({ showNames: v })}
-          hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
+        {canDrive && (<>
+          <h3>Tampilan di layar</h3>
+          <Check label="Nama unit" checked={settings.showUnits}
+            onChange={(v) => onSetting({ showUnits: v })}
+            hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
+          <Check label="Nama operator" checked={settings.showNames}
+            onChange={(v) => onSetting({ showNames: v })}
+            hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
 
-        <button className="btn quiet wide" onClick={onLobby}>Kembali ke ruang tunggu</button>
-        <p className="hint">
-          Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.
-        </p>
+          <button className="btn quiet wide" onClick={onLobby}>Kembali ke ruang tunggu</button>
+          <p className="hint">
+            Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.
+          </p>
+        </>)}
       </aside>
     </div>
   );
@@ -1492,8 +1773,8 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                       <div className="gscale" role="group" aria-label="Nilai 1 sampai 10">
                         {GRADES.map((v) => (
                           <button key={v} className={a.quality === v ? `on ${gradeCls(v)}` : ""}
-                            title={qualityWord(v)}
-                            onClick={() => onGrade(p.pid, q.qid, a.quality === v ? null : v)}>{v}</button>
+                            title={qualityWord(v)} disabled={!onGrade}
+                            onClick={() => onGrade && onGrade(p.pid, q.qid, a.quality === v ? null : v)}>{v}</button>
                         ))}
                       </div>
                       <span className="gout">
@@ -1538,6 +1819,7 @@ function Participant() {
   const [drafts, setDrafts] = useState({});
   const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
   const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
+  const [etimes, setEtimes] = useState({}); // jendela esai per inject
   const [msg, setMsg] = useState("");
   const [key, setKey] = useState({});
   const [booted, setBooted] = useState(false);
@@ -1552,12 +1834,17 @@ function Participant() {
       setMe(rec); lsSet(K_ME, rec);
       setDeck(m.deck); setState(m.state); setSettings(m.settings);
       if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
       setMsg(""); setTaken(null); setEvicted(false);
     } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
     else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
     else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
-      openedAt: m.openedAt, limit: m.limit, keyShown: !!m.keyShown });
-    else if (m.t === "settings") { setSettings(m.settings); if (m.times) setTimes(m.times); }
+      openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+    else if (m.t === "settings") {
+      setSettings(m.settings);
+      if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
+    }
     else if (m.t === "ack") {
       setMe((p) => {
         const n = { ...p, answers: m.me.answers, total: m.me.total,
@@ -1615,11 +1902,25 @@ function Participant() {
     return Number(v);
   };
   const limit = inject ? windowOf(inject.id) : (state?.limit ?? 0);
-  const timeUp = useExpired(
-    state?.openedAt,
-    settings?.mode === "auto" ? limit : 0,
-    phase === "open" && !!me && !!deck
-  );
+  /* Esai punya jamnya sendiri, dibaca dengan urutan yang sama seperti server:
+     override inject, lalu default esai, lalu jendela biasa. */
+  const ewindowOf = (injId) => {
+    const v = etimes?.[injId];
+    if (v !== "" && v != null) return Number(v);
+    const g = settings?.essayLimit;
+    return g === "" || g == null ? windowOf(injId) : Number(g);
+  };
+  const elimit = inject ? ewindowOf(inject.id) : (state?.elimit ?? 0);
+  const autoMode = settings?.mode === "auto";
+  const runningNow = phase === "open" && !!me && !!deck;
+  const timeUp = useExpired(state?.openedAt, autoMode ? limit : 0, runningNow);
+  const essayUp = useExpired(state?.openedAt, autoMode ? elimit : 0, runningNow);
+  const iHaveEssay = mine.some((q) => q.type === "open");
+  const iHaveChoice = mine.some((q) => q.type !== "open");
+  /* Semua pertanyaan unit ini sudah terkunci padahal inject belum ditutup:
+     unit lain masih mengerjakan esainya. */
+  const allMineLocked = mine.length > 0
+    && (!iHaveChoice || timeUp) && (!iHaveEssay || essayUp);
 
   if (!booted) return <div className="boot">Memuat</div>;
 
@@ -1753,7 +2054,8 @@ function Participant() {
                   <span className="pulse" />
                   <p className="muted">
                     Baca skenarionya. Pertanyaan segera dibuka
-                    {limit > 0 ? `. Waktu menjawab unit Anda ${fmt(limit)}` : ""}.
+                    {iHaveChoice && limit > 0 ? `. Waktu menjawab pilihan ${fmt(limit)}` : ""}
+                    {iHaveEssay && elimit > 0 ? `${iHaveChoice && limit > 0 ? ", esai" : ". Waktu menulis esai"} ${fmt(elimit)}` : ""}.
                   </p>
                 </div>
               )}
@@ -1764,9 +2066,31 @@ function Participant() {
                 </div>
               ) : (
                 <>
-                  {limit > 0 && settings?.mode === "auto" && (
+                  {autoMode && (limit > 0 || elimit > 0) && (
                     <div className="ringwrap">
-                      <Ring openedAt={state.openedAt} limit={limit} size="s150" cap="left" />
+                      {iHaveChoice && limit > 0 && (
+                        <Ring openedAt={state.openedAt} limit={limit} size="s150"
+                          cap={iHaveEssay ? "pilihan" : "sisa"} />
+                      )}
+                      {iHaveEssay && elimit > 0 && (
+                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap="esai" />
+                      )}
+                    </div>
+                  )}
+
+                  {/* Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu.
+                      Katakan apa yang sedang ditunggu, jangan biarkan layarnya diam. */}
+                  {allMineLocked && (
+                    <div className="waitbox">
+                      <span className="pulse" />
+                      <div>
+                        <b>Jawaban unit Anda sudah tercatat.</b>
+                        <p>
+                          {iHaveEssay
+                            ? "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi."
+                            : "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi."}
+                        </p>
+                      </div>
                     </div>
                   )}
                   {mine.map((q) => {
@@ -1778,6 +2102,8 @@ function Participant() {
                        tick, so there is no button to forget — and the server re-stamps the
                        time each send, exactly as it does when a unit changes a single choice. */
                     const cur = ticks[q.qid] ?? sent?.picks ?? [];
+                    /* Esai terkunci pada jam esai, sisanya pada jam pilihan. */
+                    const qUp = q.type === "open" ? essayUp : timeUp;
                     const toggle = (i) => {
                       const next = cur.includes(i)
                         ? cur.filter((x) => x !== i)
@@ -1799,10 +2125,10 @@ function Participant() {
                                 const o = optOf(i);
                                 const picked = isCheck ? cur.includes(i) : sent && sent.choice === i;
                                 const dim = isCheck
-                                  ? (timeUp && !picked)
-                                  : ((sent || timeUp) && !picked);
+                                  ? (qUp && !picked)
+                                  : ((sent || qUp) && !picked);
                                 return (
-                                  <button key={i} disabled={timeUp}
+                                  <button key={i} disabled={qUp}
                                     className={`opt ${picked ? "picked" : ""} ${dim ? "faded" : ""}`}
                                     style={{ "--c": o.c }}
                                     aria-pressed={isCheck ? picked : undefined}
@@ -1825,7 +2151,7 @@ function Participant() {
                                 );
                               })}
                             </div>
-                            {timeUp ? (
+                            {qUp ? (
                               <div className="lockstamp">
                                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
                                   stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
@@ -1860,14 +2186,14 @@ function Participant() {
                           </>
                         ) : (
                           <>
-                            <textarea rows={5} placeholder="Tulis jawaban unit Anda" disabled={timeUp}
+                            <textarea rows={5} placeholder="Tulis jawaban unit Anda" disabled={qUp}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
-                            <button className="btn wide" disabled={timeUp}
+                            <button className="btn wide" disabled={qUp}
                               onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
                               {sent ? "Perbarui jawaban" : "Kirim jawaban"}
                             </button>
-                            {timeUp
+                            {qUp
                               ? <div className="lockstamp">Waktu habis</div>
                               : sent && <p className="hint centre">Terkirim. Masih bisa direvisi sampai jawaban ditutup.</p>}
                           </>
@@ -2547,8 +2873,11 @@ html,body{background:var(--ink)}
 .codelist li{display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid var(--edge2);flex-wrap:wrap}
 .codelist li:last-child{border-bottom:none}
 .cname{flex:1;font-size:14px;font-weight:600;min-width:120px}
-.cinput{width:112px;font-family:var(--mono);text-align:center;letter-spacing:.1em;text-transform:uppercase;padding:7px}
-.cinput.narrow{width:78px;letter-spacing:0}
+.cinput{font-family:var(--mono);text-align:center;letter-spacing:.1em;text-transform:uppercase;padding:7px}
+/* Lebar ditulis dengan selector sekuat aturan dasar input, kalau tidak
+   aturan width:100% milik .ttx input menang dan kolomnya melebar. */
+.ttx input.cinput{width:112px;flex:none}
+.ttx input.cinput.narrow{width:78px;letter-spacing:0}
 .unit{color:var(--faint);font-size:12.5px}
 .bigcode{font-size:17px;font-weight:700;letter-spacing:.12em;color:var(--signal-text)}
 
@@ -2609,7 +2938,41 @@ html,body{background:var(--ink)}
 .ring.s220 svg{width:220px;height:220px} .ring.s220 .rnum{font-size:58px}
 .ring.s220 .rcap{font-size:12px}
 .ring.s220 .rtrack,.ring.s220 .rfill{stroke-width:6}
-.ringwrap{display:flex;justify-content:center;margin-bottom:6px}
+.ringwrap{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-bottom:6px}
+
+/* peran fasilitator */
+.rolepill{font-size:9.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+  border-radius:20px;padding:3px 9px;white-space:nowrap;font-family:var(--body);flex:none}
+.rolepill.owner{color:var(--signal-ink);background:var(--signal)}
+.rolepill.full{color:var(--on-opt);background:var(--oB)}
+.rolepill.grader{color:var(--on-opt);background:var(--oD)}
+.rolepill.viewer{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
+.hostlist{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.hostlist li{display:flex;align-items:center;gap:9px;font-size:13.5px}
+.hostlist .hname{color:var(--dim)}
+.ccode{font-size:16px;letter-spacing:.12em;color:var(--signal-text)}
+
+/* pintu masuk fasilitator tambahan */
+.joinhost{margin-top:34px;padding-top:20px;border-top:1px solid var(--edge2)}
+.joinrow{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.joinrow input{flex:1 1 150px;min-width:0}
+.joinrow select{font:inherit;color:var(--txt);background:var(--slab);border:1px solid var(--edge);
+  border-radius:11px;padding:11px 13px;flex:none}
+
+/* tombol tambah waktu */
+.addtime{display:flex;align-items:center;gap:6px}
+.addtime .unit{font-size:11.5px;color:var(--faint)}
+
+/* dua kolom waktu di daftar inject */
+.cohead{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:700}
+.colcap{width:78px;text-align:center;flex:none}
+.cinput.dim{opacity:.55}
+
+/* peserta yang sudah selesai sementara esai unit lain masih berjalan */
+.waitbox{display:flex;gap:12px;align-items:flex-start;background:var(--rise);
+  box-shadow:inset 0 0 0 1px var(--edge);border-radius:16px;padding:14px 16px;margin-bottom:14px}
+.waitbox b{display:block;font-family:var(--disp);font-size:14.5px;font-weight:800;margin-bottom:3px}
+.waitbox p{font-size:13px;line-height:1.5;color:var(--dim)}
 
 /* ---------- lobby ---------- */
 .lobby{max-width:760px}
