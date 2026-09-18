@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b26";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b27";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -67,18 +67,20 @@ function monogram(s) {
 /* Which kind of question this is, said out loud on every surface. Without this
    a unit that happens to be asked only single-choice never learns the others exist. */
 const TYPE_LABEL = {
-  choice: "Pilihan tunggal",
+  choice: "Pilihan berbobot",
   weighted: "Pilihan berbobot",
   checkbox: "Pilih semua yang sesuai",
   open: "Esai",
 };
 const TYPE_HINT = {
-  choice: "Pilih satu jawaban.",
-  weighted: "Pilih satu jawaban. Ada pilihan yang lebih tepat dan ada yang kurang tepat.",
+  choice: "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.",
+  weighted: "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.",
   checkbox: "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.",
   open: "Jawaban teks bebas, dinilai fasilitator setelah diskusi.",
 };
-const kindOf = (q) => (q.type === "choice" && q.weighted ? "weighted" : q.type);
+/* Satu nama untuk semua pertanyaan berpilihan tunggal, baik yang tiap opsinya
+   bernilai berbeda maupun yang hanya punya satu jawaban benar. */
+const kindOf = (q) => (q.type === "choice" ? "weighted" : q.type);
 const TypeBadge = ({ q }) => {
   const k = kindOf(q);
   return <span className={`typebadge ${k}`}>{TYPE_LABEL[k] || k}</span>;
@@ -345,7 +347,11 @@ function detectAnswerType(raw) {
   if (!t) return "open";
   const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const bare = lines.map((l) => l.replace(/^\s*\*+\s*/, ""));
-  if (bare.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
+  /* Dua baris atau lebih yang dibuka bobot manual sudah cukup untuk menyebut
+     sel ini daftar pilihan, walau penulisnya tidak memakai awalan A. atau 1). */
+  if (bare.filter((s) => /^\[\d+(?:[.,]\d+)?\]\s*\S/.test(s)).length >= 2) return "choice";
+  const plain = bare.map((l) => l.replace(/^\s*\[\d+(?:[.,]\d+)?\]\s*/, ""));
+  if (plain.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
   return "open";
 }
 /* Stars are tiers, not a yes or no. Three stars is the best answer, two is
@@ -358,15 +364,22 @@ const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim
     const trail = (s.match(/(\*+)\s*$/) || [null, ""])[1].length;
     const flagged = /\(correct\)|\[x\]/i.test(s);
     const stars = Math.max(lead, trail) || (flagged ? 1 : 0);
+    /* Bobot manual ditulis dalam kurung siku, di awal atau akhir baris:
+       "[3] B. Verifikasi alert" atau "B. Verifikasi alert [3]". Angkanya boleh
+       berapa pun, termasuk nol, dan tidak bentrok dengan penanda [x]. */
+    const manual = s.match(/^\s*\[(\d+(?:[.,]\d+)?)\]/) || s.match(/\[(\d+(?:[.,]\d+)?)\]\s*$/);
+    const wRaw = manual ? Number(String(manual[1]).replace(",", ".")) : null;
     return {
       /* strip the markers first, then the A./1) prefix. The other order leaves
          the letter in the text and the UI renders it twice. */
       text: s
         .replace(/^\s*\*+\s*/, "").replace(/\s*\*+\s*$/, "")
         .replace(/\(correct\)|\[x\]/gi, "")
+        .replace(/^\s*\[\d+(?:[.,]\d+)?\]\s*/, "").replace(/\s*\[\d+(?:[.,]\d+)?\]\s*$/, "")
         .replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "")
         .trim(),
       stars,
+      wRaw,
       correct: stars > 0,
     };
   });
@@ -441,7 +454,17 @@ function buildModel(rows) {
     }
     if (r.qtype === "checkbox" && !choices.length) { type = "open"; choices = []; badCheck.push(r.inject); }
     let weighted = false;
-    if (type === "choice" && topStars > 0) {
+    /* Bobot manual menang atas bintang, supaya angka yang ditulis fasilitator
+       di sel Jawaban dipakai apa adanya. */
+    const hasManual = type === "choice" && choices.some((c) => c.wRaw != null);
+    const topManual = hasManual ? Math.max(...choices.map((c) => c.wRaw ?? 0)) : 0;
+    if (hasManual && topManual > 0) {
+      weighted = true;
+      choices.forEach((c) => {
+        c.w = (c.wRaw ?? 0) / topManual;
+        c.correct = (c.wRaw ?? 0) === topManual;
+      });
+    } else if (type === "choice" && topStars > 0) {
       weighted = tiered;
       /* Normalised against the best tier in this question, so 3/2/1 and 30/20/10
          score identically. Only the top tier counts as the correct answer, which
@@ -845,6 +868,12 @@ function Host({ onExit }) {
               <code>3 2 1</code> dan <code>30 20 10</code> memberi hasil yang sama.
             </p>
             <p className="lede">
+              Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir
+              baris: <code>[3] B. Verifikasi alert</code> atau <code>B. Verifikasi alert [3]</code>.
+              Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang,
+              dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.
+            </p>
+            <p className="lede">
               Kolom <b>Tipe</b> opsional menentukan langsung: <code>pg</code>,{" "}
               <code>checkbox</code> atau <code>esai</code>. Kosongkan, atau hilangkan
               kolomnya, dan bentuk sel Jawaban yang menentukan.
@@ -1156,7 +1185,7 @@ function Host({ onExit }) {
                         {q.choices?.length > 0 && (
                           <span className="qpkeys mono">
                             {q.weighted
-                              ? `${Math.max(...q.choices.map((c) => c.stars))} tingkat`
+                              ? `${new Set(q.choices.map((c) => c.w).filter((w) => w > 0)).size} tingkat`
                               : `${q.choices.filter((c) => c.correct).length}/${q.choices.length} kunci`}
                           </span>
                         )}
@@ -1396,7 +1425,9 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
             {dist.map((c) => {
               const o = optOf(c.i);
               const isKey = keyShown && c.correct;
-              const tier = q.weighted && c.stars > 0 ? "★".repeat(c.stars) : "";
+              const tier = !q.weighted ? ""
+                : c.stars > 0 ? "★".repeat(c.stars)
+                  : c.wRaw != null && c.wRaw > 0 ? `bobot ${c.wRaw}` : "";
               return (
                 <li key={c.i} className={`vrow ${isKey ? "correct" : ""}`} style={{ "--c": o.c }}>
                   <span className="vglyph"><Glyph shape={o.shape} size={14} /></span>
@@ -1406,7 +1437,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                       {c.text}
                       {/* Bobot hanya muncul setelah fasilitator menekan tombol
                           tampilkan jawaban. Opsi tanpa bobot tidak diberi label. */}
-                      {q.weighted && keyShown && c.stars > 0 && (
+                      {q.weighted && keyShown && tier && (
                         <span className={`tier ${c.correct ? "top" : "mid"}`}>{tier}</span>
                       )}
                       {isKey && !q.weighted && <b> kunci</b>}
