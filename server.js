@@ -38,11 +38,13 @@ app.get("/healthz", (_, res) => res.send("ok"));
 
 const rooms = new Map();      // roomId -> room
 const codeIndex = new Map();  // JOIN CODE -> { roomId, peran }
-const sockets = new Map();    // ws -> { roomId, pid, isHost }
+const hostCodeIndex = new Map(); // CO-HOST CODE -> roomId
+const sockets = new Map();    // ws -> { roomId, pid, isHost, role }
 
 const DEFAULTS = {
   mode: "auto",       // auto = multiple choice, scored. manual = facilitator scores
   timeLimit: 60,      // seconds to answer, 0 for none
+  essayLimit: 300,    // seconds for essay questions, 0 for none, "" to follow timeLimit
   points: 1000,
   speedBonus: true,
   autoReveal: true,
@@ -57,6 +59,51 @@ const limitFor = (room, injId) => {
   return v === "" || v == null ? room.settings.timeLimit : Number(v);
 };
 
+/* An essay takes longer to write than a tile takes to tap, so essays carry a
+   window of their own: the inject's essay override, else the global essay
+   default, else the ordinary window. */
+const essayLimitFor = (room, injId) => {
+  const v = room.etimes?.[injId];
+  if (v !== "" && v != null) return Number(v);
+  const g = room.settings?.essayLimit;
+  return g === "" || g == null ? limitFor(room, injId) : Number(g);
+};
+const limitForQ = (room, injId, q) =>
+  (q?.type === "open" ? essayLimitFor(room, injId) : limitFor(room, injId));
+
+/* The inject is done when its slowest question is done. Zero anywhere means
+   somebody has no limit at all, so nothing closes on its own. */
+function longestLimit(room, inj) {
+  const a = limitFor(room, inj?.id);
+  if (!(inj?.questions || []).some((q) => q.type === "open")) return a;
+  const b = essayLimitFor(room, inj?.id);
+  if (!a || !b) return 0;
+  return Math.max(a, b);
+}
+
+/* Who may do what. The facilitator who opened the room owns it and hands out
+   co-host codes, each carrying the role that code grants. */
+const ROLE_RANK = { owner: 3, full: 2, grader: 1, viewer: 0 };
+const ROLES = Object.keys(ROLE_RANK);
+const rankOf = (ws) => {
+  const st = sockets.get(ws);
+  return st?.isHost ? (ROLE_RANK[st.role] ?? 0) : -1;
+};
+const canDrive = (ws) => rankOf(ws) >= 2;   // fase, reveal, kunci, pengaturan, kursi
+const canGrade = (ws) => rankOf(ws) >= 1;   // menilai esai
+const isOwner = (ws) => rankOf(ws) >= 3;
+
+/* Which facilitators are connected right now, for the owner's panel. */
+const hostsOf = (room) => {
+  const out = [];
+  for (const st of sockets.values()) {
+    if (st.roomId !== room.id || !st.isHost) continue;
+    out.push({ role: st.role, name: st.hostName || "", code: st.hostCode || "" });
+  }
+  return out;
+};
+const pushHosts = (room) => toRoom(room.id, { t: "hosts", hosts: hostsOf(room) }, true);
+
 function restore() {
   if (!existsSync(SNAPSHOT)) return;
   try {
@@ -68,6 +115,7 @@ function restore() {
       for (const [code, peran] of Object.entries(r.codes || {})) {
         codeIndex.set(code, { roomId: r.id, peran });
       }
+      for (const code of Object.keys(r.hostCodes || {})) hostCodeIndex.set(code, r.id);
     }
     console.log(`restored ${rooms.size} room(s)`);
   } catch (e) {
@@ -84,6 +132,7 @@ function snapshot() {
 
 function dropRoom(room) {
   for (const code of Object.keys(room.codes || {})) codeIndex.delete(code);
+  for (const code of Object.keys(room.hostCodes || {})) hostCodeIndex.delete(code);
   rooms.delete(room.id);
 }
 
@@ -97,7 +146,7 @@ function sweep() {
 function newCode() {
   let c;
   do { c = Array.from({ length: 4 }, () => ALPHABET[Math.floor(Math.random() * 32)]).join(""); }
-  while (codeIndex.has(c));
+  while (codeIndex.has(c) || hostCodeIndex.has(c));
   return c;
 }
 
@@ -111,7 +160,7 @@ function clearReveal(roomId) {
 function armReveal(room) {
   clearReveal(room.id);
   const inj = room.deck.injects[room.state.activeIdx];
-  const limit = limitFor(room, inj?.id);
+  const limit = longestLimit(room, inj);
   if (!room.settings.autoReveal || !limit) return;
   const fireIn = limit * 1000 + 1200; // small grace for in-flight answers
   revealTimers.set(room.id, setTimeout(() => {
@@ -160,7 +209,7 @@ function deckFor(room, peran) {
     roles: room.deck.roles,
     injects: room.deck.injects.map((i) => ({
       id: i.id, siklus: i.siklus, condition: i.condition, window: i.window,
-      limit: limitFor(room, i.id),
+      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
       questions: i.questions
         .filter((q) => q.peran === peran)
         .map((q) => ({
@@ -179,7 +228,7 @@ function screenDeck(room) {
     roles: room.deck.roles,
     injects: room.deck.injects.map((i) => ({
       id: i.id, siklus: i.siklus, condition: i.condition, roles: i.roles,
-      limit: limitFor(room, i.id),
+      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
       questions: i.questions.map((q) => ({
         qid: q.qid, peran: q.peran, text: q.text, type: q.type, weighted: !!q.weighted,
         choices: (q.choices || []).map((c) => ({ text: c.text })),
@@ -271,7 +320,7 @@ function regradeAll(room) {
     for (const [qid, a] of Object.entries(p.answers)) {
       if (a.quality == null) continue;
       const inj = injectOfQid(room, qid);
-      a.points = gradeToPoints(room, a, limitFor(room, inj?.id), a.quality);
+      a.points = gradeToPoints(room, a, essayLimitFor(room, inj?.id), a.quality);
     }
     retally(room, p);
   }
@@ -334,12 +383,17 @@ wss.on("connection", (ws) => {
           if (!Object.values(codes).includes(peran)) codes[newCode()] = peran;
         }
         const room = { id, deck: m.deck, settings, codes, people: {},
-          times: m.times || {},
-          state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null }, touched: Date.now() };
+          times: m.times || {}, etimes: m.etimes || {},
+          hostCodes: {}, ownerKey: newCode() + newCode(),
+          state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
+          touched: Date.now() };
         rooms.set(id, room);
         for (const [c, p] of Object.entries(codes)) codeIndex.set(c, { roomId: id, peran: p });
-        sockets.set(ws, { roomId: id, isHost: true });
-        send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times, state: room.state });
+        sockets.set(ws, { roomId: id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
+        send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
+          etimes: room.etimes, state: room.state, role: "owner",
+          ownerKey: room.ownerKey, hostCodes: room.hostCodes });
+        pushHosts(room);
         markSnapshot();
         break;
       }
@@ -347,17 +401,75 @@ wss.on("connection", (ws) => {
       /* ---- facilitator returns after a refresh ---- */
       case "rehost": {
         if (!byId) return send(ws, { t: "gone" });
-        sockets.set(ws, { roomId: byId.id, isHost: true });
+        /* Rooms opened before co-hosts existed carry no ownerKey; those still
+           let their facilitator back in. Newer rooms want the key. */
+        if (byId.ownerKey && String(m.ownerKey || "") !== byId.ownerKey) return send(ws, { t: "denied" });
+        sockets.set(ws, { roomId: byId.id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
-          settings: byId.settings, times: byId.times || {}, state: byId.state });
+          settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
+          state: byId.state, role: "owner", ownerKey: byId.ownerKey,
+          hostCodes: byId.hostCodes || {} });
         send(ws, { t: "roster", people: roster(byId) });
+        pushHosts(byId);
+        break;
+      }
+
+      /* ---- the owner mints a code for another facilitator ---- */
+      case "cohost_add": {
+        if (!byId || !isOwner(ws)) return;
+        const role = ROLES.includes(m.role) && m.role !== "owner" ? m.role : "viewer";
+        const code = newCode();
+        byId.hostCodes = byId.hostCodes || {};
+        byId.hostCodes[code] = { role, label: String(m.label || "").trim().slice(0, 40), addedAt: Date.now() };
+        hostCodeIndex.set(code, byId.id);
+        toRoom(byId.id, { t: "hostcodes", hostCodes: byId.hostCodes }, true);
+        markSnapshot();
+        break;
+      }
+
+      /* ---- the owner withdraws a code, and whoever came in on it ---- */
+      case "cohost_remove": {
+        if (!byId || !isOwner(ws)) return;
+        const code = String(m.code || "").toUpperCase();
+        if (!byId.hostCodes?.[code]) return;
+        delete byId.hostCodes[code];
+        hostCodeIndex.delete(code);
+        for (const [sock, st] of sockets) {
+          if (st.roomId === byId.id && st.hostCode === code) {
+            send(sock, { t: "hostgone" });
+            sockets.set(sock, {});
+          }
+        }
+        toRoom(byId.id, { t: "hostcodes", hostCodes: byId.hostCodes }, true);
+        pushHosts(byId);
+        markSnapshot();
+        break;
+      }
+
+      /* ---- another facilitator joins with a co-host code ---- */
+      case "cohost": {
+        const code = String(m.code || "").toUpperCase();
+        const roomId = hostCodeIndex.get(code);
+        const room = roomId && rooms.get(roomId);
+        const entry = room?.hostCodes?.[code];
+        if (!room || !entry) return send(ws, { t: "nosuchhost" });
+        room.touched = Date.now();
+        sockets.set(ws, { roomId: room.id, isHost: true, role: entry.role,
+          hostCode: code, hostName: (m.name || entry.label || "").trim() });
+        send(ws, { t: "cohosted", roomId: room.id, role: entry.role,
+          deck: room.deck, codes: room.codes, settings: room.settings,
+          times: room.times || {}, etimes: room.etimes || {}, state: room.state });
+        send(ws, { t: "roster", people: roster(room) });
+        if (room.state.keyShown) sendKey(room);
+        pushHosts(room);
         break;
       }
 
       case "settings": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canDrive(ws)) return;
         if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
         if (m.times) byId.times = { ...byId.times, ...m.times };
+        if (m.etimes) byId.etimes = { ...byId.etimes, ...m.etimes };
         /* points-per-question or the mode may have moved — ceilings shift and every
            grade already given has to be recomputed against the new numbers, then
            pushed, or the host and the phones keep showing the old arithmetic */
@@ -368,13 +480,15 @@ wss.on("connection", (ws) => {
           const pp = byId.people[st.pid];
           if (pp) send(sk, { t: "ack", me: pp });
         }
-        toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times });
+        toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times,
+          etimes: byId.etimes || {} });
         /* The window for the inject on screen may have just moved. Push the new
            limit to every device and re-arm the auto-reveal against it, otherwise
            the phones keep counting to the old number. */
         const cur = byId.deck.injects[byId.state.activeIdx];
         if (cur) {
-          byId.state = { ...byId.state, limit: limitFor(byId, cur.id) };
+          byId.state = { ...byId.state, limit: limitFor(byId, cur.id),
+            elimit: essayLimitFor(byId, cur.id) };
           toRoom(byId.id, { t: "state", ...byId.state });
           if (byId.state.phase === "open") armReveal(byId);
         }
@@ -443,7 +557,8 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid });
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
-          settings: room.settings, times: room.times || {}, me: room.people[pid] });
+          settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
+          me: room.people[pid] });
         if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
@@ -460,7 +575,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid: m.pid });
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
-          settings: room.settings, times: room.times || {}, me });
+          settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me });
         if (room.state.keyShown) sendKey(room);
         markDirty(room.id);
         break;
@@ -471,7 +586,8 @@ wss.on("connection", (ws) => {
         if (!byId) return send(ws, { t: "gone" });
         sockets.set(ws, { roomId: byId.id, isScreen: true });
         send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
-          settings: byId.settings, times: byId.times || {}, state: byId.state, codes: byId.codes });
+          settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
+          state: byId.state, codes: byId.codes });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;
@@ -479,7 +595,7 @@ wss.on("connection", (ws) => {
 
       /* ---- facilitator grades one essay answer, 1-10 ---- */
       case "grade": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canGrade(ws)) return;
         const p = byId.people[m.pid];
         const a = p?.answers[m.qid];
         if (!a) return;
@@ -487,7 +603,7 @@ wss.on("connection", (ws) => {
         else {
           a.quality = Math.max(1, Math.min(10, Math.round(Number(m.quality)) || 1));
           const inj = injectOfQid(byId, m.qid);
-          a.points = gradeToPoints(byId, a, limitFor(byId, inj?.id), a.quality);
+          a.points = gradeToPoints(byId, a, essayLimitFor(byId, inj?.id), a.quality);
         }
         a.correct = null;   // an essay is never right or wrong, only better or worse
         retally(byId, p);
@@ -500,7 +616,7 @@ wss.on("connection", (ws) => {
 
       /* ---- facilitator frees a unit's seat ---- */
       case "release": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canDrive(ws)) return;
         const held = seatHolder(byId, m.peran);
         if (!held) return;
         for (const [sock, s] of sockets) {
@@ -514,12 +630,13 @@ wss.on("connection", (ws) => {
 
       /* ---- phase changes; the answer clock starts here ---- */
       case "state": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canDrive(ws)) return;
         const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
         const inj0 = byId.deck.injects[m.activeIdx];
         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
           keyShown: false,
-          limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit };
+          limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit,
+          elimit: inj0 ? essayLimitFor(byId, inj0.id) : byId.settings.essayLimit };
         toRoom(byId.id, { t: "state", ...byId.state });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
         markDirty(byId.id);
@@ -536,12 +653,15 @@ wss.on("connection", (ws) => {
 
         const inj = room.deck.injects[room.state.activeIdx];
         const elapsed = room.state.openedAt ? Date.now() - room.state.openedAt : 0;
-        const limit = limitFor(room, inj?.id);
-        if (limit && elapsed > limit * 1000 + 800) return send(ws, { t: "timeup" });
-
+        /* Each question closes on its own clock, so an essay can still be
+           arriving after the tiles have locked. */
+        let applied = 0, expired = 0;
         for (const [qid, val] of Object.entries(m.answers || {})) {
           const q = inj?.questions.find((x) => x.qid === qid);
           if (!q || q.peran !== p.peran) continue;
+          const limit = limitForQ(room, inj?.id, q);
+          if (limit && elapsed > limit * 1000 + 800) { expired += 1; continue; }
+          applied += 1;
           if (q.type === "checkbox" && room.settings.mode === "auto") {
             const n = (q.choices || []).length;
             const picks = [...new Set((Array.isArray(val) ? val : [val]).map(Number))]
@@ -563,6 +683,7 @@ wss.on("connection", (ws) => {
             p.answers[qid] = { text, ms: elapsed, correct: null, points: 0, locked: false };
           }
         }
+        if (!applied) return send(ws, expired ? { t: "timeup" } : { t: "ack", me: p });
         for (const qid of Object.keys(m.answers || {})) {
           if (!p.answers[qid]) continue;
           const earlier = Object.values(room.people)
@@ -577,7 +698,7 @@ wss.on("connection", (ws) => {
       }
 
       case "showkey": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canDrive(ws)) return;
         byId.state = { ...byId.state, keyShown: true };
         toRoom(byId.id, { t: "state", ...byId.state });
         sendKey(byId);
@@ -597,7 +718,7 @@ wss.on("connection", (ws) => {
       }
 
       case "end": {
-        if (!byId || !sockets.get(ws)?.isHost) return;
+        if (!byId || !canDrive(ws)) return;
         toRoom(byId.id, { t: "ended" });
         clearReveal(byId.id);
         dropRoom(byId);
@@ -607,7 +728,14 @@ wss.on("connection", (ws) => {
     }
   });
 
-  ws.on("close", () => sockets.delete(ws));
+  ws.on("close", () => {
+    const st = sockets.get(ws);
+    sockets.delete(ws);
+    if (st?.isHost && st.roomId) {
+      const room = rooms.get(st.roomId);
+      if (room) pushHosts(room);
+    }
+  });
 });
 
 setInterval(() => {
