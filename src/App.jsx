@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b30";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b32";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -152,15 +152,6 @@ function ThemeToggle() {
   );
 }
 
-/* ---------------------------- brand mark ---------------------------- */
-
-/* The logo is an asset you drop in, not something the app draws. Put the
-   official file at public/brand/logo.svg (and optionally logo-dark.svg for a
-   knockout version on the dark theme). If neither is there, nothing renders
-   and the wordmark stands alone — so the app never ships a broken image. */
-const LOGO_LIGHT = "/brand/logo.svg";
-const LOGO_DARK = "/brand/logo-dark.svg";
-
 function useIsDark() {
   const read = () => {
     const a = document.documentElement.getAttribute("data-theme");
@@ -183,27 +174,14 @@ function useIsDark() {
   return dark;
 }
 
-let loggedMissingLogo = false;
+/* ---------------------------- brand mark ---------------------------- */
+
+/* Tanda huruf, bukan gambar logo. Aplikasi ini berjalan di domain yang bukan
+   milik bank, dan logo bank di domain pihak ketiga persis pola yang dicari
+   pengklasifikasi phishing Google Safe Browsing. Huruf tidak bisa dicocokkan
+   sebagai gambar merek, jadi tanda ini aman dipakai di mana pun ia berjalan. */
 function BrandLogo({ className = "" }) {
-  const dark = useIsDark();
-  const chain = dark ? [LOGO_DARK, LOGO_LIGHT] : [LOGO_LIGHT];
-  const [i, setI] = useState(0);
-  useEffect(() => { setI(0); }, [dark]);
-  if (i >= chain.length) return null;  // no asset in place: render nothing at all
-  return (
-    <img className={`brandlogo ${className}`} src={chain[i]} alt=""
-      onError={() => setI((n) => {
-        const next = n + 1;
-        if (next >= chain.length && !loggedMissingLogo) {
-          loggedMissingLogo = true;
-          console.info(
-            `[TTX] No logo shown. Put the file at public/${LOGO_LIGHT.replace(/^\//, "")}` +
-            ` (optionally public/${LOGO_DARK.replace(/^\//, "")} for the dark theme) and rebuild.`
-          );
-        }
-        return next;
-      })} />
-  );
+  return <span className={`brandmark ${className}`} aria-hidden="true">MBI</span>;
 }
 
 /* One fixed line in the bottom-left corner, on every screen. Small and quiet:
@@ -686,6 +664,7 @@ function Host({ onExit }) {
   });
   const [times, setTimes] = useState({});
   const [etimes, setEtimes] = useState({});     // jendela esai per inject
+  const [ran, setRan] = useState([]);           // inject yang pernah dibuka
   const [model, setModel] = useState(null);
   const [warnings, setWarnings] = useState([]);
   const [fileName, setFileName] = useState("");
@@ -729,6 +708,7 @@ function Host({ onExit }) {
     if (m.t === "hosted") {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
       setEtimes(m.etimes || {});
+      if (m.ran) setRan(m.ran);
       setRole(m.role || "owner");
       if (m.ownerKey) setOwnerKey(m.ownerKey);
       setHostCodes(m.hostCodes || {});
@@ -743,6 +723,7 @@ function Host({ onExit }) {
       setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
       setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
       setRole(m.role || "viewer"); setOwnerKey("");
+      if (m.ran) setRan(m.ran);
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
       setJoinErr(""); setScreen("run");
@@ -758,6 +739,7 @@ function Host({ onExit }) {
     } else if (m.t === "state") {
       /* remember what arrived so the push effect below doesn't echo it back */
       echo.current = `${m.activeIdx}:${m.phase}`;
+      if (m.ran) setRan(m.ran);
       setActiveIdx(m.activeIdx);
       setPhase(m.phase);
       setKeyShown(!!m.keyShown);
@@ -796,7 +778,7 @@ function Host({ onExit }) {
       setRoomId(s.roomId); setModel(s.model); setFileName(s.fileName || "");
       setNotes(s.notes || {});
       setCodes(s.codes || {}); setSettings(s.settings || settings); setTimes(s.times || {});
-      setEtimes(s.etimes || {}); setRole(s.role || "owner");
+      setEtimes(s.etimes || {}); setRan(s.ran || []); setRole(s.role || "owner");
       setOwnerKey(s.ownerKey || ""); setHostCode(s.hostCode || "");
       setScreen("run");
       if (s.hostCode) send({ t: "cohost", roomId: s.roomId, code: s.hostCode, name: s.hostName || "" });
@@ -809,11 +791,11 @@ function Host({ onExit }) {
   useEffect(() => {
     if (!booted || !model || !roomId) return;
     const t = setTimeout(() => {
-      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times, etimes,
+      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times, etimes, ran,
         role, ownerKey, hostCode, hostName });
     }, 500);
     return () => clearTimeout(t);
-  }, [booted, model, roomId, fileName, notes, codes, settings, times, etimes,
+  }, [booted, model, roomId, fileName, notes, codes, settings, times, etimes, ran,
       role, ownerKey, hostCode, hostName]);
 
   useEffect(() => {
@@ -1201,7 +1183,7 @@ function Host({ onExit }) {
 
   /* ---- report ---- */
   if (screen === "report") {
-    return <Report {...{ model, notes, people, settings, roleIdx, fileName, unitOf }}
+    return <Report {...{ model, notes, people, settings, roleIdx, fileName, unitOf, ran }}
       onBack={() => setScreen("run")} onEnd={endSession} />;
   }
 
@@ -2511,7 +2493,7 @@ function Screen() {
 
 /* ============================= REPORT ============================= */
 
-function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onBack, onEnd }) {
+function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran = [], onBack, onEnd }) {
   const all = useMemo(() => model.injects.flatMap((i) =>
     i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
 
@@ -2523,16 +2505,18 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
      esai juga menghasilkan poin. Sempat tidak dihitung di sini, dan itulah yang
      membuat sebuah unit tampil 171 persen: poin esainya dibagi maksimum yang
      tidak memuat esai. */
+  const ranSet = useMemo(() => new Set(ran), [ran]);
+  const wasRun = useCallback((id) => ranSet.size === 0 || ranSet.has(id), [ranSet]);
   const possibleOf = useCallback((role) => {
     if (settings.mode !== "auto") return 0;
-    const n = model.injects.flatMap((i) => i.questions).filter((q) => {
+    const n = model.injects.filter((i) => wasRun(i.id)).flatMap((i) => i.questions).filter((q) => {
       if (q.peran !== role) return false;
       if (q.type === "open") return true;
       if (q.type !== "choice" && q.type !== "checkbox") return false;
       return (q.choices || []).some((c) => c.correct);
     }).length;
     return n * (Number(settings.points) || 0);
-  }, [model, settings.mode, settings.points]);
+  }, [model, settings.mode, settings.points, wasRun]);
   /* Angka dari server selalu menang, supaya layar, CSV dan papan skor memakai
      pembagi yang sama. */
   const possibleFor = useCallback((role) => {
@@ -2540,24 +2524,34 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
     return seat ? seat.possible : possibleOf(role);
   }, [people, possibleOf]);
 
+  const askedOf = useCallback((role) => model.injects.filter((i) => wasRun(i.id))
+    .flatMap((i) => i.questions).filter((q) => q.peran === role).length, [model, wasRun]);
+
   const board = useMemo(() => [...people]
     .map((p) => {
       const possible = p.possible ?? possibleOf(p.peran);
-      return { ...p, possible, pct: possible ? ((p.total || 0) / possible) * 100 : null };
+      return { ...p, possible, asked: askedOf(p.peran),
+        pct: possible ? ((p.total || 0) / possible) * 100 : null };
     })
     .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || (b.total || 0) - (a.total || 0)),
-  [people, possibleOf]);
+  [people, possibleOf, askedOf]);
 
   const byRole = useMemo(() => {
     const o = {};
     all.forEach((q) => {
-      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0, pts: 0, essays: 0, ungraded: 0 };
+      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0,
+        pts: 0, essays: 0, ungraded: 0, accN: 0, accSum: 0 };
       const b = o[q.peran];
       b.total += 1;
+      if (!wasRun(q.injectId)) { b.total -= 1; return; }
       people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]).forEach((p) => {
         const a = p.answers[q.qid];
         if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; if (a.acc > 0 && !a.correct) b.part += 1; }
         if (a.quality != null) { b.scored += 1; b.sum += a.quality; }
+        /* Akurasi murni, tanpa faktor kecepatan. Esai memakai nilai 1 sampai 10
+           dibagi sepuluh, sama seperti hitungan poin di server. */
+        const raw = a.acc != null ? a.acc : a.quality != null ? a.quality / 10 : null;
+        if (raw != null) { b.accN += 1; b.accSum += raw; }
         if (q.type === "open") { b.essays += 1; if (a.quality == null) b.ungraded += 1; }
         b.pts += a.points || 0;
       });
@@ -2565,9 +2559,13 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
     Object.entries(o).forEach(([role, b]) => {
       b.possible = possibleFor(role);
       b.pct = b.possible ? (b.pts / b.possible) * 100 : null;
+      /* Dibagi jumlah soal yang ditanyakan, bukan jumlah yang dijawab, supaya
+         unit yang melewatkan soal tidak terlihat lebih akurat daripada yang
+         menjawab semuanya. */
+      b.accPct = b.total ? (b.accSum / b.total) * 100 : null;
     });
     return o;
-  }, [all, people, possibleFor]);
+  }, [all, people, possibleFor, wasRun]);
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
@@ -2697,8 +2695,16 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
                     }} /></span>
                     <span className="bscore">
                       <b className="mono">{p.pct == null ? "·" : `${Math.round(p.pct)}%`}</b>
-                      <em className="mono">{(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}</em>
+                      <em className="mono">
+                        {(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}
+                        {p.asked ? ` · ${p.asked} soal` : ""}
+                      </em>
                     </span>
+                    {p.asked > 0 && p.asked < 3 && (
+                      <span className="thin" title="Soalnya terlalu sedikit untuk dibandingkan dengan unit lain">
+                        belum cukup data
+                      </span>
+                    )}
                   </li>
                 ))}
               </ol>
@@ -2745,7 +2751,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
           <div className="tblwrap">
             <table className="tbl">
               <thead><tr><th>Peran</th><th>Ditanya</th><th>Benar</th><th>Sebagian</th>
-                <th>Poin</th><th>Maks</th><th>Skor</th>
+                <th>Akurasi</th><th>Poin</th><th>Maks</th><th>Skor</th>
 <th>Nilai esai</th></tr></thead>
               <tbody>
                 {Object.entries(byRole).map(([role, d]) => (
@@ -2754,6 +2760,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
                     <td className="mono">{d.total}</td>
                     <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "·"}</td>
                     <td className="mono">{d.part || "·"}</td>
+                    <td className="mono">{d.accPct == null ? "·" : `${Math.round(d.accPct)}%`}</td>
                     <td className="mono">{d.pts ? d.pts.toLocaleString() : "·"}</td>
                     <td className="mono dimcell">{d.possible ? d.possible.toLocaleString() : "·"}</td>
                     <td className="mono strong">{d.pct == null ? "·" : `${Math.round(d.pct)}%`}</td>
@@ -2800,7 +2807,7 @@ const CSS = `
   /* Logo size lives here — raise or lower these two and every surface follows.
      If your file has built-in whitespace around the mark it will still look
      small; trim the artboard in the SVG, or push these up. */
-  --logo-h:34px; --logo-h-big:60px;
+  --logo-h:30px; --logo-h-big:52px;
   --disp:'Archivo',"Helvetica Neue",system-ui,sans-serif;
   --body:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;
   --mono:'JetBrains Mono',ui-monospace,"SFMono-Regular",monospace;
@@ -2900,9 +2907,11 @@ html,body{background:var(--ink)}
 .wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
 .barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
 .build{font-family:var(--mono);font-size:10px;opacity:.55}
-.brandlogo{height:var(--logo-h);width:auto;max-width:240px;display:block;flex:none;
-  object-fit:contain;object-position:left center}
-.brandlogo.big{height:var(--logo-h-big);max-width:380px}
+.brandmark{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  font-family:var(--disp);font-weight:800;font-size:13px;letter-spacing:.09em;
+  height:var(--logo-h);padding:0 11px;border-radius:9px;
+  background:var(--signal);color:var(--signal-ink)}
+.brandmark.big{height:var(--logo-h-big);font-size:23px;padding:0 19px;border-radius:14px}
 .offline{color:var(--wrong);font-weight:700;font-size:12px}
 .crumb{color:var(--faint);font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
 .injno{font-family:var(--disp);font-weight:800;white-space:nowrap;font-size:16px;letter-spacing:-.03em}
@@ -3346,7 +3355,7 @@ html,body{background:var(--ink)}
 .projstrip{display:flex;gap:9px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--edge2);
   padding-top:18px;margin-top:auto}
 .projstrip .lab{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:800}
-.projtop .brandlogo{margin-right:4px}
+.projtop .brandmark{margin-right:4px}
 .jcode{display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:11px;
   background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
 .jcode b{font-size:16px;font-weight:700;letter-spacing:.1em}
@@ -3376,6 +3385,11 @@ html,body{background:var(--ink)}
 .bscore em{display:block;font-style:normal;font-size:10.5px;color:var(--faint);margin-top:1px}
 .tbl .dimcell{color:var(--faint)}
 .tbl .strong{font-weight:700}
+.tbl tr.skipped td{opacity:.5}
+/* penanda unit yang soalnya terlalu sedikit untuk dibandingkan */
+.thin{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:20px;padding:2px 8px;white-space:nowrap;margin-left:8px;flex:none}
 .tblwrap{overflow-x:auto;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px}
 .tbl{width:100%;border-collapse:collapse;font-size:14px}
 .tbl th{text-align:left;font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
