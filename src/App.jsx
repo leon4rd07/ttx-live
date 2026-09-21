@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b28";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b29";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -717,6 +717,12 @@ function Host({ onExit }) {
   const [teamOpen, setTeamOpen] = useState(false);
   const fileRef = useRef(null);
 
+  /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
+     latihan, penilai hanya menilai esai dan menulis catatan, pemantau melihat. */
+  const isOwner = role === "owner";
+  const canDrive = role === "owner" || role === "full";
+  const canGrade = canDrive || role === "grader";
+
   const onMsg = useCallback((m) => {
     if (m.t === "hosted") {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
@@ -801,12 +807,6 @@ function Host({ onExit }) {
     if (echo.current === sig) return; // this change came from the server
     send({ t: "state", roomId, activeIdx, phase });
   }, [roomId, screen, activeIdx, phase, send, canDrive]);
-
-  /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
-     latihan, penilai hanya menilai esai dan menulis catatan, pemantau melihat. */
-  const isOwner = role === "owner";
-  const canDrive = role === "owner" || role === "full";
-  const canGrade = canDrive || role === "grader";
 
   const roleIdx = useCallback((p) => (model ? model.roles.indexOf(p) : -1), [model]);
 
