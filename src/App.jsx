@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b29";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b30";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -681,7 +681,7 @@ function Host({ onExit }) {
   const [codes, setCodes] = useState({});
   const [draftCodes, setDraftCodes] = useState({});
   const [settings, setSettings] = useState({
-    mode: "auto", timeLimit: 60, essayLimit: 300, points: 1000,
+    mode: "auto", timeLimit: 60, essayLimit: 300, essayGrace: 60, points: 1000,
     speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
   });
   const [times, setTimes] = useState({});
@@ -714,6 +714,8 @@ function Host({ onExit }) {
   const [hostName, setHostName] = useState(() => lsGet(K_NAME) || "");
   const [joinCode, setJoinCode] = useState("");
   const [joinErr, setJoinErr] = useState("");
+  /* onMsg dibuat sekali, jadi ia membaca layar lewat ref, bukan lewat state. */
+  const screenRef = useRef("setup");
   const [teamOpen, setTeamOpen] = useState(false);
   const fileRef = useRef(null);
 
@@ -734,6 +736,9 @@ function Host({ onExit }) {
       setKeyShown(!!m.state.keyShown);
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "cohosted") {
+      /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
+         karena tidak memegang ownerKey, dan co-host terputus untuk seterusnya. */
+      if (m.code) setHostCode(m.code);
       /* Fasilitator tambahan tidak memuat sheet apa pun: decknya datang dari server. */
       setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
       setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
@@ -743,7 +748,10 @@ function Host({ onExit }) {
       setJoinErr(""); setScreen("run");
     } else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
     else if (m.t === "hosts") setHosts(m.hosts || []);
-    else if (m.t === "nosuchhost") setJoinErr("Kode fasilitator itu tidak dikenali.");
+    else if (m.t === "nosuchhost") {
+      setJoinErr("Kode fasilitator itu tidak dikenali.");
+      setHostCode("");
+    }
     else if (m.t === "hostgone") {
       lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup");
       setJoinErr("Akses Anda dicabut oleh pemilik ruangan.");
@@ -762,7 +770,14 @@ function Host({ onExit }) {
     }
     else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
-    else if (m.t === "denied") { setDenied(true); lsDel(K_KEY); }
+    else if (m.t === "denied") {
+      if (screenRef.current === "run") {
+        /* Penolakan saat menyambung ulang, bukan salah kata sandi. Jangan diamkan
+           sesi yang sudah putus, katakan apa yang harus dilakukan. */
+        lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup");
+        setJoinErr("Sesi Anda terputus dari ruangan. Masukkan lagi kode fasilitator Anda.");
+      } else { setDenied(true); lsDel(K_KEY); }
+    }
     else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
   }, []);
   const { send, status, gen } = useSocket(onMsg);
@@ -807,6 +822,8 @@ function Host({ onExit }) {
     if (echo.current === sig) return; // this change came from the server
     send({ t: "state", roomId, activeIdx, phase });
   }, [roomId, screen, activeIdx, phase, send, canDrive]);
+
+  useEffect(() => { screenRef.current = screen; }, [screen]);
 
   const roleIdx = useCallback((p) => (model ? model.roles.indexOf(p) : -1), [model]);
 
@@ -857,9 +874,10 @@ function Host({ onExit }) {
      jendela biasa. Dibaca sama persis seperti di server. */
   const elimitOf = (id) => {
     const v = etimes[id];
-    if (v !== "" && v != null) return Number(v);
-    const g = settings.essayLimit;
-    return g === "" || g == null ? limitOf(id) : Number(g);
+    const base = v !== "" && v != null ? Number(v)
+      : settings.essayLimit === "" || settings.essayLimit == null
+        ? limitOf(id) : Number(settings.essayLimit);
+    return base ? base + (Number(settings.essayGrace) || 0) : base;
   };
   const hasEssay = (inj) => (inj?.questions || []).some((q) => q.type === "open");
   /* Inject selesai ketika pertanyaan paling lambat selesai. */
@@ -1064,10 +1082,18 @@ function Host({ onExit }) {
                     <input type="number" min="0" step="30" value={settings.essayLimit}
                       onChange={(e) => patchSettings({ essayLimit: Number(e.target.value) })} />
                   </label>
+                  <label className="fld">
+                    <span>Kelonggaran mengetik esai (detik)</span>
+                    <input type="number" min="0" step="15" value={settings.essayGrace}
+                      onChange={(e) => patchSettings({ essayGrace: Number(e.target.value) })} />
+                  </label>
                   <p className="hint span2">
                     Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam
                     sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu
                     dan menunggu, dan inject baru tertutup setelah jam terpanjang habis.
+                    Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai
+                    keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong
+                    nilai.
                   </p>
                   <Check label="Bonus kecepatan" checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
@@ -1081,9 +1107,6 @@ function Host({ onExit }) {
                 </>
               )}
 
-              <Check label="Tampilkan nama operator" checked={settings.showNames}
-                onChange={(v) => patchSettings({ showNames: v })}
-                hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
               <Check label="Tampilkan nama unit" checked={settings.showUnits}
                 onChange={(v) => patchSettings({ showUnits: v })}
                 hint="Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa." />
@@ -1097,6 +1120,13 @@ function Host({ onExit }) {
                   {" "}{settings.timeLimit} detik untuk pilihan dan {settings.essayLimit} detik untuk esai.
                   Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya
                   bisa diubah saat latihan berjalan.
+                </p>
+                <p className="hint">
+                  <button className="link" onClick={() => {
+                    const blank = Object.fromEntries(model.injects.map((i) => [i.id, ""]));
+                    setTimes(blank); setEtimes(blank);
+                    if (roomId) send({ t: "settings", roomId, times: blank, etimes: blank });
+                  }}>Kosongkan semua, ikuti angka default</button>
                 </p>
                 <ul className="codelist">
                   <li className="cohead">
@@ -1212,9 +1242,6 @@ function Host({ onExit }) {
             <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
               title={settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit"}
               onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
-            <button className={`btn quiet pill ${settings.showNames ? "" : "off"}`}
-              title={settings.showNames ? "Sembunyikan nama operator" : "Tampilkan nama operator"}
-              onClick={() => patchSettings({ showNames: !settings.showNames })}>Nama</button>
           </>)}
           <button className="btn quiet" onClick={() => setTeamOpen(true)}
             title="Fasilitator di ruangan ini">Tim · {hosts.length || 1}</button>
@@ -1270,7 +1297,7 @@ function Host({ onExit }) {
 
         <section className="stage">
           {phase === "lobby" ? (
-            <Lobby {...{ codes, people, model, unitOf, seatOf }} showNames={settings.showNames}
+            <Lobby {...{ codes, people, model, unitOf, seatOf }}
               onBegin={canDrive ? () => { echo.current = ""; setPhase("briefing"); } : null}
               injectId={inject.id} />
           ) : (
@@ -1551,7 +1578,7 @@ function TeamPanel({ hosts, hostCodes, isOwner, role, onAdd, onRemove, onClose }
   );
 }
 
-function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injectId }) {
+function Lobby({ codes, people, model, unitOf, seatOf, onBegin, injectId }) {
   const taken = people.length;
   return (
     <div className="lobby">
@@ -1586,9 +1613,7 @@ function Lobby({ codes, people, model, unitOf, seatOf, showNames, onBegin, injec
                 <span className="seatopen">kursi kosong</span>
               ) : (
                 <span className="cgwho">
-                  {showNames
-                    ? `${seat.name}${seat.live === false ? " · offline" : ""}`
-                    : seat.live === false ? "sudah duduk · offline" : "sudah duduk"}
+                  {seat.live === false ? "sudah duduk · offline" : "sudah duduk"}
                 </span>
               )}
             </li>
@@ -1641,10 +1666,7 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
                 <span className="cname">{unitOf(r)}</span>
                 <b className="bigcode mono">{code}</b>
                 <span className={seat && seat.live !== false ? "tin" : "tmiss"}>
-                  {!seat ? "kosong"
-                    : settings.showNames
-                      ? `${seat.name}${seat.live === false ? " · offline" : ""}`
-                      : seat.live === false ? "offline" : "sudah duduk"}
+                  {!seat ? "kosong" : seat.live === false ? "offline" : "sudah duduk"}
                 </span>
                 {seat && canDrive && (confirm === r
                   ? <span className="confirm">
@@ -1662,9 +1684,6 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
           <Check label="Nama unit" checked={settings.showUnits}
             onChange={(v) => onSetting({ showUnits: v })}
             hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
-          <Check label="Nama operator" checked={settings.showNames}
-            onChange={(v) => onSetting({ showNames: v })}
-            hint="Kalau dimatikan, siapa yang memegang perangkat tiap unit disembunyikan." />
 
           <button className="btn quiet wide" onClick={onLobby}>Kembali ke ruang tunggu</button>
           <p className="hint">
@@ -1740,7 +1759,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
               return (
                 <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : ""}>
                   {a.rank && <span className="rk mono">{a.rank}</span>}
-                  <span className="wname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
+                  <span className="wname">{unitOf(p.peran)}</span>
                   <span className="wopt">
                     {picks.map((i) => {
                       const o = optOf(i);
@@ -1765,7 +1784,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                 return (
                   <li key={p.pid}>
                     <span className="who">
-                      {settings.showNames ? p.name : unitOf(p.peran)} · {(a.ms / 1000).toFixed(0)} dtk
+                      {unitOf(p.peran)} · {(a.ms / 1000).toFixed(0)} dtk
                     </span>
                     <p>{a.text}</p>
                     <div className="grade">
@@ -1810,7 +1829,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
 function Participant() {
   const [me, setMe] = useState(null);
   const [codeIn, setCodeIn] = useState("");
-  const [nameIn, setNameIn] = useState("");
+
   const [peek, setPeek] = useState(null);     // { peran, taken, holder, sinceMs, live }
   const [taken, setTaken] = useState(null);   // refusal from an actual join attempt
   const [deck, setDeck] = useState(null);
@@ -1885,7 +1904,7 @@ function Participant() {
   const leave = () => {
     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
     nukeAll(); setMe(null); setDeck(null); setState(null);
-    setCodeIn(""); setNameIn(""); setPeek(null); setTaken(null); setKey({});
+    setCodeIn(""); setPeek(null); setTaken(null); setKey({});
   };
 
   /* Derived above every early return. useExpired sat below them, so it only
@@ -1906,9 +1925,10 @@ function Participant() {
      override inject, lalu default esai, lalu jendela biasa. */
   const ewindowOf = (injId) => {
     const v = etimes?.[injId];
-    if (v !== "" && v != null) return Number(v);
-    const g = settings?.essayLimit;
-    return g === "" || g == null ? windowOf(injId) : Number(g);
+    const base = v !== "" && v != null ? Number(v)
+      : settings?.essayLimit === "" || settings?.essayLimit == null
+        ? windowOf(injId) : Number(settings.essayLimit);
+    return base ? base + (Number(settings?.essayGrace) || 0) : base;
   };
   const elimit = inject ? ewindowOf(inject.id) : (state?.elimit ?? 0);
   const autoMode = settings?.mode === "auto";
@@ -1928,7 +1948,7 @@ function Participant() {
   if (!me || !deck) {
     const ready = codeIn.length >= 4;
     const doJoin = (takeover) =>
-      send({ t: "join", code: codeIn, name: nameIn.trim(), takeover: !!takeover });
+      send({ t: "join", code: codeIn, takeover: !!takeover });
     const blocked = taken || (peek && peek.taken ? peek : null);
     return (
       <>
@@ -1990,11 +2010,8 @@ function Participant() {
                   <Crest peran={peek.peran} idx={0} size={34} />
                   <div><small>Mengambil kursi untuk</small><b>{peek.peran}</b></div>
                 </div>
-                <label className="fld">
-                  <span>Siapa yang memegang perangkat ini <em>opsional</em></span>
-                  <input value={nameIn} onChange={(e) => setNameIn(e.target.value)}
-                    placeholder="Nama atau ruang rapat" autoComplete="off" />
-                </label>
+                {/* Nama operator tidak diminta lagi. Papan skor dan laporan memakai
+                    nama unit kerja, jadi isian ini hanya menambah langkah. */}
                 <button className="btn wide" onClick={() => doJoin(false)}>Ambil kursi</button>
               </>
             ) : (
@@ -2023,9 +2040,7 @@ function Participant() {
           <Crest peran={me.peran} idx={0} />
           <span className="unitblock">
             <b className="unitname">{me.peran}</b>
-            <small className="seatline">
-              satu kursi{me.name && me.name !== me.peran ? ` · ${me.name}` : ""}
-            </small>
+            <small className="seatline">satu kursi</small>
           </span>
         </>}
         right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
@@ -2504,13 +2519,26 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
      any better at the exercise. Every comparison here is therefore a percentage
      of what that unit could have scored; raw points stay visible beside it.
      Questions with no key marked are excluded, so a sheet mistake costs nobody. */
+  /* Harus persis sama dengan possibleFor di server. Esai ikut dihitung, karena
+     esai juga menghasilkan poin. Sempat tidak dihitung di sini, dan itulah yang
+     membuat sebuah unit tampil 171 persen: poin esainya dibagi maksimum yang
+     tidak memuat esai. */
   const possibleOf = useCallback((role) => {
     if (settings.mode !== "auto") return 0;
-    const n = model.injects.flatMap((i) => i.questions).filter((q) =>
-      q.peran === role && (q.type === "choice" || q.type === "checkbox") &&
-      (q.choices || []).some((c) => c.correct)).length;
+    const n = model.injects.flatMap((i) => i.questions).filter((q) => {
+      if (q.peran !== role) return false;
+      if (q.type === "open") return true;
+      if (q.type !== "choice" && q.type !== "checkbox") return false;
+      return (q.choices || []).some((c) => c.correct);
+    }).length;
     return n * (Number(settings.points) || 0);
   }, [model, settings.mode, settings.points]);
+  /* Angka dari server selalu menang, supaya layar, CSV dan papan skor memakai
+     pembagi yang sama. */
+  const possibleFor = useCallback((role) => {
+    const seat = people.find((p) => p.peran === role && p.possible != null);
+    return seat ? seat.possible : possibleOf(role);
+  }, [people, possibleOf]);
 
   const board = useMemo(() => [...people]
     .map((p) => {
@@ -2535,15 +2563,15 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
       });
     });
     Object.entries(o).forEach(([role, b]) => {
-      b.possible = possibleOf(role);
+      b.possible = possibleFor(role);
       b.pct = b.possible ? (b.pts / b.possible) * 100 : null;
     });
     return o;
-  }, [all, people, possibleOf]);
+  }, [all, people, possibleFor]);
 
   function exportCSV() {
     const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Operator",
+    const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Unit kerja",
       "Jawaban unit", "Benar", "Akurasi", "Detik", "Poin", "Poin unit", "Maks unit", "Skor unit %",
       "Nilai esai (1-10)", "Waktu menjawab (detik)", "Catatan"];
     const lines = [head.map(esc).join(",")];
@@ -2553,9 +2581,9 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
         const rs = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
         (rs.length ? rs : [null]).forEach((p) => {
           const a = p?.answers[q.qid];
-          const poss = possibleOf(q.peran);
+          const poss = possibleFor(q.peran);
           lines.push([inj.siklus, inj.id, q.peran, q.text, q.type, q.answerRaw,
-            p ? (settings.showNames ? p.name : unitOf(p.peran)) : "", a?.text || "",
+            p ? unitOf(p.peran) : "", a?.text || "",
             a?.correct == null ? "" : a.correct ? "Ya" : a.acc > 0 ? "Sebagian" : "Tidak",
             a?.acc == null ? "" : Math.round(a.acc * 100) + "%",
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
@@ -2566,12 +2594,64 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
         });
       });
     });
-    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    download(`ttx-${new Date().toISOString().slice(0, 10)}.csv`, lines);
+  }
+
+  /* Ringkasan tiap inject: berapa unit ditanya, berapa yang menjawab, seberapa
+     tepat jawabannya, dan berapa lama mereka memutuskan. */
+  const byInject = useMemo(() => model.injects.map((inj) => {
+    const qs = inj.questions;
+    const asked = new Set(qs.map((q) => q.peran));
+    const rows = [];
+    qs.forEach((q) => {
+      people.filter((p) => p.peran === q.peran && p.answers?.[q.qid])
+        .forEach((p) => rows.push({ q, p, a: p.answers[q.qid] }));
+    });
+    const accs = rows.filter((r) => r.a.acc != null).map((r) => r.a.acc);
+    const quals = rows.filter((r) => r.a.quality != null).map((r) => r.a.quality);
+    const times = rows.map((r) => (r.a.ms || 0) / 1000).filter((v) => v > 0);
+    const full = rows.filter((r) => r.a.correct === true).length;
+    const partial = rows.filter((r) => r.a.correct === false && (r.a.acc || 0) > 0).length;
+    const zero = rows.filter((r) => r.a.correct === false && !(r.a.acc || 0)).length;
+    const essays = qs.filter((q) => q.type === "open").length;
+    const ungraded = rows.filter((r) => r.q.type === "open" && r.a.quality == null).length;
+    const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+    return {
+      id: inj.id, siklus: inj.siklus,
+      units: asked.size, questions: qs.length, essays,
+      answered: rows.length,
+      expected: qs.length ? qs.filter((q) => people.some((p) => p.peran === q.peran)).length : 0,
+      full, partial, zero, ungraded,
+      acc: mean(accs), quality: mean(quals), secs: mean(times),
+      fastest: times.length ? Math.min(...times) : null,
+      slowest: times.length ? Math.max(...times) : null,
+      pts: rows.reduce((a, r) => a + (r.a.points || 0), 0),
+    };
+  }), [model, people]);
+
+  function download(name, lines) {
+    const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `ttx-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = name;
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  function exportStats() {
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const head = ["Siklus", "Inject", "Unit ditanya", "Jumlah soal", "Soal esai", "Jawaban masuk",
+      "Diharapkan", "Penuh", "Sebagian", "Nol", "Akurasi rata rata", "Rata nilai esai",
+      "Esai belum dinilai", "Rata detik", "Tercepat", "Terlama", "Poin"];
+    const lines = [head.map(esc).join(",")];
+    byInject.forEach((d) => lines.push([d.siklus, d.id, d.units, d.questions, d.essays,
+      d.answered, d.expected, d.full, d.partial, d.zero,
+      d.acc == null ? "" : Math.round(d.acc * 100) + "%",
+      d.quality == null ? "" : d.quality.toFixed(1), d.ungraded,
+      d.secs == null ? "" : d.secs.toFixed(1),
+      d.fastest == null ? "" : d.fastest.toFixed(1),
+      d.slowest == null ? "" : d.slowest.toFixed(1), d.pts].map(esc).join(",")));
+    download(`ttx-statistik-${new Date().toISOString().slice(0, 10)}.csv`, lines);
   }
 
   const totalPts = people.reduce((a, p) => a + (p.total || 0), 0);
@@ -2610,7 +2690,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
                   <li key={p.pid} className={i === 0 ? "first" : ""}>
                     <span className="rank mono">{String(i + 1).padStart(2, "0")}</span>
                     <Crest peran={p.peran} idx={roleIdx(p.peran)} />
-                    <span className="bname">{settings.showNames ? p.name : unitOf(p.peran)}</span>
+                    <span className="bname">{unitOf(p.peran)}</span>
                     <span className="bbar"><i style={{
                       width: `${Math.max(0, Math.min(100, p.pct ?? 0))}%`,
                       background: UNIT_VARS[(roleIdx(p.peran) < 0 ? 0 : roleIdx(p.peran)) % 6],
@@ -2624,6 +2704,42 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
               </ol>
             </>
           )}
+
+          <h3>Statistik per Inject</h3>
+          <p className="hint">
+            Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan
+            pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan
+            pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.
+          </p>
+          <div className="tblwrap">
+            <table className="tbl">
+              <thead><tr><th>Inject</th><th>Unit</th><th>Soal</th><th>Menjawab</th>
+                <th>Penuh</th><th>Sebagian</th><th>Nol</th><th>Akurasi</th>
+                <th>Esai</th><th>Rata detik</th><th>Tercepat</th><th>Terlama</th><th>Poin</th></tr></thead>
+              <tbody>
+                {byInject.map((d) => (
+                  <tr key={d.id}>
+                    <td><b className="mono">{d.id}</b> <span className="dimcell">{d.siklus}</span></td>
+                    <td className="mono">{d.units}</td>
+                    <td className="mono">{d.questions}</td>
+                    <td className="mono">{d.expected ? `${d.answered}/${d.expected}` : "·"}</td>
+                    <td className="mono">{d.full || "·"}</td>
+                    <td className="mono">{d.partial || "·"}</td>
+                    <td className="mono">{d.zero || "·"}</td>
+                    <td className="mono strong">{d.acc == null ? "·" : `${Math.round(d.acc * 100)}%`}</td>
+                    <td className="mono">
+                      {d.essays ? (d.quality == null ? `${d.essays} soal` : `${d.quality.toFixed(1)}/10`) : "·"}
+                      {d.ungraded ? <em className="ungraded"> {d.ungraded} belum dinilai</em> : null}
+                    </td>
+                    <td className="mono">{d.secs == null ? "·" : d.secs.toFixed(1)}</td>
+                    <td className="mono dimcell">{d.fastest == null ? "·" : d.fastest.toFixed(1)}</td>
+                    <td className="mono dimcell">{d.slowest == null ? "·" : d.slowest.toFixed(1)}</td>
+                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "·"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           <h3>Rincian per Peran</h3>
           <div className="tblwrap">
@@ -2652,7 +2768,8 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, onB
           </div>
 
           <div className="repactions">
-            <button className="btn" onClick={exportCSV}>Unduh CSV</button>
+            <button className="btn" onClick={exportCSV}>Unduh CSV jawaban</button>
+            <button className="btn quiet" onClick={exportStats}>Unduh statistik inject</button>
             <button className="btn quiet" onClick={onBack}>Kembali ke latihan</button>
             <button className="btn danger" onClick={onEnd}>Akhiri sesi</button>
           </div>
@@ -2879,7 +2996,8 @@ html,body{background:var(--ink)}
 .ttx input.cinput{width:112px;flex:none}
 .ttx input.cinput.narrow{width:78px;letter-spacing:0}
 .unit{color:var(--faint);font-size:12.5px}
-.bigcode{font-size:17px;font-weight:700;letter-spacing:.12em;color:var(--signal-text)}
+.bigcode{font-size:19px;font-weight:700;letter-spacing:.16em;color:var(--signal-text);
+  white-space:nowrap;flex:none;padding-inline:2px}
 
 /* ---------- run shell ---------- */
 .run{display:grid;grid-template-columns:222px minmax(0,1fr);align-items:start}
@@ -2982,7 +3100,7 @@ html,body{background:var(--ink)}
 .dial b{display:block;font-size:34px;font-weight:700;line-height:1;letter-spacing:-.04em}
 .dial span{font-size:11px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase;font-weight:700}
 .codegrid{list-style:none;margin:0;padding:0;display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:11px}
+  grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:11px}
 .codegrid li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
   padding:16px 17px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
 .codegrid li::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c)}
@@ -2994,8 +3112,8 @@ html,body{background:var(--ink)}
 .seatopen{align-self:flex-start;max-width:100%;font-size:9.5px;font-weight:800;letter-spacing:.11em;
   text-transform:uppercase;color:var(--warn);background:var(--warn-soft);
   box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px;white-space:nowrap}
-.cgcode{display:block;font-family:var(--mono);font-size:29px;font-weight:700;letter-spacing:.13em;
-  color:var(--c);line-height:1}
+.cgcode{display:block;font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:.16em;
+  color:var(--c);line-height:1.1;white-space:nowrap;overflow:visible}
 .cgwho{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .codegrid li.in .cgwho{color:var(--live)}
 
@@ -3022,13 +3140,18 @@ html,body{background:var(--ink)}
 .qtext{margin:0 0 14px;font-family:var(--disp);font-size:16.5px;line-height:1.36;font-weight:800;letter-spacing:-.025em}
 .qtext.small{font-size:14.5px;font-weight:700;margin-bottom:0}
 .votes{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:9px}
-.vrow{display:grid;grid-template-columns:30px 1fr 62px;gap:12px;align-items:center}
+.vrow{display:grid;grid-template-columns:30px 1fr 62px;gap:12px;align-items:stretch}
 .vglyph{width:30px;height:30px;border-radius:9px;background:var(--c);display:grid;place-items:center;
+  align-self:center;
   color:var(--on-opt);flex:none}
-.vtrack{position:relative;height:40px;border-radius:11px;background:var(--ink);
-  box-shadow:inset 0 0 0 1px var(--edge2);overflow:hidden;display:flex;align-items:center}
+/* Opsi bisa sepanjang satu paragraf. Tinggi tetap membuatnya tertimpa baris
+   berikutnya, jadi baloknya ikut tinggi teks. */
+.vtrack{position:relative;min-height:40px;border-radius:11px;background:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--edge2);overflow:hidden;display:flex;align-items:center;
+  padding:8px 0}
 .vfill{position:absolute;inset:0 auto 0 0;background:var(--c);opacity:.22;transition:width .5s}
-.vlabel{position:relative;padding-inline:13px;font-size:13.5px;line-height:1.35;z-index:1}
+.vlabel{position:relative;padding-inline:13px;font-size:13.5px;line-height:1.4;z-index:1;
+  overflow-wrap:anywhere;min-width:0}
 .tier{display:inline-block;margin-left:9px;font-size:9.5px;font-weight:800;letter-spacing:.08em;
   text-transform:uppercase;border-radius:20px;padding:2px 8px;vertical-align:1px;white-space:nowrap}
 .tier.top{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
@@ -3037,7 +3160,8 @@ html,body{background:var(--ink)}
 .vrow.correct .vtrack{box-shadow:inset 0 0 0 2px var(--live)}
 .vrow.correct .vlabel{color:var(--live);font-weight:600}
 .vrow.correct .vn{color:var(--live)}
-.vn{font-size:15px;font-weight:700;text-align:right;color:var(--dim);line-height:1.15}
+.vn{font-size:15px;font-weight:700;text-align:right;color:var(--dim);line-height:1.15;
+  align-self:center}
 .vn em{display:block;font-style:normal;font-family:var(--body);font-size:9px;font-weight:700;
   letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
 .who-list{list-style:none;margin:0;padding:12px 0 0;border-top:1px solid var(--edge2);
@@ -3121,8 +3245,10 @@ html,body{background:var(--ink)}
   display:grid;place-items:center;box-shadow:inset 0 0 0 1.5px var(--edge);color:transparent}
 .otick.on{background:var(--slab);color:var(--c);box-shadow:inset 0 0 0 1.5px var(--slab)}
 .ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
-.qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12.5px;
-  color:var(--faint);line-height:1.5;margin:0}
+.qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:14px;
+  color:var(--dim);line-height:1.5;margin:0}
+/* Di layar host keterangannya hanya badge, jadi boleh lebih kecil. */
+.qcard .qtypeline{font-size:12.5px;color:var(--faint)}
 /* Badge tipe adalah label di atas pertanyaan, jadi jaraknya diatur di sini:
    aturan reset .ttx p{margin:0} mengalahkan margin pada .qtypeline sendiri. */
 .qcard .qtypeline{margin:0 0 10px}
