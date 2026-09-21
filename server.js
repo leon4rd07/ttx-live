@@ -45,6 +45,7 @@ const DEFAULTS = {
   mode: "auto",       // auto = multiple choice, scored. manual = facilitator scores
   timeLimit: 60,      // seconds to answer, 0 for none
   essayLimit: 300,    // seconds for essay questions, 0 for none, "" to follow timeLimit
+  essayGrace: 60,     // extra seconds for typing and sending, not counted as slowness
   points: 1000,
   speedBonus: true,
   autoReveal: true,
@@ -62,11 +63,19 @@ const limitFor = (room, injId) => {
 /* An essay takes longer to write than a tile takes to tap, so essays carry a
    window of their own: the inject's essay override, else the global essay
    default, else the ordinary window. */
-const essayLimitFor = (room, injId) => {
+const essayBaseFor = (room, injId) => {
   const v = room.etimes?.[injId];
   if (v !== "" && v != null) return Number(v);
   const g = room.settings?.essayLimit;
   return g === "" || g == null ? limitFor(room, injId) : Number(g);
+};
+/* Mengetik dan menekan kirim butuh waktu yang bukan kelambatan berpikir, jadi
+   kelonggaran ini ditambahkan ke jendela esai dan dipotong dari waktu yang
+   dinilai. Esai yang masuk dalam kelonggaran dihitung secepat mungkin. */
+const graceOf = (room) => Math.max(0, Number(room.settings?.essayGrace) || 0);
+const essayLimitFor = (room, injId) => {
+  const base = essayBaseFor(room, injId);
+  return base ? base + graceOf(room) : base;
 };
 const limitForQ = (room, injId, q) =>
   (q?.type === "open" ? essayLimitFor(room, injId) : limitFor(room, injId));
@@ -304,11 +313,12 @@ function injectOfQid(room, qid) {
    judgement plays the part accuracy plays for a multiple choice, and speed still
    earns up to half. Grade 7 answered instantly beats grade 7 answered at the
    buzzer, and a grade of 1 is worth something while 0 is not offered. */
-function gradeToPoints(room, a, limit, quality) {
+function gradeToPoints(room, a, base, quality) {
   const s = room.settings;
   const acc = Math.max(0, Math.min(10, Number(quality) || 0)) / 10;
   if (!acc) return 0;
-  const speed = s.speedBonus && limit ? Math.max(0, 1 - (a.ms || 0) / (limit * 1000)) : null;
+  const used = Math.max(0, (a.ms || 0) - graceOf(room) * 1000);
+  const speed = s.speedBonus && base ? Math.max(0, 1 - used / (base * 1000)) : null;
   const mult = speed == null ? 1 : 0.5 + 0.5 * speed;
   return Math.round((Number(s.points) || 0) * acc * mult);
 }
@@ -320,7 +330,7 @@ function regradeAll(room) {
     for (const [qid, a] of Object.entries(p.answers)) {
       if (a.quality == null) continue;
       const inj = injectOfQid(room, qid);
-      a.points = gradeToPoints(room, a, essayLimitFor(room, inj?.id), a.quality);
+      a.points = gradeToPoints(room, a, essayBaseFor(room, inj?.id), a.quality);
     }
     retally(room, p);
   }
@@ -456,7 +466,7 @@ wss.on("connection", (ws) => {
         room.touched = Date.now();
         sockets.set(ws, { roomId: room.id, isHost: true, role: entry.role,
           hostCode: code, hostName: (m.name || entry.label || "").trim() });
-        send(ws, { t: "cohosted", roomId: room.id, role: entry.role,
+        send(ws, { t: "cohosted", roomId: room.id, role: entry.role, code,
           deck: room.deck, codes: room.codes, settings: room.settings,
           times: room.times || {}, etimes: room.etimes || {}, state: room.state });
         send(ws, { t: "roster", people: roster(room) });
@@ -603,7 +613,7 @@ wss.on("connection", (ws) => {
         else {
           a.quality = Math.max(1, Math.min(10, Math.round(Number(m.quality)) || 1));
           const inj = injectOfQid(byId, m.qid);
-          a.points = gradeToPoints(byId, a, essayLimitFor(byId, inj?.id), a.quality);
+          a.points = gradeToPoints(byId, a, essayBaseFor(byId, inj?.id), a.quality);
         }
         a.correct = null;   // an essay is never right or wrong, only better or worse
         retally(byId, p);
