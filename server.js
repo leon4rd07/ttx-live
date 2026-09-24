@@ -345,6 +345,11 @@ function possibleFor(room, peran) {
   if (room.settings.mode !== "auto") return 0;
   let n = 0;
   for (const inj of room.deck.injects) {
+    /* Inject yang belum pernah dibuka tidak menghukum siapa pun. Latihan sering
+       berhenti di tengah sheet, dan unit yang soalnya banyak di bagian yang tidak
+       jadi dijalankan akan terlihat buruk untuk pertanyaan yang tidak pernah
+       mereka lihat. Ruangan lama tanpa catatan ini memakai perilaku sebelumnya. */
+    if (room.ran && !room.ran[inj.id]) continue;
     for (const q of inj.questions) {
       if (q.peran !== peran) continue;
       if (q.type === "open") { n += 1; continue; }        // graded 1-10 after the discussion
@@ -395,6 +400,7 @@ wss.on("connection", (ws) => {
         const room = { id, deck: m.deck, settings, codes, people: {},
           times: m.times || {}, etimes: m.etimes || {},
           hostCodes: {}, ownerKey: newCode() + newCode(),
+          ran: {},
           state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
           touched: Date.now() };
         rooms.set(id, room);
@@ -402,7 +408,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
-          ownerKey: room.ownerKey, hostCodes: room.hostCodes });
+          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [] });
         pushHosts(room);
         markSnapshot();
         break;
@@ -418,7 +424,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
-          hostCodes: byId.hostCodes || {} });
+          hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}) });
         send(ws, { t: "roster", people: roster(byId) });
         pushHosts(byId);
         break;
@@ -468,7 +474,8 @@ wss.on("connection", (ws) => {
           hostCode: code, hostName: (m.name || entry.label || "").trim() });
         send(ws, { t: "cohosted", roomId: room.id, role: entry.role, code,
           deck: room.deck, codes: room.codes, settings: room.settings,
-          times: room.times || {}, etimes: room.etimes || {}, state: room.state });
+          times: room.times || {}, etimes: room.etimes || {}, state: room.state,
+          ran: Object.keys(room.ran || {}) });
         send(ws, { t: "roster", people: roster(room) });
         if (room.state.keyShown) sendKey(room);
         pushHosts(room);
@@ -643,11 +650,28 @@ wss.on("connection", (ws) => {
         if (!byId || !canDrive(ws)) return;
         const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
         const inj0 = byId.deck.injects[m.activeIdx];
+        if (m.phase === "open" && inj0) {
+          byId.ran = byId.ran || {};
+          if (!byId.ran[inj0.id]) {
+            byId.ran[inj0.id] = true;
+            /* Ceiling tiap unit baru saja berubah, jadi semua skor dihitung ulang
+               dan dikirim, kalau tidak layar host dan ponsel memakai pembagi lama. */
+            for (const pp of Object.values(byId.people)) retally(byId, pp);
+            for (const [sk, st] of sockets) {
+              if (st.roomId !== byId.id || !st.pid) continue;
+              const pp = byId.people[st.pid];
+              if (pp) send(sk, { t: "ack", me: pp });
+            }
+            /* Langsung, bukan lewat antrean 1,2 detik: angka di layar host berubah
+               pada saat yang sama dengan inject yang baru dibuka. */
+            toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
+          }
+        }
         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
           keyShown: false,
           limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit,
           elimit: inj0 ? essayLimitFor(byId, inj0.id) : byId.settings.essayLimit };
-        toRoom(byId.id, { t: "state", ...byId.state });
+        toRoom(byId.id, { t: "state", ...byId.state, ran: Object.keys(byId.ran || {}) });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
         markDirty(byId.id);
         markSnapshot();
@@ -747,6 +771,18 @@ wss.on("connection", (ws) => {
     }
   });
 });
+
+/* Daftar fasilitator diturunkan dari soket yang hidup, dan soket ponsel bisa mati
+   diam diam. Disiarkan ulang berkala supaya hitungan Tim di tiap layar sembuh
+   sendiri tanpa ada yang perlu memuat ulang halaman. */
+setInterval(() => {
+  const withHosts = new Set();
+  for (const st of sockets.values()) if (st.isHost && st.roomId) withHosts.add(st.roomId);
+  for (const id of withHosts) {
+    const room = rooms.get(id);
+    if (room) pushHosts(room);
+  }
+}, 8000);
 
 setInterval(() => {
   for (const ws of wss.clients) {
