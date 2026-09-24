@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b32";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b33";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -232,10 +232,21 @@ function useExpired(openedAt, limit, active) {
   return over;
 }
 
+/* Ponsel membekukan tab yang di latar belakang, dan soketnya ikut mati tanpa
+   memicu onclose. Tab itu lalu tampak hidup padahal tidak menerima apa apa lagi:
+   inilah yang membuat co-host tertinggal sendirian sementara layar host masih
+   mengira ia hadir. Jadi soket ini memantau dirinya sendiri, mengirim denyut
+   berkala, dan memaksa sambung ulang begitu sunyi terlalu lama atau begitu
+   halaman kembali terlihat. */
+const QUIET_MS = 25000;     // sunyi selama ini berarti soketnya sudah mati
+const BEAT_MS = 10000;      // denyut ke server, dibalas pesan time
+
 function useSocket(onMessage) {
   const ws = useRef(null);
   const handler = useRef(onMessage);
   const queue = useRef([]);
+  const lastSeen = useRef(Date.now());
+  const bounce = useRef(() => {});
   const [status, setStatus] = useState("connecting");
   /* Bumped on every successful open. A reconnect gives the server a brand new
      socket with no room attached, so whoever owns the session has to re-register
@@ -251,11 +262,12 @@ function useSocket(onMessage) {
       const sock = new WebSocket(`${proto}//${location.host}/ws`);
       ws.current = sock;
       sock.onopen = () => {
-        retry = 0; setStatus("live");
+        retry = 0; setStatus("live"); lastSeen.current = Date.now();
         queue.current.splice(0).forEach((m) => sock.send(JSON.stringify(m)));
         setGen((g) => g + 1);
       };
       sock.onmessage = (e) => {
+        lastSeen.current = Date.now();
         try { handler.current?.(JSON.parse(e.data)); } catch (err) { /* junk */ }
       };
       sock.onclose = () => {
@@ -266,8 +278,46 @@ function useSocket(onMessage) {
       };
       sock.onerror = () => sock.close();
     };
+    /* Putuskan yang lama, biar onclose menjadwalkan sambungan baru. Kalau soketnya
+       sudah terlanjur zombie, buka langsung. */
+    const kick = () => {
+      if (closed) return;
+      const sock = ws.current;
+      if (sock && sock.readyState === 1) { try { sock.close(); } catch (e) { /* sudah mati */ } }
+      else if (!sock || sock.readyState === 3) { clearTimeout(timer); retry = 0; open(); }
+    };
+    bounce.current = kick;
+
     open();
-    return () => { closed = true; clearTimeout(timer); ws.current?.close(); };
+
+    const beat = setInterval(() => {
+      if (closed) return;
+      const sock = ws.current;
+      const quiet = Date.now() - lastSeen.current;
+      if (sock?.readyState === 1) {
+        if (quiet > QUIET_MS) { setStatus("reconnecting"); kick(); return; }
+        try { sock.send(JSON.stringify({ t: "time", c: Date.now() })); } catch (e) { kick(); }
+      } else if (sock && sock.readyState !== 0 && quiet > QUIET_MS) kick();
+    }, BEAT_MS);
+
+    /* Kembali dari latar belakang, atau jaringan kembali ada: jangan tunggu denyut
+       berikutnya, periksa sekarang juga. */
+    const wake = () => {
+      if (closed || document.visibilityState === "hidden") return;
+      const sock = ws.current;
+      if (!sock || sock.readyState !== 1 || Date.now() - lastSeen.current > QUIET_MS) kick();
+    };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+
+    return () => {
+      closed = true; clearTimeout(timer); clearInterval(beat);
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
+      ws.current?.close();
+    };
   }, []);
 
   const send = useCallback((msg) => {
@@ -275,7 +325,10 @@ function useSocket(onMessage) {
     else queue.current.push(msg);
   }, []);
 
-  return { send, status, gen };
+  /* Dipakai tombol sinkronkan ulang di panel fasilitator. */
+  const resync = useCallback(() => bounce.current(), []);
+
+  return { send, status, gen, resync };
 }
 
 /* ---------------------------- parsing ---------------------------- */
@@ -762,7 +815,7 @@ function Host({ onExit }) {
     }
     else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
   }, []);
-  const { send, status, gen } = useSocket(onMsg);
+  const { send, status, gen, resync } = useSocket(onMsg);
   useClockSync(send, gen);
 
   /* re-attach after any reconnect */
@@ -1226,7 +1279,7 @@ function Host({ onExit }) {
               onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
           </>)}
           <button className="btn quiet" onClick={() => setTeamOpen(true)}
-            title="Fasilitator di ruangan ini">Tim · {hosts.length || 1}</button>
+            title="Fasilitator di ruangan ini">Tim · {hosts.length || "·"}</button>
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
             Kursi · {people.length}/{model.roles.length}
           </button>
@@ -1243,7 +1296,8 @@ function Host({ onExit }) {
       )}
 
       {teamOpen && (
-        <TeamPanel {...{ hosts, hostCodes, isOwner, role }}
+        <TeamPanel {...{ hosts, hostCodes, isOwner, role, status }}
+          onResync={resync}
           onAdd={(r, label) => send({ t: "cohost_add", roomId, role: r, label })}
           onRemove={(code) => send({ t: "cohost_remove", roomId, code })}
           onClose={() => setTeamOpen(false)} />
@@ -1489,7 +1543,7 @@ function Host({ onExit }) {
 
 /* Beberapa fasilitator dalam satu ruangan. Pemilik membuat kode, dan tiap kode
    membawa perannya sendiri, jadi peran ditentukan saat kode dibuat. */
-function TeamPanel({ hosts, hostCodes, isOwner, role, onAdd, onRemove, onClose }) {
+function TeamPanel({ hosts, hostCodes, isOwner, role, status, onAdd, onRemove, onResync, onClose }) {
   const [newRole, setNewRole] = useState("grader");
   const [label, setLabel] = useState("");
   useEffect(() => {
@@ -1508,7 +1562,7 @@ function TeamPanel({ hosts, hostCodes, isOwner, role, onAdd, onRemove, onClose }
 
         <h3>Sedang terhubung</h3>
         <ul className="hostlist">
-          {hosts.length === 0 && <li className="muted">Hanya Anda.</li>}
+          {hosts.length === 0 && <li className="muted">Belum ada kabar dari server.</li>}
           {hosts.map((h, i) => (
             <li key={i}>
               <span className={`rolepill ${h.role}`}>{ROLE_LABEL[h.role] || h.role}</span>
@@ -1516,6 +1570,17 @@ function TeamPanel({ hosts, hostCodes, isOwner, role, onAdd, onRemove, onClose }
             </li>
           ))}
         </ul>
+        <div className="joinrow">
+          <span className={`connpill ${status === "live" ? "on" : ""}`}>
+            {status === "live" ? "Tersambung" : "Menyambung ulang"}
+          </span>
+          <button className="btn quiet" onClick={onResync}>Sinkronkan ulang</button>
+        </div>
+        <p className="hint">
+          Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal
+          dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali
+          tanpa kehilangan apa pun.
+        </p>
 
         {isOwner ? (
           <>
@@ -1722,7 +1787,9 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                       {q.weighted && keyShown && tier && (
                         <span className={`tier ${c.correct ? "top" : "mid"}`}>{tier}</span>
                       )}
-                      {isKey && !q.weighted && <b> kunci</b>}
+                      {/* Cincin hijau dan warna teksnya sudah menandai kunci. Pada soal
+                          centang, kuncinya bisa tiga atau empat, dan kata "kunci" di tiap
+                          baris hanya menambah keramaian tanpa menambah keterangan. */}
                     </span>
                   </span>
                   <span className="vn mono">{c.n}<em>unit</em></span>
@@ -3077,6 +3144,10 @@ html,body{background:var(--ink)}
 .hostlist{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .hostlist li{display:flex;align-items:center;gap:9px;font-size:13.5px}
 .hostlist .hname{color:var(--dim)}
+.connpill{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  border-radius:20px;padding:5px 11px;color:var(--warn);background:var(--warn-soft);
+  box-shadow:inset 0 0 0 1px var(--warn-edge);flex:none}
+.connpill.on{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
 .ccode{font-size:16px;letter-spacing:.12em;color:var(--signal-text)}
 
 /* pintu masuk fasilitator tambahan */
@@ -3401,7 +3472,11 @@ html,body{background:var(--ink)}
   padding:13px;font-size:12px;overflow:auto;margin:18px 0;color:var(--wrong)}
 
 @media (max-width:900px){
-  .run{grid-template-columns:1fr}
+  /* 1fr saja berarti minmax(auto,1fr), dan lebar minimum kolomnya mengikuti isi
+     terlebar di dalamnya. Daftar inject yang bisa digeser ke samping karena itu
+     melebarkan seluruh halaman, dan semua yang lain ikut terseret keluar layar. */
+  .run{grid-template-columns:minmax(0,1fr)}
+  .rail,.stage{min-width:0}
   .rail{position:static;height:auto;border-right:none;border-bottom:1px solid var(--edge2)}
   .tl{display:flex;overflow-x:auto;padding:10px;gap:7px}
   .tlhead{display:none}
@@ -3415,6 +3490,42 @@ html,body{background:var(--ink)}
   .projopts{grid-template-columns:1fr}
   .projqtext{font-size:24px}
   .projtop,.projbody{padding-inline:18px}
+}
+/* Layar host memang dirancang untuk laptop, tetapi fasilitator sering memegangnya
+   di ponsel sambil berdiri. Di lebar ini bar dipecah jadi beberapa baris utuh,
+   bukan diperas sampai tiap tombol jatuh sendiri sendiri. */
+@media (max-width:700px){
+  .bar{gap:8px 10px;padding:8px 12px;min-height:0}
+  .brand{gap:8px;flex:1 1 100%;min-width:0;flex-wrap:wrap}
+  .crumb{font-size:10.5px}
+  .injno{font-size:14px}
+  .phases{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding-bottom:2px}
+  .phases button{white-space:nowrap;padding:6px 11px;font-size:11.5px}
+  .barright{flex:1 1 100%;margin-left:0;justify-content:flex-start;gap:6px}
+  .barright .btn{padding:7px 11px;font-size:12px}
+  .build{order:9}
+
+  .stage{padding:16px 14px 72px}
+  .scenario{font-size:15.5px;line-height:1.55;padding:15px 16px;border-radius:14px}
+  .callon{gap:6px;margin-bottom:14px}
+  .actbar{flex-direction:column;align-items:stretch;gap:10px;padding:12px 14px}
+  .actbar .addtime{justify-content:space-between}
+  .ring.s72{width:58px;height:58px}
+
+  .trow{flex-wrap:wrap;gap:8px 10px;padding:11px 13px}
+  .tname{min-width:0;flex:1 1 100%}
+  .tbar{max-width:none}
+  .qcard{padding:14px 15px}
+  .vrow{grid-template-columns:24px minmax(0,1fr) 46px;gap:9px}
+  .vglyph{width:24px;height:24px;border-radius:7px}
+  .vlabel{font-size:13px;padding-inline:11px}
+  .vn{font-size:13.5px}
+  .gscale button{min-width:26px}
+  .nav{flex-wrap:wrap;gap:9px}
+  .nav .btn{flex:1 1 auto}
+  .codegrid{grid-template-columns:1fr}
+  .tblwrap{overflow-x:auto}
+  .panel{width:100%}
 }
 @media (max-width:420px){
   .ttx{--logo-h:26px}
