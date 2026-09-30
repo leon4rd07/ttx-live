@@ -217,14 +217,16 @@ function deckFor(room, peran) {
   return {
     roles: room.deck.roles,
     injects: room.deck.injects.map((i) => ({
-      id: i.id, siklus: i.siklus, condition: i.condition, window: i.window,
+      id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
+      window: i.window,
       limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
       questions: i.questions
         .filter((q) => q.peran === peran)
         .map((q) => ({
-          qid: q.qid, peran: q.peran, text: q.text, type: q.type, weighted: !!q.weighted,
+          qid: q.qid, peran: q.peran, text: q.text, alt: q.alt || "", type: q.type,
+          weighted: !!q.weighted,
           // never send which option is correct, nor what any option is worth
-          choices: (q.choices || []).map((c) => ({ text: c.text })),
+          choices: (q.choices || []).map((c) => ({ text: c.text, alt: c.alt || "" })),
         })),
     })),
   };
@@ -236,11 +238,13 @@ function screenDeck(room) {
   return {
     roles: room.deck.roles,
     injects: room.deck.injects.map((i) => ({
-      id: i.id, siklus: i.siklus, condition: i.condition, roles: i.roles,
+      id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
+      roles: i.roles,
       limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
       questions: i.questions.map((q) => ({
-        qid: q.qid, peran: q.peran, text: q.text, type: q.type, weighted: !!q.weighted,
-        choices: (q.choices || []).map((c) => ({ text: c.text })),
+        qid: q.qid, peran: q.peran, text: q.text, alt: q.alt || "", type: q.type,
+        weighted: !!q.weighted,
+        choices: (q.choices || []).map((c) => ({ text: c.text, alt: c.alt || "" })),
       })),
     })),
   };
