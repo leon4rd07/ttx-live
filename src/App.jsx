@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b34";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b36";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -84,16 +84,16 @@ const TYPE_HINT = {
 const kindOf = (q) => (q.type === "choice" ? "weighted" : q.type);
 const TypeBadge = ({ q }) => {
   const k = kindOf(q);
-  return <span className={`typebadge ${k}`}>{TYPE_LABEL[k] || k}</span>;
+  return <span className={`typebadge ${k}`}>{t(TYPE_LABEL[k]) || k}</span>;
 };
 
 /* Essays are graded 1-10 by the facilitator. The number is not the score: the
    server turns it into points, and answering early still earns up to half again,
    so the same grade is worth more to whoever committed sooner. */
 const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-const qualityWord = (v) =>
+const qualityWord = (v) => t(
   v == null ? "belum dinilai"
-    : v >= 9 ? "sangat kuat" : v >= 7 ? "kuat" : v >= 5 ? "memadai" : v >= 3 ? "sebagian" : "lemah";
+    : v >= 9 ? "sangat kuat" : v >= 7 ? "kuat" : v >= 5 ? "memadai" : v >= 3 ? "sebagian" : "lemah");
 const gradeCls = (v) => (v == null ? "" : v >= 7 ? "ok" : v >= 4 ? "part" : "no");
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -101,11 +101,11 @@ const rand = (n = 4) => Array.from({ length: n }, () => ALPHABET[Math.floor(Math
 const fmt = (s) => `${Math.floor((s || 0) / 60)}:${String(Math.floor(s || 0) % 60).padStart(2, "0")}`;
 const fmtAgo = (ms) => {
   const m = Math.floor((ms || 0) / 60000);
-  if (m < 1) return "kurang dari semenit";
-  if (m < 60) return `${m} menit`;
-  return `${Math.floor(m / 60)} jam`;
+  if (m < 1) return t("kurang dari semenit");
+  if (m < 60) return tf("{0} menit", m);
+  return tf("{0} jam", Math.floor(m / 60));
 };
-const nth = (n) => `ke-${n}`;
+const nth = (n) => tf("ke-{0}", n);
 
 function nukeAll() {
   try {
@@ -134,8 +134,8 @@ function ThemeToggle() {
   const next = dark ? "light" : "dark";  // token value, not shown to anyone
   return (
     <button className="themebtn" onClick={() => applyTheme(next)}
-      title={dark ? "Ganti ke tema terang" : "Ganti ke tema gelap"}
-      aria-label={dark ? "Ganti ke tema terang" : "Ganti ke tema gelap"}>
+      title={t(dark ? "Ganti ke tema terang" : "Ganti ke tema gelap")}
+      aria-label={t(dark ? "Ganti ke tema terang" : "Ganti ke tema gelap")}>
       {dark ? (
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
           strokeWidth="2" strokeLinecap="round">
@@ -149,6 +149,99 @@ function ThemeToggle() {
         </svg>
       )}
     </button>
+  );
+}
+
+/* Bahasa tampilan isi, disimpan per perangkat. Peserta asing memilih English di
+   ponselnya sendiri tanpa mengubah apa pun untuk orang lain di ruangan. */
+const K_LANG = `ttx:${V}:lang`;
+let langNow = lsGet(K_LANG) === "en" ? "en" : "id";
+const langSubs = new Set();
+function setLang(v) {
+  langNow = v === "en" ? "en" : "id";
+  lsSet(K_LANG, langNow);
+  langSubs.forEach((fn) => fn(langNow));
+}
+function useLang() {
+  const [l, set] = useState(langNow);
+  useEffect(() => { langSubs.add(set); return () => { langSubs.delete(set); }; }, []);
+  /* pick mengembalikan bahasa kedua hanya kalau memang ada terjemahannya. */
+  const pick = useCallback((text, alt) => (l === "en" && alt ? alt : text), [l]);
+  return { lang: l, pick };
+}
+
+/* Panduan menulis sheet. Tiap baris satu paragraf penuh, jadi terjemahannya
+   boleh menyusun ulang kalimatnya sendiri. */
+const HELP_SHEET = [
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.",
+  "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.",
+  "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.",
+  "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.",
+  "Kolom *Tipe* opsional menentukan langsung: `pg`, `checkbox` atau `esai`. Kosongkan, atau hilangkan kolomnya, dan bentuk sel Jawaban yang menentukan.",
+  "Sheet dua bahasa ditulis dalam sel yang sama. Bahasa Indonesia di atas, satu baris berisi `---` sebagai pemisah, bahasa Inggris di bawah. Berlaku untuk sel Kondisi, Pertanyaan dan Jawaban. Pada sel Jawaban, urutan opsi di blok kedua mengikuti blok pertama, dan bintang atau bobot cukup ditulis di blok pertama saja. Sheet yang hanya satu bahasa tidak perlu diubah.",
+];
+
+/* Paragraf bantuan memuat potongan tebal dan potongan kode. Menerjemahkan tiap
+   potongan sendiri sendiri akan mengacaukan urutan kata, karena susunan kalimat
+   Inggris berbeda, jadi kalimatnya disimpan utuh dengan penanda di dalamnya:
+   *tebal* dan `kode`. Satu kunci kamus untuk satu paragraf penuh. */
+function Rich({ children }) {
+  const parts = String(children).split(/(\*[^*]+\*|`[^`]+`|~[^~]+~)/g).filter(Boolean);
+  const wrap = (x) => (x.length > 2 && x[0] === x[x.length - 1] ? x.slice(1, -1) : null);
+  return (
+    <>
+      {parts.map((x, i) => {
+        const inner = wrap(x);
+        if (inner != null && x[0] === "*") return <b key={i}>{inner}</b>;
+        if (inner != null && x[0] === "~") return <b className="mono" key={i}>{inner}</b>;
+        if (inner != null && x[0] === "`") return <code key={i}>{inner}</code>;
+        return <React.Fragment key={i}>{x}</React.Fragment>;
+      })}
+    </>
+  );
+}
+
+/* Teks antarmuka. Kuncinya kalimat bahasa Indonesia apa adanya, jadi kalimat
+   yang belum sempat diterjemahkan tetap tampil utuh, bukan hilang atau berubah
+   jadi kode. Kamusnya ada di akhir berkas ini, dekat EN.
+
+   t() dipanggil saat render, dan App berlangganan useLang, jadi menukar bahasa
+   membuat seluruh pohon dirender ulang dan tiap t() membaca nilai yang baru.
+   Tidak ada komponen yang dibungkus memo, jadi tidak ada yang tertinggal. */
+function t(s) {
+  if (langNow !== "en") return s;
+  return Object.prototype.hasOwnProperty.call(EN, s) ? EN[s] : s;
+}
+/* Kalimat bersisipan angka atau nama. Penanda {0}, {1} dipakai supaya urutan
+   kata boleh berbeda antara kedua bahasa. */
+function tf(s, ...v) {
+  return t(s).replace(/\{(\d+)\}/g, (m, i) => (v[i] == null ? m : String(v[i])));
+}
+
+function LangToggle() {
+  const { lang } = useLang();
+  return (
+    <button className="langbtn" onClick={() => setLang(lang === "en" ? "id" : "en")}
+      title={lang === "en" ? "Tampilkan bahasa Indonesia" : "Show English"}
+      aria-label={t("Bahasa")}>
+      <b className={lang === "id" ? "on" : ""}>{t("ID")}</b>
+      <b className={lang === "en" ? "on" : ""}>{t("EN")}</b>
+    </button>
+  );
+}
+
+/* Teks dua bahasa yang perlu dibaca berdampingan. Bahasa yang dipilih tampil
+   penuh, terjemahannya menyusul dengan warna redup. Dipakai di layar fasilitator
+   dan proyektor, tidak di perangkat peserta: peserta hanya perlu satu bahasa. */
+function Dual({ text, alt, className, tag: T = "p", children }) {
+  const { lang } = useLang();
+  const main = lang === "en" && alt ? alt : text;
+  const other = alt ? (lang === "en" ? text : alt) : "";
+  return (
+    <T className={className}>
+      {children}{main}
+      {other ? <span className="altline">{other}</span> : null}
+    </T>
   );
 }
 
@@ -181,13 +274,13 @@ function useIsDark() {
    pengklasifikasi phishing Google Safe Browsing. Huruf tidak bisa dicocokkan
    sebagai gambar merek, jadi tanda ini aman dipakai di mana pun ia berjalan. */
 function BrandLogo({ className = "" }) {
-  return <span className={`brandmark ${className}`} aria-hidden="true">MBI</span>;
+  return <span className={`brandmark ${className}`} aria-hidden="true">{t("MBI")}</span>;
 }
 
 /* One fixed line in the bottom-left corner, on every screen. Small and quiet:
    there for anyone who looks, out of the way of anyone running the exercise. */
 const AiNote = () => (
-  <p className="aidisc">Dibuat internal dengan bantuan AI</p>
+  <p className="aidisc">{t("Dibuat internal dengan bantuan AI")}</p>
 );
 
 /* ------------------------- the one true clock -------------------------- *
@@ -209,10 +302,10 @@ function useClockSync(send, gen) {
   useEffect(() => {
     if (!gen) return;
     bestRtt = Infinity;
-    let n = 0, t;
-    const probe = () => { send({ t: "time", c: Date.now() }); if (++n < 4) t = setTimeout(probe, 350); };
+    let n = 0, tm;
+    const probe = () => { send({ t: "time", c: Date.now() }); if (++n < 4) tm = setTimeout(probe, 350); };
     probe();
-    return () => clearTimeout(t);
+    return () => clearTimeout(tm);
   }, [send, gen]);
 }
 
@@ -345,7 +438,8 @@ const HEADER_ALIASES = {
   question: "question", pertanyaan: "question", q: "question", prompt: "question",
   answer: "answer", jawaban: "answer", expectedanswer: "answer",
   jawabanyangdiharapkan: "answer", kuncijawaban: "answer", key: "answer",
-  window: "window", windowmin: "window", waktu: "window",
+  window: "window", windowmin: "window", waktu: "window", time: "window",
+  answertime: "window", responsewindow: "window", timelimit: "window",
   decisionwindow: "window", bataswaktu: "window", windowminutes: "window",
   waktuesai: "ewindow", waktuessay: "ewindow", essaywindow: "ewindow",
   waktuuraian: "ewindow", essaytime: "ewindow", waktujawabanesai: "ewindow",
@@ -378,9 +472,9 @@ const splitPeran = (v) => [...new Set(
 )];
 
 function detectAnswerType(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "open";
-  const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const head = splitLang(raw).text.trim();
+  if (!head) return "open";
+  const lines = head.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const bare = lines.map((l) => l.replace(/^\s*\*+\s*/, ""));
   /* Dua baris atau lebih yang dibuka bobot manual sudah cukup untuk menyebut
      sel ini daftar pilihan, walau penulisnya tidak memakai awalan A. atau 1). */
@@ -393,6 +487,24 @@ function detectAnswerType(raw) {
    workable, one is weak, none is wrong. A sheet written with a single star per
    question still behaves exactly as before, because one star is then the top
    tier and everything else is zero. */
+/* Satu sel boleh memuat dua bahasa, dipisah satu baris berisi tiga tanda hubung
+   atau lebih. Bagian atas bahasa utama, bagian bawah bahasa kedua.
+
+       Apa langkah pertama Anda?
+       ---
+       What is your first step?
+
+   Tanpa pemisah, sel itu tetap satu bahasa dan tidak ada yang berubah. */
+const LANG_SPLIT = /^[ \t]*(?:-{3,}|={3,})[ \t]*$/m;
+function splitLang(raw) {
+  const full = String(raw ?? "");
+  if (!LANG_SPLIT.test(full)) return { text: full.trim(), alt: "" };
+  const at = full.search(LANG_SPLIT);
+  const head = full.slice(0, at);
+  const tail = full.slice(at).replace(/^[^\n]*\n?/, "");   // buang baris pemisahnya
+  return { text: head.trim(), alt: tail.trim() };
+}
+
 const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   .map((s) => {
     const lead = (s.match(/^\s*(\*+)/) || [null, ""])[1].length;
@@ -419,8 +531,21 @@ const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim
     };
   });
 
+/* Sel Jawaban dua bahasa memuat dua blok pilihan. Bobot dan tanda kunci diambil
+   dari blok pertama saja, blok kedua hanya teksnya, dipasangkan menurut urutan.
+   Jumlah yang tidak sama tidak dianggap galat: yang tidak punya pasangan jatuh
+   kembali ke bahasa utama. */
+function parseChoicesBilingual(raw) {
+  const { text, alt } = splitLang(raw);
+  const main = parseChoices(text);
+  if (!alt) return main;
+  const other = parseChoices(alt);
+  main.forEach((c, i) => { c.alt = other[i] ? other[i].text : ""; });
+  return main;
+}
+
 function buildModel(rows) {
-  if (!rows.length) return { injects: [], roles: [], warnings: ["Sheet ini tidak berisi baris data."] };
+  if (!rows.length) return { injects: [], roles: [], warnings: [t("Sheet ini tidak berisi baris data.")] };
   const hmap = {};
   /* Take the union of every row's keys, not just the first row's. A sheet whose
      first row leaves an optional column blank can arrive without that key, and
@@ -435,7 +560,7 @@ function buildModel(rows) {
   ["inject", "peran", "question"].forEach((f) => {
     if (!hmap[f]) {
       const NAMA = { inject: "Inject No.", peran: "Peran", question: "Pertanyaan" };
-      warnings.push(`Tidak ada kolom yang cocok untuk "${NAMA[f] || f}". Periksa ejaan baris header.`);
+      warnings.push(tf('Tidak ada kolom yang cocok untuk "{0}". Periksa ejaan baris header.', NAMA[f] || f));
     }
   });
   const get = (row, f) => (hmap[f] ? String(row[hmap[f]] ?? "").trim() : "");
@@ -485,7 +610,7 @@ function buildModel(rows) {
     /* The Tipe column wins; otherwise fall back to reading the Answer cell, and
        treat two or more starred options as a checkbox question. */
     let type = r.qtype || detectAnswerType(r.answer);
-    let choices = type === "choice" || type === "checkbox" ? parseChoices(r.answer) : [];
+    let choices = type === "choice" || type === "checkbox" ? parseChoicesBilingual(r.answer) : [];
     const topStars = choices.length ? Math.max(...choices.map((c) => c.stars)) : 0;
     /* Two or more stars on one option means graded tiers, so it stays a single
        choice. Several options at one star each is the tick-all-that-apply case. */
@@ -516,9 +641,10 @@ function buildModel(rows) {
     }
     if ((type === "choice" || type === "checkbox") && !choices.some((c) => c.correct)) noKey += 1;
     (r.roles.length ? r.roles : ["(untargeted)"]).forEach((peran, k) => {
+      const qq = splitLang(r.question);
       inj.questions.push({
         qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
-        peran, text: r.question, answerRaw: r.answer, type, choices, weighted,
+        peran, text: qq.text, alt: qq.alt, answerRaw: r.answer, type, choices, weighted,
       });
     });
   });
@@ -566,7 +692,9 @@ function buildModel(rows) {
   const raw = [...byInject.values()].map((inj) => {
     const rs = [];
     inj.questions.forEach((q) => { if (!rs.includes(q.peran)) rs.push(q.peran); });
-    return { ...inj, roles: rs, condition: inj.conditions[0] || "", splitNarrative: inj.conditions.length > 1 };
+    const cond = splitLang(inj.conditions[0] || "");
+    return { ...inj, roles: rs, condition: cond.text, conditionAlt: cond.alt,
+      splitNarrative: inj.conditions.length > 1 };
   });
   const injects = [...raw].sort((a, b) =>
     sikKey(a) - sikKey(b) || natCmp(a.id, b.id) || a.seen - b.seen);
@@ -574,27 +702,25 @@ function buildModel(rows) {
      berhak tahu bahwa yang akan tayang bukan urutan yang ia lihat di Excel. */
   const mixed = [...byInject.values()].filter((i) => i.siklusAll && i.siklusAll.size > 1);
   if (mixed.length) {
-    warnings.push(
-      `Nomor inject ${mixed.map((i) => i.id).join(", ")} dipakai di lebih dari satu siklus. ` +
-      `Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.`);
+    warnings.push(tf("Nomor inject {0} dipakai di lebih dari satu siklus. Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.",
+      mixed.map((i) => i.id).join(", ")));
   }
   if (injects.some((inj, i) => inj.id !== raw[i].id)) {
-    warnings.push(
-      `Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: ` +
-      injects.map((i) => i.id).join(", ") + ".");
+    warnings.push(tf("Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: {0}.",
+      injects.map((i) => i.id).join(", ")));
   }
 
   const allQ = injects.flatMap((i) => i.questions);
   const mc = allQ.filter((q) => q.type === "choice" || q.type === "checkbox").length;
   if (badCheck.length) {
-    warnings.push(`Inject ${[...new Set(badCheck)].join(", ")}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.`);
+    warnings.push(tf("Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.", [...new Set(badCheck)].join(", ")));
   }
   if (noKey > 0) {
-    warnings.push(`${noKey} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.`);
+    warnings.push(tf("{0} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.", noKey));
   }
   injects.forEach((i) => {
-    if (i.splitNarrative) warnings.push(`Inject ${i.id} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.`);
-    if (!i.condition) warnings.push(`Inject ${i.id} tidak punya teks Kondisi.`);
+    if (i.splitNarrative) warnings.push(tf("Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.", i.id));
+    if (!i.condition) warnings.push(tf("Inject {0} tidak punya teks Kondisi.", i.id));
   });
   /* Units are not asked the same number of questions, so say so before the run
      rather than letting it surface as a lopsided leaderboard afterwards. */
@@ -608,7 +734,7 @@ function buildModel(rows) {
   if (counts.length > 1 && Math.max(...counts) !== Math.min(...counts)) {
     const spread = Object.entries(perRole).sort((a, b) => b[1] - a[1])
       .map(([r, n]) => `${r} ${n}`).join(", ");
-    warnings.push(`Jumlah pertanyaan berskor per unit tidak sama (${spread}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.`);
+    warnings.push(tf("Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.", spread));
   }
   return { injects, roles, warnings, mcCount: mc };
 }
@@ -633,14 +759,13 @@ class Boundary extends React.Component {
     if (!this.state.err) return this.props.children;
     return (
       <div className="crash">
-        <h1>Ada yang rusak</h1>
+        <h1>{t("Ada yang rusak")}</h1>
         <p className="muted">
-          Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi,
-          bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.
+          {t("Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi, bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.")}
         </p>
         <pre>{String(this.state.err?.message || this.state.err)}</pre>
         <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>
-          Bersihkan dan mulai ulang
+          {t("Bersihkan dan mulai ulang")}
         </button>
       </div>
     );
@@ -650,6 +775,9 @@ class Boundary extends React.Component {
 /* ================================================================== */
 
 export default function App() {
+  /* Satu langganan di akar sudah cukup. Menukar bahasa mengubah state di sini,
+     seluruh pohon dirender ulang, dan tiap panggilan t() membaca bahasa baru. */
+  useLang();
   const [route, setRoute] = useState(() =>
     isScreenRoute() ? "screen" : isHostRoute() ? "host" : "participant");
   useEffect(() => {
@@ -707,16 +835,19 @@ const Crest = ({ peran, idx, size }) => (
   }}>{monogram(peran)}</span>
 );
 
-function Bar({ left, right, onExit, exitLabel = "Keluar", conn, theme = true }) {
+function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
   return (
     <header className="bar striped">
       <div className="brand"><BrandLogo />{left}</div>
       <div className="barright">
-        {conn && conn !== "live" && <span className="offline">Menyambung ulang</span>}
+        {conn && conn !== "live" && <span className="offline">{t("Menyambung ulang")}</span>}
         {right}
+        {/* Tombol bahasa selalu ada, bukan hanya waktu sheetnya dua bahasa:
+            antarmukanya sendiri bisa diganti ke Inggris walau soalnya tidak. */}
+        <LangToggle />
         {theme && <ThemeToggle />}
         <span className="build">{BUILD}</span>
-        {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel}</button>}
+        {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel || t("Keluar")}</button>}
       </div>
     </header>
   );
@@ -731,10 +862,10 @@ const PHASES = [
 function PhaseSteps({ phase, onPick }) {
   const at = PHASES.findIndex((p) => p.k === phase);
   return (
-    <div className="phases" role="group" aria-label="Phase">
+    <div className="phases" role="group" aria-label={t("Phase")}>
       {PHASES.map((p, i) => (
         <button key={p.k} className={i === at ? "on" : i < at ? "past" : ""}
-          disabled={!onPick} onClick={() => onPick && onPick(p.k)}>{p.label}</button>
+          disabled={!onPick} onClick={() => onPick && onPick(p.k)}>{t(p.label)}</button>
       ))}
     </div>
   );
@@ -812,6 +943,10 @@ function Host({ onExit }) {
   const isOwner = role === "owner";
   const canDrive = role === "owner" || role === "full";
   const canGrade = canDrive || role === "grader";
+
+  /* Bahasa tampilan. Fasilitator melihat keduanya pada skenario dan pertanyaan,
+     jadi pick hanya dipakai untuk baris ringkas seperti daftar rencana. */
+  const { pick } = useLang();
 
   const onMsg = useCallback((m) => {
     if (m.t === "hosted") {
@@ -899,11 +1034,11 @@ function Host({ onExit }) {
 
   useEffect(() => {
     if (!booted || !model || !roomId) return;
-    const t = setTimeout(() => {
+    const tm = setTimeout(() => {
       lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times, etimes, ran,
         role, ownerKey, hostCode, hostName });
     }, 500);
-    return () => clearTimeout(t);
+    return () => clearTimeout(tm);
   }, [booted, model, roomId, fileName, notes, codes, settings, times, etimes, ran,
       role, ownerKey, hostCode, hostName]);
 
@@ -950,11 +1085,11 @@ function Host({ onExit }) {
   };
 
   const setInjectTime = (id, v) => {
-    setTimes((t) => ({ ...t, [id]: v }));
+    setTimes((m) => ({ ...m, [id]: v }));
     if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
   };
   const setInjectETime = (id, v) => {
-    setEtimes((t) => ({ ...t, [id]: v }));
+    setEtimes((m) => ({ ...m, [id]: v }));
     if (roomId) send({ t: "settings", roomId, etimes: { [id]: v } });
   };
   const limitOf = (id) => {
@@ -1000,7 +1135,7 @@ function Host({ onExit }) {
   const unitOf = (peran) => {
     if (settings.showUnits) return peran;
     const i = roleIdx(peran);
-    return `Unit ${i < 0 ? "?" : String.fromCharCode(65 + i)}`;
+    return tf("Unit {0}", i < 0 ? "?" : String.fromCharCode(65 + i));
   };
   const seatOf = (peran) => people.find((p) => p.peran === peran);
   const openProjector = useCallback(() => {
@@ -1050,71 +1185,44 @@ function Host({ onExit }) {
   if (screen === "setup") {
     return (
       <>
-        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Kembali" conn={status} />
+        <Bar left={<b className="wordmark">{t("TTX Live")}</b>} onExit={onExit} exitLabel={t("Kembali")} conn={status} />
         <main className="load">
           <div className="loadinner">
-            <p className="eyebrow">Fasilitator</p>
-            <h1>Muat sheet inject Anda</h1>
-            <p className="lede">
-              Satu baris per pertanyaan, berisi <b>Inject No.</b>, <b>Kondisi</b>, <b>Peran</b>,{" "}
-              <b>Siklus</b>, <b>Pertanyaan</b> dan <b>Jawaban</b>. Kolom <b>Waktu</b> opsional,
-              mengatur lama menjawab untuk inject itu dalam menit.
-            </p>
-            <p className="lede">
-              Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban
-              (<code>A. …</code> / <code>B. …</code>) dan beri tanda <code>*</code> di depan
-              opsi yang benar. Beri tanda pada <b>dua opsi atau lebih</b> dan pertanyaan itu
-              menjadi centang semua yang sesuai.
-            </p>
-            <p className="lede">
-              Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang
-              kurang tepat. <code>***</code> untuk yang terbaik, <code>**</code> untuk yang
-              masih bisa diterima, <code>*</code> untuk yang lemah, tanpa bintang untuk yang
-              salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi
-              <code>3 2 1</code> dan <code>30 20 10</code> memberi hasil yang sama.
-            </p>
-            <p className="lede">
-              Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir
-              baris: <code>[3] B. Verifikasi alert</code> atau <code>B. Verifikasi alert [3]</code>.
-              Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang,
-              dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.
-            </p>
-            <p className="lede">
-              Kolom <b>Tipe</b> opsional menentukan langsung: <code>pg</code>,{" "}
-              <code>checkbox</code> atau <code>esai</code>. Kosongkan, atau hilangkan
-              kolomnya, dan bentuk sel Jawaban yang menentukan.
-            </p>
+            <p className="eyebrow">{t("Fasilitator")}</p>
+            <h1>{t("Muat sheet inject Anda")}</h1>
+            {HELP_SHEET.map((k) => (
+              <p className="lede" key={k}><Rich>{t(k)}</Rich></p>
+            ))}
             <div className="drop" onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}>
               <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden
                 onChange={(e) => handleFile(e.target.files[0])} />
-              <button className="btn" onClick={() => fileRef.current?.click()}>Pilih file</button>
-              <span className="or">atau jatuhkan di sini</span>
+              <button className="btn" onClick={() => fileRef.current?.click()}>{t("Pilih file")}</button>
+              <span className="or">{t("atau jatuhkan di sini")}</span>
             </div>
-            {parseError && <div className="err">{parseError}</div>}
+            {parseError && <div className="err">{t(parseError)}</div>}
             <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
-              Muat contoh latihan saja
+              {t("Muat contoh latihan saja")}
             </button>
 
             {/* Fasilitator kedua tidak memuat sheet. Ia masuk dengan kode dari
                 pemilik ruangan, dan kode itu yang menentukan haknya. */}
             <div className="joinhost">
-              <h3>Bergabung sebagai fasilitator</h3>
+              <h3>{t("Bergabung sebagai fasilitator")}</h3>
               <p className="hint">
-                Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan
-                pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.
+                {t("Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.")}
               </p>
               <div className="joinrow">
-                <input className="cinput" maxLength={8} placeholder="KODE" value={joinCode}
+                <input className="cinput" maxLength={8} placeholder={t("KODE")} value={joinCode}
                   autoComplete="off"
                   onChange={(e) => { setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")); setJoinErr(""); }}
                   onKeyDown={(e) => e.key === "Enter" && joinCode.length >= 4 && send({ t: "cohost", code: joinCode, name: hostName })} />
-                <input placeholder="Nama Anda, opsional" value={hostName} autoComplete="off"
+                <input placeholder={t("Nama Anda, opsional")} value={hostName} autoComplete="off"
                   onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
                 <button className="btn" disabled={joinCode.length < 4}
-                  onClick={() => send({ t: "cohost", code: joinCode, name: hostName })}>Masuk</button>
+                  onClick={() => send({ t: "cohost", code: joinCode, name: hostName })}>{t("Masuk")}</button>
               </div>
-              {joinErr && <div className="err">{joinErr}</div>}
+              {joinErr && <div className="err">{t(joinErr)}</div>}
             </div>
           </div>
         </main>
@@ -1126,65 +1234,58 @@ function Host({ onExit }) {
   if (screen === "config") {
     return (
       <>
-        <Bar left={<b className="wordmark">Sebelum mulai</b>}
-          onExit={() => setScreen("setup")} exitLabel="Kembali" conn={status} />
+        <Bar left={<b className="wordmark">{t("Sebelum mulai")}</b>}
+          onExit={() => setScreen("setup")} exitLabel={t("Kembali")} conn={status} />
         <main className="load">
           <div className="loadinner wide">
-            <h1>Sebelum mulai</h1>
+            <h1>{t("Sebelum mulai")}</h1>
 
             {warnings.length > 0 && (
               <details className="warn" open>
-                <summary>{warnings.length} hal yang perlu dicek</summary>
+                <summary>{tf("{0} hal yang perlu dicek", warnings.length)}</summary>
                 <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
               </details>
             )}
 
-            <h3>Penilaian</h3>
+            <h3>{t("Penilaian")}</h3>
             <div className="setgrid">
               <div className="fld span2">
-                <span>Mode penilaian</span>
+                <span>{t("Mode penilaian")}</span>
                 <div className="seg2">
                   {[["auto", "Otomatis (pilihan)"], ["manual", "Manual (Anda yang menilai)"]].map(([v, l]) => (
                     <button key={v} className={settings.mode === v ? "on" : ""}
-                      onClick={() => patchSettings({ mode: v })}>{l}</button>
+                      onClick={() => patchSettings({ mode: v })}>{t(l)}</button>
                   ))}
                 </div>
               </div>
               <p className="hint span2">
-                Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual
-                membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan
-                tanpa opsi selalu jatuh ke penilaian manual.
+                {t("Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan tanpa opsi selalu jatuh ke penilaian manual.")}
               </p>
 
               {settings.mode === "auto" && (
                 <>
                   <label className="fld">
-                    <span>Poin per pertanyaan</span>
+                    <span>{t("Poin per pertanyaan")}</span>
                     <input type="number" min="0" step="100" value={settings.points}
                       onChange={(e) => patchSettings({ points: Number(e.target.value) })} />
                   </label>
                   <label className="fld">
-                    <span>Batas waktu default (detik, 0 = tanpa batas)</span>
+                    <span>{t("Batas waktu default (detik, 0 = tanpa batas)")}</span>
                     <input type="number" min="0" step="5" value={settings.timeLimit}
                       onChange={(e) => patchSettings({ timeLimit: Number(e.target.value) })} />
                   </label>
                   <label className="fld">
-                    <span>Batas waktu esai (detik, 0 = tanpa batas)</span>
+                    <span>{t("Batas waktu esai (detik, 0 = tanpa batas)")}</span>
                     <input type="number" min="0" step="30" value={settings.essayLimit}
                       onChange={(e) => patchSettings({ essayLimit: Number(e.target.value) })} />
                   </label>
                   <label className="fld">
-                    <span>Kelonggaran mengetik esai (detik)</span>
+                    <span>{t("Kelonggaran mengetik esai (detik)")}</span>
                     <input type="number" min="0" step="15" value={settings.essayGrace}
                       onChange={(e) => patchSettings({ essayGrace: Number(e.target.value) })} />
                   </label>
                   <p className="hint span2">
-                    Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam
-                    sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu
-                    dan menunggu, dan inject baru tertutup setelah jam terpanjang habis.
-                    Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai
-                    keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong
-                    nilai.
+                    {t("Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu dan menunggu, dan inject baru tertutup setelah jam terpanjang habis. Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong nilai.")}
                   </p>
                   <Check label="Bonus kecepatan" checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
@@ -1205,25 +1306,23 @@ function Host({ onExit }) {
 
             {settings.mode === "auto" && (
               <>
-                <h3>Waktu per inject</h3>
+                <h3>{t("Waktu per inject")}</h3>
                 <p className="hint">
-                  Lama tiap unit boleh menjawab. Kosong berarti memakai default,
-                  {" "}{settings.timeLimit} detik untuk pilihan dan {settings.essayLimit} detik untuk esai.
-                  Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya
-                  bisa diubah saat latihan berjalan.
+                  {tf("Lama tiap unit boleh menjawab. Kosong berarti memakai default, {0} detik untuk pilihan dan {1} detik untuk esai. Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya bisa diubah saat latihan berjalan.",
+                    settings.timeLimit, settings.essayLimit)}
                 </p>
                 <p className="hint">
                   <button className="link" onClick={() => {
                     const blank = Object.fromEntries(model.injects.map((i) => [i.id, ""]));
                     setTimes(blank); setEtimes(blank);
                     if (roomId) send({ t: "settings", roomId, times: blank, etimes: blank });
-                  }}>Kosongkan semua, ikuti angka default</button>
+                  }}>{t("Kosongkan semua, ikuti angka default")}</button>
                 </p>
                 <ul className="codelist">
                   <li className="cohead">
-                    <span className="cname">Inject</span>
-                    <span className="colcap">Pilihan</span>
-                    <span className="colcap">Esai</span>
+                    <span className="cname">{t("Inject")}</span>
+                    <span className="colcap">{t("Pilihan")}</span>
+                    <span className="colcap">{t("Esai")}</span>
                   </li>
                   {model.injects.map((i) => (
                     <li key={i.id}>
@@ -1231,24 +1330,22 @@ function Host({ onExit }) {
                       <input className="cinput narrow" type="number" min="0" step="5"
                         placeholder={String(settings.timeLimit)}
                         value={times[i.id] ?? ""}
-                        onChange={(e) => setTimes((t) => ({ ...t, [i.id]: e.target.value }))} />
+                        onChange={(e) => setTimes((m) => ({ ...m, [i.id]: e.target.value }))} />
                       <input className={`cinput narrow ${hasEssay(i) ? "" : "dim"}`} type="number" min="0" step="30"
                         placeholder={String(settings.essayLimit)}
-                        title={hasEssay(i) ? "Waktu esai untuk inject ini" : "Inject ini tidak punya esai"}
+                        title={t(hasEssay(i) ? "Waktu esai untuk inject ini" : "Inject ini tidak punya esai")}
                         value={etimes[i.id] ?? ""}
-                        onChange={(e) => setEtimes((t) => ({ ...t, [i.id]: e.target.value }))} />
-                      <span className="unit">detik</span>
+                        onChange={(e) => setEtimes((m) => ({ ...m, [i.id]: e.target.value }))} />
+                      <span className="unit">{t("detik")}</span>
                     </li>
                   ))}
                 </ul>
               </>
             )}
 
-            <h3>Kursi</h3>
+            <h3>{t("Kursi")}</h3>
             <p className="hint">
-              Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang
-              memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.
-              Ubah kode mana pun, atau buat yang baru.
+              {t("Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak. Ubah kode mana pun, atau buat yang baru.")}
             </p>
             <ul className="codelist">
               {model.roles.map((r, i) => (
@@ -1258,32 +1355,32 @@ function Host({ onExit }) {
                   <input className="cinput" maxLength={8} value={draftCodes[r] || ""}
                     onChange={(e) => setDraftCodes((d) => ({ ...d, [r]: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") }))} />
                   <button className="btn quiet" onClick={() => setDraftCodes((d) => ({ ...d, [r]: rand(4) }))}>
-                    Acak
+                    {t("Acak")}
                   </button>
                 </li>
               ))}
             </ul>
 
-            <h3>Nama Anda</h3>
+            <h3>{t("Nama Anda")}</h3>
             <label className="fld">
-              <span>Muncul di daftar fasilitator, opsional</span>
+              <span>{t("Muncul di daftar fasilitator, opsional")}</span>
               <input value={hostName} autoComplete="off"
                 onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
             </label>
 
             {keyRequired && (
               <>
-                <h3>Kata sandi fasilitator</h3>
+                <h3>{t("Kata sandi fasilitator")}</h3>
                 <label className="fld">
-                  <span>Ditentukan oleh yang men-deploy aplikasi ini</span>
+                  <span>{t("Ditentukan oleh yang men-deploy aplikasi ini")}</span>
                   <input type="password" value={keyIn} autoComplete="off"
                     onChange={(e) => { setKeyIn(e.target.value); setDenied(false); }} />
                 </label>
               </>
             )}
-            {denied && <div className="err">Kata sandi itu tidak diterima.</div>}
+            {denied && <div className="err">{t("Kata sandi itu tidak diterima.")}</div>}
             <button className="btn wide" onClick={start}
-              disabled={keyRequired && !keyIn}>Buka ruangan</button>
+              disabled={keyRequired && !keyIn}>{t("Buka ruangan")}</button>
           </div>
         </main>
       </>
@@ -1300,11 +1397,11 @@ function Host({ onExit }) {
   if (!model || !inject) {
     return (
       <>
-        <Bar left={<b className="wordmark">TTX Live</b>} onExit={onExit} exitLabel="Kembali" conn={status} />
+        <Bar left={<b className="wordmark">{t("TTX Live")}</b>} onExit={onExit} exitLabel={t("Kembali")} conn={status} />
         <div className="crash">
-          <h1>Sesi ini sudah tidak ada di server</h1>
-          <p className="muted">Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.</p>
-          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>Mulai baru</button>
+          <h1>{t("Sesi ini sudah tidak ada di server")}</h1>
+          <p className="muted">{t("Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.")}</p>
+          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>{t("Mulai baru")}</button>
         </div>
       </>
     );
@@ -1320,27 +1417,27 @@ function Host({ onExit }) {
       <Bar conn={status} onExit={onExit}
         left={<>
           <span className="crumb">{inject.siklus}</span>
-          <b className="injno">Inject {inject.id}</b>
+          <b className="injno">{tf("Inject {0}", inject.id)}</b>
           <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
             echo.current = "";
             if (k === "open" && phase !== "open") setOpenedAt(serverNow());
             setPhase(k);
           } : null} />
-          {role !== "owner" && <span className={`rolepill ${role}`}>{ROLE_LABEL[role]}</span>}
+          {role !== "owner" && <span className={`rolepill ${role}`}>{t(ROLE_LABEL[role])}</span>}
         </>}
         right={<>
           {canDrive && (<>
             <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
-              title={settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit"}
-              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>Unit</button>
+              title={t(settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit")}
+              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>{t("Unit")}</button>
           </>)}
           <button className="btn quiet" onClick={() => setTeamOpen(true)}
-            title="Fasilitator di ruangan ini">Tim · {hosts.length || "·"}</button>
+            title={t("Fasilitator di ruangan ini")}>{t("Tim")} · {hosts.length || "·"}</button>
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
-            Kursi · {people.length}/{model.roles.length}
+            {t("Kursi")} · {people.length}/{model.roles.length}
           </button>
-          <button className="btn quiet" onClick={openProjector} title="Buka tampilan proyektor">Proyektor</button>
-          <button className="btn quiet" onClick={() => setScreen("report")}>Laporan</button>
+          <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
+          <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
         </>} />
 
       {roomOpen && (
@@ -1395,11 +1492,14 @@ function Host({ onExit }) {
           ) : (
             <>
               {inject.condition
-                ? <blockquote className="scenario"><span className="eyebrow">Kondisi</span>{inject.condition}</blockquote>
-                : <div className="empty">Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.</div>}
+                ? <Dual tag="blockquote" className="scenario"
+                  text={inject.condition} alt={inject.conditionAlt}>
+                  <span className="eyebrow">{t("Kondisi")}</span>
+                </Dual>
+                : <div className="empty">{t("Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.")}</div>}
 
               <div className="callon">
-                <span>Ditanyakan ke</span>
+                <span>{t("Ditanyakan ke")}</span>
                 {inject.roles.map((r) => (
                   <span key={r} className="chip"><Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}</span>
                 ))}
@@ -1408,50 +1508,50 @@ function Host({ onExit }) {
               <div className="actbar">
                 {phase === "briefing" && (<>
                   <span className="msg">
-                    {canDrive
+                    {t(canDrive
                       ? "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab."
-                      : "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab."}
+                      : "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.")}
                   </span>
                   {settings.mode === "auto" && canDrive && (
                     <span className="inlinetime">
                       <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
                         value={times[inject.id] ?? ""}
                         onChange={(e) => setInjectTime(inject.id, e.target.value)} />
-                      <span className="unit">pilihan</span>
+                      <span className="unit">{t("pilihan")}</span>
                       {hasEssay(inject) && (<>
                         <input type="number" min="0" step="30" placeholder={String(settings.essayLimit)}
                           value={etimes[inject.id] ?? ""}
                           onChange={(e) => setInjectETime(inject.id, e.target.value)} />
-                        <span className="unit">esai</span>
+                        <span className="unit">{t("esai")}</span>
                       </>)}
                     </span>
                   )}
                   {canDrive && (
                     <button className="btn" onClick={() => {
                       echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
-                    }}>Buka untuk menjawab</button>
+                    }}>{t("Buka untuk menjawab")}</button>
                   )}
                 </>)}
 
                 {phase === "open" && (<>
                   {settings.mode === "auto" && limitOf(inject.id) > 0
                     ? <Ring openedAt={openedAt} limit={limitOf(inject.id)}
-                        cap={hasEssay(inject) ? "pilihan" : ""} />
-                    : <span className="msg">Jawaban sudah dibuka.</span>}
+                        cap={hasEssay(inject) ? t("pilihan") : ""} />
+                    : <span className="msg">{t("Jawaban sudah dibuka.")}</span>}
                   {settings.mode === "auto" && hasEssay(inject) && elimitOf(inject.id) > 0 && (
-                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap="esai" />
+                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap={t("esai")} />
                   )}
                   <span className="msg">
-                    {seatsHere.length === 0 ? "Belum ada unit yang mengambil kursi untuk inject ini"
-                      : allIn ? "Semua unit sudah menjawab"
-                        : `Menunggu jawaban, ${seatsHere.length} dari ${inject.roles.length} unit sudah duduk`}
+                    {seatsHere.length === 0 ? t("Belum ada unit yang mengambil kursi untuk inject ini")
+                      : allIn ? t("Semua unit sudah menjawab")
+                        : tf("Menunggu jawaban, {0} dari {1} unit sudah duduk", seatsHere.length, inject.roles.length)}
                   </span>
                   {canDrive && settings.mode === "auto" && (
                     <span className="addtime">
-                      <span className="unit">Tambah</span>
+                      <span className="unit">{t("Tambah")}</span>
                       {[60, 120, 300].map((sec) => (
                         <button key={sec} className="btn quiet pill"
-                          title={hasEssay(inject) ? "Menambah kedua jam" : "Menambah waktu menjawab"}
+                          title={t(hasEssay(inject) ? "Menambah kedua jam" : "Menambah waktu menjawab")}
                           onClick={() => {
                             addTime(inject.id, sec, false);
                             if (hasEssay(inject)) addTime(inject.id, sec, true);
@@ -1461,45 +1561,45 @@ function Host({ onExit }) {
                   )}
                   {canDrive && (
                     <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
-                      Buka jawaban
+                      {t("Buka jawaban")}
                     </button>
                   )}
                 </>)}
 
                 {phase === "revealed" && (<>
                   <span className="msg">
-                    {keyShown
+                    {t(keyShown
                       ? "Kunci jawaban sudah tampil di semua layar."
-                      : "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat."}
+                      : "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat.")}
                   </span>
                   {!keyShown && canDrive && (
                     <button className="btn" onClick={() => send({ t: "showkey", roomId })}>
-                      Tampilkan kunci jawaban
+                      {t("Tampilkan kunci jawaban")}
                     </button>
                   )}
                   {canDrive && (
                     <button className="btn quiet" onClick={() => {
                       echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
-                    }}>Buka lagi</button>
+                    }}>{t("Buka lagi")}</button>
                   )}
                 </>)}
               </div>
 
               {phase === "briefing" && inject.questions.length > 0 && (
                 <div className="qplan">
-                  <h4>Pertanyaan di inject ini</h4>
+                  <h4>{t("Pertanyaan di inject ini")}</h4>
                   <ul>
                     {inject.questions.map((q) => (
                       <li key={q.qid}>
                         <Crest peran={q.peran} idx={roleIdx(q.peran)} />
                         <span className="qpunit">{unitOf(q.peran)}</span>
                         <TypeBadge q={q} />
-                        <span className="qptext">{q.text}</span>
+                        <span className="qptext">{pick(q.text, q.alt)}</span>
                         {q.choices?.length > 0 && (
                           <span className="qpkeys mono">
                             {q.weighted
-                              ? `${new Set(q.choices.map((c) => c.w).filter((w) => w > 0)).size} tingkat`
-                              : `${q.choices.filter((c) => c.correct).length}/${q.choices.length} kunci`}
+                              ? tf("{0} tingkat", new Set(q.choices.map((c) => c.w).filter((w) => w > 0)).size)
+                              : tf("{0}/{1} kunci", q.choices.filter((c) => c.correct).length, q.choices.length)}
                           </span>
                         )}
                       </li>
@@ -1526,8 +1626,8 @@ function Host({ onExit }) {
                         <span className="tcount mono">{done}/{qs.length}</span>
                         {finishedMs != null
                           ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
-                          : !seat ? <span className="tmiss">kursi kosong</span>
-                            : <span className="tmiss">sedang menjawab</span>}
+                          : !seat ? <span className="tmiss">{t("kursi kosong")}</span>
+                            : <span className="tmiss">{t("sedang menjawab")}</span>}
                       </div>
                     );
                   })}
@@ -1553,7 +1653,7 @@ function Host({ onExit }) {
 
               {phase === "revealed" && (
                 <div className="notes">
-                  <label htmlFor={`n-${inject.id}`}>Catatan fasilitator</label>
+                  <label htmlFor={`n-${inject.id}`}>{t("Catatan fasilitator")}</label>
                   <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
                     readOnly={!canGrade}
                     onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
@@ -1561,31 +1661,31 @@ function Host({ onExit }) {
               )}
 
               <div className="nav">
-                <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>Sebelumnya</button>
+                <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>{t("Sebelumnya")}</button>
                 {!canDrive ? (
                   <span className="msg">
-                    {role === "grader"
+                    {t(role === "grader"
                       ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
-                      : "Anda memantau. Perpindahan inject dipegang fasilitator utama."}
+                      : "Anda memantau. Perpindahan inject dipegang fasilitator utama.")}
                   </span>
                 ) : activeIdx < model.injects.length - 1 ? (
                   confirmNext ? (
                     <span className="confirm">
-                      <span className="msg">Pindahkan semua ke inject {model.injects[activeIdx + 1].id}?</span>
-                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>Batal</button>
-                      <button className="btn" onClick={goNext}>Ya, lanjut</button>
+                      <span className="msg">{tf("Pindahkan semua ke inject {0}?", model.injects[activeIdx + 1].id)}</span>
+                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>{t("Batal")}</button>
+                      <button className="btn" onClick={goNext}>{t("Ya, lanjut")}</button>
                     </span>
                   ) : (
-                    <button className="btn" onClick={() => setConfirmNext(true)}>Inject berikutnya</button>
+                    <button className="btn" onClick={() => setConfirmNext(true)}>{t("Inject berikutnya")}</button>
                   )
                 ) : (
-                  <button className="btn" onClick={() => setScreen("report")}>Selesai</button>
+                  <button className="btn" onClick={() => setScreen("report")}>{t("Selesai")}</button>
                 )}
               </div>
 
               <p className="keys">
-                <kbd>Spasi</kbd> lanjut · <kbd>R</kbd> buka jawaban · <kbd>K</kbd> tampilkan kunci ·{" "}
-                <kbd>←</kbd> <kbd>→</kbd> pindah inject · <kbd>C</kbd> kursi · <kbd>P</kbd> proyektor
+                <kbd>{t("Spasi")}</kbd> {t("lanjut")} · <kbd>R</kbd> {t("buka jawaban")} · <kbd>K</kbd> {t("tampilkan kunci")} ·{" "}
+                <kbd>←</kbd> <kbd>→</kbd> {t("pindah inject")} · <kbd>C</kbd> {t("kursi")} · <kbd>P</kbd> {t("proyektor")}
               </p>
             </>
           )}
@@ -1610,70 +1710,67 @@ function TeamPanel({ hosts, hostCodes, isOwner, role, status, onAdd, onRemove, o
   const entries = Object.entries(hostCodes || {});
   return (
     <div className="scrim" onClick={onClose}>
-      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Fasilitator">
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("Fasilitator")}>
         <div className="phead">
-          <h2>Fasilitator</h2>
-          <button className="btn quiet" onClick={onClose}>Tutup</button>
+          <h2>{t("Fasilitator")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
         </div>
 
-        <h3>Sedang terhubung</h3>
+        <h3>{t("Sedang terhubung")}</h3>
         <ul className="hostlist">
-          {hosts.length === 0 && <li className="muted">Belum ada kabar dari server.</li>}
+          {hosts.length === 0 && <li className="muted">{t("Belum ada kabar dari server.")}</li>}
           {hosts.map((h, i) => (
             <li key={i}>
-              <span className={`rolepill ${h.role}`}>{ROLE_LABEL[h.role] || h.role}</span>
-              <span className="hname">{h.name || "tanpa nama"}</span>
+              <span className={`rolepill ${h.role}`}>{t(ROLE_LABEL[h.role]) || h.role}</span>
+              <span className="hname">{h.name || t("tanpa nama")}</span>
             </li>
           ))}
         </ul>
         <div className="joinrow">
           <span className={`connpill ${status === "live" ? "on" : ""}`}>
-            {status === "live" ? "Tersambung" : "Menyambung ulang"}
+            {t(status === "live" ? "Tersambung" : "Menyambung ulang")}
           </span>
-          <button className="btn quiet" onClick={onResync}>Sinkronkan ulang</button>
+          <button className="btn quiet" onClick={onResync}>{t("Sinkronkan ulang")}</button>
         </div>
         <p className="hint">
-          Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal
-          dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali
-          tanpa kehilangan apa pun.
+          {t("Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali tanpa kehilangan apa pun.")}
         </p>
 
         {isOwner ? (
           <>
-            <h3>Kode fasilitator</h3>
+            <h3>{t("Kode fasilitator")}</h3>
             <p className="hint">
-              Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan.
-              Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.
+              {t("Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.")}
             </p>
             <div className="joinrow">
               <select value={newRole} onChange={(e) => setNewRole(e.target.value)}>
-                <option value="full">{ROLE_LABEL.full}</option>
-                <option value="grader">{ROLE_LABEL.grader}</option>
-                <option value="viewer">{ROLE_LABEL.viewer}</option>
+                <option value="full">{t(ROLE_LABEL.full)}</option>
+                <option value="grader">{t(ROLE_LABEL.grader)}</option>
+                <option value="viewer">{t(ROLE_LABEL.viewer)}</option>
               </select>
-              <input placeholder="Nama atau keterangan, opsional" value={label}
+              <input placeholder={t("Nama atau keterangan, opsional")} value={label}
                 onChange={(e) => setLabel(e.target.value)} autoComplete="off" />
               <button className="btn" onClick={() => { onAdd(newRole, label); setLabel(""); }}>
-                Buat kode
+                {t("Buat kode")}
               </button>
             </div>
-            <p className="hint">{ROLE_HINT[newRole]}</p>
+            <p className="hint">{t(ROLE_HINT[newRole])}</p>
             <ul className="codelist">
-              {entries.length === 0 && <li className="muted">Belum ada kode.</li>}
+              {entries.length === 0 && <li className="muted">{t("Belum ada kode.")}</li>}
               {entries.map(([code, v]) => (
                 <li key={code}>
                   <b className="mono ccode">{code}</b>
-                  <span className={`rolepill ${v.role}`}>{ROLE_LABEL[v.role] || v.role}</span>
+                  <span className={`rolepill ${v.role}`}>{t(ROLE_LABEL[v.role]) || v.role}</span>
                   <span className="cname">{v.label || "·"}</span>
-                  <button className="btn quiet" onClick={() => onRemove(code)}>Cabut</button>
+                  <button className="btn quiet" onClick={() => onRemove(code)}>{t("Cabut")}</button>
                 </li>
               ))}
             </ul>
           </>
         ) : (
           <p className="hint">
-            Anda masuk sebagai <b>{ROLE_LABEL[role] || role}</b>. {ROLE_HINT[role]} Hubungi
-            pemilik ruangan kalau Anda perlu hak yang lain.
+            {t("Anda masuk sebagai")} <b>{t(ROLE_LABEL[role]) || role}</b>. {t(ROLE_HINT[role])}{" "}
+            {t("Hubungi pemilik ruangan kalau Anda perlu hak yang lain.")}
           </p>
         )}
       </aside>
@@ -1687,14 +1784,13 @@ function Lobby({ codes, people, model, unitOf, seatOf, onBegin, injectId }) {
     <div className="lobby">
       <div className="lobbytop">
         <div>
-          <h2>{model.roles.length} unit, {model.roles.length} kursi</h2>
+          <h2>{tf("{0} unit, {1} kursi", model.roles.length, model.roles.length)}</h2>
           <p className="muted">
-            Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang
-            memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.
+            {t("Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.")}
           </p>
         </div>
         <div className="dial">
-          <b className="mono">{taken}</b><span>dari {model.roles.length} kursi</span>
+          <b className="mono">{taken}</b><span>{tf("dari {0} kursi", model.roles.length)}</span>
         </div>
       </div>
 
@@ -1713,10 +1809,10 @@ function Lobby({ codes, people, model, unitOf, seatOf, onBegin, injectId }) {
                   maupun kursi terisi, jadi nama unit sepanjang apa pun tidak
                   pernah mendorong badge keluar dari kartu. */}
               {!seat ? (
-                <span className="seatopen">kursi kosong</span>
+                <span className="seatopen">{t("kursi kosong")}</span>
               ) : (
                 <span className="cgwho">
-                  {seat.live === false ? "sudah duduk · offline" : "sudah duduk"}
+                  {t(seat.live === false ? "sudah duduk · offline" : "sudah duduk")}
                 </span>
               )}
             </li>
@@ -1726,12 +1822,12 @@ function Lobby({ codes, people, model, unitOf, seatOf, onBegin, injectId }) {
 
       {onBegin && (
         <button className="btn wide" onClick={onBegin}>
-          {injectId ? `Lanjut ke inject ${injectId}` : "Mulai latihan"}
+          {injectId ? tf("Lanjut ke inject {0}", injectId) : t("Mulai latihan")}
         </button>
       )}
       {taken === 0 && (
         <p className="hint">
-          Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.
+          {t("Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.")}
         </p>
       )}
     </div>
@@ -1749,15 +1845,13 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
 
   return (
     <div className="scrim" onClick={onClose}>
-      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Seats">
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("Seats")}>
         <div className="phead">
-          <h2>Kursi</h2>
-          <button className="btn quiet" onClick={onClose}>Tutup</button>
+          <h2>{t("Kursi")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
         </div>
         <p className="hint">
-          Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi
-          dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit
-          harus mulai dari nol.
+          {t("Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit harus mulai dari nol.")}
         </p>
         <ul className="codelist big">
           {model.roles.map((r, i) => {
@@ -1773,24 +1867,24 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
                 </span>
                 {seat && canDrive && (confirm === r
                   ? <span className="confirm">
-                    <button className="btn quiet" onClick={() => setConfirm("")}>Batal</button>
-                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>Lepas</button>
+                    <button className="btn quiet" onClick={() => setConfirm("")}>{t("Batal")}</button>
+                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>{t("Lepas")}</button>
                   </span>
-                  : <button className="btn quiet" onClick={() => setConfirm(r)}>Lepas</button>)}
+                  : <button className="btn quiet" onClick={() => setConfirm(r)}>{t("Lepas")}</button>)}
               </li>
             );
           })}
         </ul>
 
         {canDrive && (<>
-          <h3>Tampilan di layar</h3>
+          <h3>{t("Tampilan di layar")}</h3>
           <Check label="Nama unit" checked={settings.showUnits}
             onChange={(v) => onSetting({ showUnits: v })}
             hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
 
-          <button className="btn quiet wide" onClick={onLobby}>Kembali ke ruang tunggu</button>
+          <button className="btn quiet wide" onClick={onLobby}>{t("Kembali ke ruang tunggu")}</button>
           <p className="hint">
-            Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.
+            {t("Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.")}
           </p>
         </>)}
       </aside>
@@ -1804,6 +1898,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
   const isCheck = q.type === "checkbox";
   const isAuto = settings.mode === "auto" && (q.type === "choice" || isCheck);
   const correctIdx = q.choices ? q.choices.findIndex((c) => c.correct) : -1;
+  const { pick } = useLang();
 
   const dist = useMemo(() => {
     if (!q.choices?.length) return [];
@@ -1820,7 +1915,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
       {/* Badge tipe berdiri sebagai label di atas pertanyaan, bukan menggantung
           di bawahnya, supaya tidak pernah terlihat menempel pada teks. */}
       <p className="qtypeline"><TypeBadge q={q} /></p>
-      <p className="qtext">{q.text}</p>
+      <Dual className="qtext" text={q.text} alt={q.alt} />
 
       {isAuto ? (
         <>
@@ -1837,7 +1932,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                   <span className="vtrack">
                     <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
                     <span className="vlabel">
-                      {c.text}
+                      {pick(c.text, c.alt)}
                       {/* Bobot hanya muncul setelah fasilitator menekan tombol
                           tampilkan jawaban. Opsi tanpa bobot tidak diberi label. */}
                       {q.weighted && keyShown && tier && (
@@ -1848,13 +1943,13 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                           baris hanya menambah keramaian tanpa menambah keterangan. */}
                     </span>
                   </span>
-                  <span className="vn mono">{c.n}<em>unit</em></span>
+                  <span className="vn mono">{c.n}<em>{t("unit")}</em></span>
                 </li>
               );
             })}
           </ul>
           {keyShown && correctIdx < 0 && (
-            <p className="hint warnhint">Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.</p>
+            <p className="hint warnhint">{t("Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.")}</p>
           )}
           <ul className="who-list">
             {answers.map((p) => {
@@ -1876,25 +1971,25 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                 </li>
               );
             })}
-            {answers.length === 0 && <li className="none">Unit ini tidak menjawab.</li>}
+            {answers.length === 0 && <li className="none">{t("Unit ini tidak menjawab.")}</li>}
           </ul>
         </>
       ) : (
         <>
           {answers.length === 0
-            ? <p className="noanswer">Unit ini tidak menjawab.</p>
+            ? <p className="noanswer">{t("Unit ini tidak menjawab.")}</p>
             : <ul className="answers">
               {answers.map((p) => {
                 const a = p.answers[q.qid];
                 return (
                   <li key={p.pid}>
                     <span className="who">
-                      {unitOf(p.peran)} · {(a.ms / 1000).toFixed(0)} dtk
+                      {unitOf(p.peran)} · {tf("{0} dtk", (a.ms / 1000).toFixed(0))}
                     </span>
                     <p>{a.text}</p>
                     <div className="grade">
-                      <span className="dimlab">Nilai</span>
-                      <div className="gscale" role="group" aria-label="Nilai 1 sampai 10">
+                      <span className="dimlab">{t("Nilai")}</span>
+                      <div className="gscale" role="group" aria-label={t("Nilai 1 sampai 10")}>
                         {GRADES.map((v) => (
                           <button key={v} className={a.quality === v ? `on ${gradeCls(v)}` : ""}
                             title={qualityWord(v)} disabled={!onGrade}
@@ -1903,7 +1998,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                       </div>
                       <span className="gout">
                         {a.quality == null ? "belum dinilai"
-                          : <>{qualityWord(a.quality)} · <b className="mono">+{(a.points || 0).toLocaleString()}</b> poin</>}
+                          : <>{qualityWord(a.quality)} · <b className="mono">+{(a.points || 0).toLocaleString()}</b> {t("poin")}</>}
                       </span>
                     </div>
                   </li>
@@ -1912,13 +2007,11 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
             </ul>}
           <div className="qfoot">
             <p className="hint">
-              Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih
-              menambah hingga separuh. Unit melihat angkanya begitu Anda menekan
-              <b> Tampilkan kunci jawaban</b>.
+              <Rich>{t("Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih menambah hingga separuh. Unit melihat angkanya begitu Anda menekan * Tampilkan kunci jawaban*.")}</Rich>
             </p>
             {q.answerRaw && (
               <button className="link" onClick={toggleExpected}>
-                {showExpected ? "Sembunyikan jawaban model" : "Lihat jawaban model"}
+                {t(showExpected ? "Sembunyikan jawaban model" : "Lihat jawaban model")}
               </button>
             )}
           </div>
@@ -1949,6 +2042,15 @@ function Participant() {
   const [booted, setBooted] = useState(false);
   const [evicted, setEvicted] = useState(false);
   const codeRef = useRef(null);
+
+  /* Peserta hanya melihat satu bahasa: yang ia pilih di perangkatnya sendiri.
+     Pilihan orang lain di ruangan tidak terpengaruh. */
+  const { pick } = useLang();
+  /* Teks pilihan diambil dari deck, bukan dari pesan kunci, supaya baris kunci
+     jawaban ikut bahasa yang dipilih peserta. */
+  const optText = useCallback((q, list) => (list || [])
+    .map((i) => { const c = q.choices?.[i]; return c ? pick(c.text, c.alt) : ""; })
+    .filter(Boolean).join("; "), [pick]);
 
   const onMsg = useCallback((m) => {
     if (m.t === "joined") {
@@ -2047,7 +2149,7 @@ function Participant() {
   const allMineLocked = mine.length > 0
     && (!iHaveChoice || timeUp) && (!iHaveEssay || essayUp);
 
-  if (!booted) return <div className="boot">Memuat</div>;
+  if (!booted) return <div className="boot">{t("Memuat")}</div>;
 
   /* ---- join: the front door for everyone but the facilitator ---- */
   if (!me || !deck) {
@@ -2057,13 +2159,12 @@ function Participant() {
     const blocked = taken || (peek && peek.taken ? peek : null);
     return (
       <>
-        <Bar left={<b className="wordmark">Latihan Tabletop</b>} conn={status} />
+        <Bar left={<b className="wordmark">{t("Latihan Tabletop")}</b>} conn={status} />
         <main className="door">
           <div className="doorinner">
-            <h1>Masukkan kode unit Anda</h1>
+            <h1>{t("Masukkan kode unit Anda")}</h1>
             <p className="lede">
-              Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang
-              benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.
+              {t("Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.")}
             </p>
 
             <div className="slots" onClick={() => codeRef.current?.focus()}>
@@ -2074,7 +2175,7 @@ function Participant() {
               ))}
               <input ref={codeRef} className="codeghost" value={codeIn} maxLength={8}
                 autoComplete="off" autoCapitalize="characters" spellCheck="false"
-                aria-label="Kode unit Anda"
+                aria-label={t("Kode unit Anda")}
                 onChange={(e) => {
                   const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
                   setCodeIn(v); setPeek(null); setTaken(null); setEvicted(false);
@@ -2085,7 +2186,7 @@ function Participant() {
 
             {evicted && (
               <div className="resolved taken">
-                <div><small>Keluar</small><b>Perangkat lain mengambil kursi unit ini</b></div>
+                <div><small>{t("Keluar")}</small><b>{t("Perangkat lain mengambil kursi unit ini")}</b></div>
               </div>
             )}
 
@@ -2093,42 +2194,41 @@ function Participant() {
               <>
                 <div className="resolved taken">
                   <Crest peran={blocked.peran} idx={0} size={34} />
-                  <div><small>Kursi sudah terisi</small><b>{blocked.peran}</b></div>
+                  <div><small>{t("Kursi sudah terisi")}</small><b>{blocked.peran}</b></div>
                 </div>
                 <p className="hint">
-                  {blocked.name || blocked.holder || "Perangkat lain"} sudah memegang kursi ini
-                  selama {fmtAgo(blocked.sinceMs)}
-                  {blocked.live === false ? ", tapi sedang offline" : ""}. Satu unit hanya punya
-                  satu kursi, jadi perangkat ini tidak bisa ikut bergabung.
+                  {tf("{0} sudah memegang kursi ini selama {1}{2}. Satu unit hanya punya satu kursi, jadi perangkat ini tidak bisa ikut bergabung.",
+                    blocked.name || blocked.holder || t("Perangkat lain"),
+                    fmtAgo(blocked.sinceMs),
+                    blocked.live === false ? t(", tapi sedang offline") : "")}
                 </p>
                 <button className="btn wide warnbtn" onClick={() => doJoin(true)}>
-                  Ambil alih kursi
+                  {t("Ambil alih kursi")}
                 </button>
                 <p className="hint">
-                  Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit
-                  ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.
+                  {t("Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.")}
                 </p>
               </>
             ) : peek ? (
               <>
                 <div className="resolved">
                   <Crest peran={peek.peran} idx={0} size={34} />
-                  <div><small>Mengambil kursi untuk</small><b>{peek.peran}</b></div>
+                  <div><small>{t("Mengambil kursi untuk")}</small><b>{peek.peran}</b></div>
                 </div>
                 {/* Nama operator tidak diminta lagi. Papan skor dan laporan memakai
                     nama unit kerja, jadi isian ini hanya menambah langkah. */}
-                <button className="btn wide" onClick={() => doJoin(false)}>Ambil kursi</button>
+                <button className="btn wide" onClick={() => doJoin(false)}>{t("Ambil kursi")}</button>
               </>
             ) : (
               <p className="resolve">
-                {msg || (ready ? "Memeriksa…" : "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.")}
+                {t(msg) || t(ready ? "Memeriksa…" : "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.")}
               </p>
             )}
 
             <div className="doorfoot">
               {(lsGet(K_ME) || lsGet(K_HOST)) && (
                 <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
-                  Hapus sesi tersimpan
+                  {t("Hapus sesi tersimpan")}
                 </button>
               )}
             </div>
@@ -2140,12 +2240,12 @@ function Participant() {
 
   return (
     <>
-      <Bar onExit={leave} exitLabel="Keluar" conn={status}
+      <Bar onExit={leave} exitLabel={t("Keluar")} conn={status}
         left={<>
           <Crest peran={me.peran} idx={0} />
           <span className="unitblock">
             <b className="unitname">{me.peran}</b>
-            <small className="seatline">satu kursi</small>
+            <small className="seatline">{t("satu kursi")}</small>
           </span>
         </>}
         right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
@@ -2155,17 +2255,17 @@ function Participant() {
           {phase === "lobby" && (
             <div className="standby">
               <span className="pulse" />
-              <h2>Unit Anda sudah masuk</h2>
-              <p className="muted">Menunggu fasilitator memulai.</p>
+              <h2>{t("Unit Anda sudah masuk")}</h2>
+              <p className="muted">{t("Menunggu fasilitator memulai.")}</p>
             </div>
           )}
 
           {phase !== "lobby" && inject && (
             <>
-              <div className="eyebrow">{inject.siklus} · Inject {inject.id}</div>
+              <div className="eyebrow">{inject.siklus} · {tf("Inject {0}", inject.id)}</div>
               {inject.condition && (
                 <blockquote className="condition">
-                  <span className="eyebrow">Kondisi</span>{inject.condition}
+                  <span className="eyebrow">{t("Kondisi")}</span>{pick(inject.condition, inject.conditionAlt)}
                 </blockquote>
               )}
 
@@ -2173,16 +2273,20 @@ function Participant() {
                 <div className="standby small">
                   <span className="pulse" />
                   <p className="muted">
-                    Baca skenarionya. Pertanyaan segera dibuka
-                    {iHaveChoice && limit > 0 ? `. Waktu menjawab pilihan ${fmt(limit)}` : ""}
-                    {iHaveEssay && elimit > 0 ? `${iHaveChoice && limit > 0 ? ", esai" : ". Waktu menulis esai"} ${fmt(elimit)}` : ""}.
+                    {t("Baca skenarionya. Pertanyaan segera dibuka")}
+                    {iHaveChoice && limit > 0 ? tf(". Waktu menjawab pilihan {0}", fmt(limit)) : ""}
+                    {iHaveEssay && elimit > 0
+                      ? (iHaveChoice && limit > 0
+                        ? tf(", esai {0}", fmt(elimit))
+                        : tf(". Waktu menulis esai {0}", fmt(elimit)))
+                      : ""}.
                   </p>
                 </div>
               )}
 
               {phase === "open" && (mine.length === 0 ? (
                 <div className="standby small">
-                  <p className="muted">Inject ini tidak melibatkan unit Anda. Simak saja.</p>
+                  <p className="muted">{t("Inject ini tidak melibatkan unit Anda. Simak saja.")}</p>
                 </div>
               ) : (
                 <>
@@ -2190,10 +2294,10 @@ function Participant() {
                     <div className="ringwrap">
                       {iHaveChoice && limit > 0 && (
                         <Ring openedAt={state.openedAt} limit={limit} size="s150"
-                          cap={iHaveEssay ? "pilihan" : "sisa"} />
+                          cap={t(iHaveEssay ? "pilihan" : "sisa")} />
                       )}
                       {iHaveEssay && elimit > 0 && (
-                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap="esai" />
+                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap={t("esai")} />
                       )}
                     </div>
                   )}
@@ -2204,11 +2308,11 @@ function Participant() {
                     <div className="waitbox">
                       <span className="pulse" />
                       <div>
-                        <b>Jawaban unit Anda sudah tercatat.</b>
+                        <b>{t("Jawaban unit Anda sudah tercatat.")}</b>
                         <p>
-                          {iHaveEssay
+                          {t(iHaveEssay
                             ? "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi."
-                            : "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi."}
+                            : "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi.")}
                         </p>
                       </div>
                     </div>
@@ -2228,16 +2332,16 @@ function Participant() {
                       const next = cur.includes(i)
                         ? cur.filter((x) => x !== i)
                         : [...cur, i].sort((a, b) => a - b);
-                      setTicks((t) => ({ ...t, [q.qid]: next }));
+                      setTicks((m) => ({ ...m, [q.qid]: next }));
                       send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: next } });
                     };
                     return (
                       <div className="pq" key={q.qid}>
                         <p className="qtypeline">
                           <TypeBadge q={q} />
-                          <span>{TYPE_HINT[kindOf(q)]}</span>
+                          <span>{t(TYPE_HINT[kindOf(q)])}</span>
                         </p>
-                        <p className="pqtext">{q.text}</p>
+                        <p className="pqtext">{pick(q.text, q.alt)}</p>
                         {isMC || isCheck ? (
                           <>
                             <div className="opts">
@@ -2256,7 +2360,7 @@ function Participant() {
                                       ? toggle(i)
                                       : send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
                                     <span className="oglyph"><Glyph shape={o.shape} /></span>
-                                    <span className="otxt">{c.text}</span>
+                                    <span className="otxt">{pick(c.text, c.alt)}</span>
                                     {isCheck
                                       ? <span className={`otick ${picked ? "on" : ""}`} aria-hidden="true">
                                         {picked && (
@@ -2278,7 +2382,7 @@ function Participant() {
                                   <path d="M7 11V8a5 5 0 0110 0v3" />
                                   <rect x="4" y="11" width="16" height="9" rx="2.4" />
                                 </svg>
-                                Waktu habis, jawaban terkunci
+                                {t("Waktu habis, jawaban terkunci")}
                               </div>
                             ) : sent ? (
                               <>
@@ -2289,39 +2393,39 @@ function Participant() {
                                       <path d="M4 12.5l5.2 5.2L20 7" />
                                     </svg>
                                   </span>
-                                  Jawaban masuk{isCheck ? ` · ${cur.length} dicentang` : ""}
-                                  {sent.rank ? `, unit ${nth(sent.rank)} yang menjawab` : ""}
+                                  {t("Jawaban masuk")}{isCheck ? tf(" · {0} dicentang", cur.length) : ""}
+                                  {sent.rank ? tf(", unit {0} yang menjawab", nth(sent.rank)) : ""}
                                 </p>
                                 <p className="hint">
-                                  Ini jawaban untuk seluruh unit. {isCheck
+                                  {t("Ini jawaban untuk seluruh unit.")} {t(isCheck
                                     ? "Centang atau lepas kapan saja. Setiap perubahan langsung terkirim, dan waktu Anda mengikuti perubahan terakhir."
-                                    : "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda."}
+                                    : "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda.")}
                                 </p>
                               </>
                             ) : (
                               <p className="hint centre">
-                                Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.
+                                {t("Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.")}
                               </p>
                             )}
                           </>
                         ) : (
                           <>
-                            <textarea rows={5} placeholder="Tulis jawaban unit Anda" disabled={qUp}
+                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={qUp}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
                             <button className="btn wide" disabled={qUp}
                               onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
-                              {sent ? "Perbarui jawaban" : "Kirim jawaban"}
+                              {t(sent ? "Perbarui jawaban" : "Kirim jawaban")}
                             </button>
                             {qUp
-                              ? <div className="lockstamp">Waktu habis</div>
-                              : sent && <p className="hint centre">Terkirim. Masih bisa direvisi sampai jawaban ditutup.</p>}
+                              ? <div className="lockstamp">{t("Waktu habis")}</div>
+                              : sent && <p className="hint centre">{t("Terkirim. Masih bisa direvisi sampai jawaban ditutup.")}</p>}
                           </>
                         )}
                       </div>
                     );
                   })}
-                  {msg && <p className="sentnote">{msg}</p>}
+                  {msg && <p className="sentnote">{t(msg)}</p>}
                 </>
               ))}
 
@@ -2335,9 +2439,9 @@ function Participant() {
                       if (!a) {
                         return (
                           <div className="rescard miss" key={q.qid}>
-                            <p className="qtext small">{q.text}</p>
-                            <p className="rline">Tidak ada jawaban terkirim</p>
-                            {keyIdx && <KeyLine idx={keyIdx} text={k.texts ? k.texts.join("; ") : k.text} mine={false} />}
+                            <p className="qtext small">{pick(q.text, q.alt)}</p>
+                            <p className="rline">{t("Tidak ada jawaban terkirim")}</p>
+                            {keyIdx && <KeyLine idx={keyIdx} text={optText(q, keyIdx) || (k.texts ? k.texts.join("; ") : k.text)} mine={false} />}
                           </div>
                         );
                       }
@@ -2352,18 +2456,18 @@ function Participant() {
                                   ? <b className="gnum mono">{a.quality}</b>
                                   : <Glyph shape="circle" size={13} />}
                               </span>
-                              <b>{!shown ? "Jawaban terkirim"
-                                : a.quality == null ? "Belum dinilai" : `Nilai ${a.quality} dari 10`}</b>
+                              <b>{!shown ? t("Jawaban terkirim")
+                                : a.quality == null ? t("Belum dinilai") : tf("Nilai {0} dari 10", a.quality)}</b>
                               {graded && <span className="accpill">{qualityWord(a.quality)}</span>}
                             </div>
-                            <p className="qtext small">{q.text}</p>
+                            <p className="qtext small">{pick(q.text, q.alt)}</p>
                             {graded && <div className="ptsbig mono">+{(a.points || 0).toLocaleString()}</div>}
                             <div className="metarow">
-                              <span>Dijawab dalam <b className="mono">{(a.ms / 1000).toFixed(1)} dtk</b></span>
-                              {graded && <span>Nilai fasilitator <b className="mono">{a.quality}/10</b></span>}
+                              <span><Rich>{tf("Dijawab dalam ~{0} dtk~", (a.ms / 1000).toFixed(1))}</Rich></span>
+                              {graded && <span><Rich>{tf("Nilai fasilitator ~{0}/10~", a.quality)}</Rich></span>}
                             </div>
                             {shown && a.quality == null && (
-                              <p className="hint">Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.</p>
+                              <p className="hint">{t("Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.")}</p>
                             )}
                             <p className="essayback">{a.text}</p>
                           </div>
@@ -2392,30 +2496,30 @@ function Participant() {
                                       strokeWidth="3.4" strokeLinecap="round">
                                       <path d="M6 6l12 12M18 6L6 18" /></svg>}
                             </span>
-                            <b>{!state?.keyShown ? "Jawaban terkirim"
+                            <b>{t(!state?.keyShown ? "Jawaban terkirim"
                               : a.correct == null ? "Tidak dinilai otomatis"
                                 : a.correct ? (tiered ? "Jawaban terbaik" : "Benar")
                                   : part ? (tiered ? "Belum optimal" : "Benar sebagian")
-                                    : "Salah"}</b>
+                                    : "Salah")}</b>
                             {state?.keyShown && !tiered && a.acc != null && a.acc < 1 && a.acc > 0 && (
-                              <span className="accpill">{Math.round(a.acc * 100)}% dari kunci</span>
+                              <span className="accpill">{tf("{0}% dari kunci", Math.round(a.acc * 100))}</span>
                             )}
                           </div>
-                          <p className="qtext small">{q.text}</p>
+                          <p className="qtext small">{pick(q.text, q.alt)}</p>
                           {state?.keyShown && (
                             <div className="ptsbig mono">{a.points ? `+${a.points.toLocaleString()}` : "0"}</div>
                           )}
                           <div className="metarow">
-                            <span>Dijawab dalam <b className="mono">{(a.ms / 1000).toFixed(1)} dtk</b></span>
-                            {a.rank && <span>unit <b className="mono">{nth(a.rank)}</b> yang menjawab</span>}
+                            <span><Rich>{tf("Dijawab dalam ~{0} dtk~", (a.ms / 1000).toFixed(1))}</Rich></span>
+                            {a.rank && <span><Rich>{tf("unit ~{0}~ yang menjawab", nth(a.rank))}</Rich></span>}
                             {state?.keyShown && keyIdx && q.type === "checkbox" && (
-                              <span><b className="mono">{hits}</b> dari {keyIdx.length} kunci benar
-                                {wrong ? <>, <b className="mono">{wrong}</b> salah</> : null}</span>
+                              <span><Rich>{tf("~{0}~ dari {1} kunci benar", hits, keyIdx.length)
+                                + (wrong ? tf(", ~{0}~ salah", wrong) : "")}</Rich></span>
                             )}
                           </div>
-                          <KeyLine idx={mineIdx} text={a.text} mine />
+                          <KeyLine idx={mineIdx} text={optText(q, mineIdx) || a.text} mine />
                           {keyIdx && !a.correct && (
-                            <KeyLine idx={keyIdx} text={k.texts ? k.texts.join("; ") : k.text} mine={false} />
+                            <KeyLine idx={keyIdx} text={optText(q, keyIdx) || (k.texts ? k.texts.join("; ") : k.text)} mine={false} />
                           )}
                         </div>
                       );
@@ -2425,16 +2529,16 @@ function Participant() {
                         <b className="mono">{me.pct == null ? `${(me.total || 0).toLocaleString()} pts` : `${Math.round(me.pct)}%`}</b>
                         <span className="mono">
                           {(me.total || 0).toLocaleString()}
-                          {me.possible ? ` dari ${me.possible.toLocaleString()} poin yang tersedia untuk unit Anda` : " poin total"}
+                          {me.possible ? " " + tf("dari {0} poin yang tersedia untuk unit Anda", me.possible.toLocaleString()) : " " + t("poin total")}
                         </span>
                       </div>
                     )}
-                    <p className="hint centre">Fasilitator sedang memimpin diskusi.</p>
+                    <p className="hint centre">{t("Fasilitator sedang memimpin diskusi.")}</p>
                   </div>
                 ) : (
                   <div className="standby small">
-                    <h2>Jawaban sudah masuk</h2>
-                    <p className="muted">Fasilitator sedang memimpin diskusi.</p>
+                    <h2>{t("Jawaban sudah masuk")}</h2>
+                    <p className="muted">{t("Fasilitator sedang memimpin diskusi.")}</p>
                   </div>
                 )
               )}
@@ -2464,8 +2568,8 @@ const KeyLine = ({ idx, text, mine }) => {
         })}
       </span>
       <span>
-        {mine ? (many ? "Anda mencentang " : "Anda memilih ") : (many ? "Kuncinya adalah " : "Kuncinya adalah ")}
-        <b>{names}</b>{text ? `, yaitu ${text}` : ""}
+        {t(mine ? (many ? "Anda mencentang" : "Anda memilih") : "Kuncinya adalah")}{" "}
+        <b>{names}</b>{text ? tf(", yaitu {0}", text) : ""}
       </span>
     </div>
   );
@@ -2484,6 +2588,9 @@ function Screen() {
   const [settings, setSettings] = useState(null);
   const [people, setPeople] = useState([]);
   const [key, setKey] = useState({});
+
+  /* Proyektor menampilkan kedua bahasa bertumpuk lewat Dual: satu layar untuk
+     seluruh ruangan, jadi tidak ada satu bahasa yang harus dipilih. */
 
   const onMsg = useCallback((m) => {
     if (m.t === "screened") {
@@ -2506,10 +2613,9 @@ function Screen() {
   if (!roomId) {
     return (
       <div className="crash">
-        <h1>Alamatnya tidak memuat latihan</h1>
+        <h1>{t("Alamatnya tidak memuat latihan")}</h1>
         <p className="muted">
-          Buka tampilan proyektor dari layar fasilitator lewat tombol <b>Proyektor</b>,
-          supaya id latihannya ikut terbawa.
+          <Rich>{t("Buka tampilan proyektor dari layar fasilitator lewat tombol *Proyektor*, supaya id latihannya ikut terbawa.")}</Rich>
         </p>
       </div>
     );
@@ -2518,8 +2624,8 @@ function Screen() {
     return (
       <div className="projwait">
         <span className="pulse" />
-        <h1>Menunggu latihan</h1>
-        <p className="muted">{status === "live" ? "Tersambung." : "Menyambung ulang…"}</p>
+        <h1>{t("Menunggu latihan")}</h1>
+        <p className="muted">{t(status === "live" ? "Tersambung." : "Menyambung ulang…")}</p>
       </div>
     );
   }
@@ -2535,33 +2641,36 @@ function Screen() {
         <BrandLogo className="big" />
         <div>
           <p className="eyebrow">{inject?.siklus}</p>
-          <h1>Inject {inject?.id}</h1>
+          <h1>{tf("Inject {0}", inject?.id)}</h1>
         </div>
+        <span className="projlang"><LangToggle /></span>
         <span className={`projphase ${phase}`}>
           <span className="pulse" />
-          {phase === "lobby" ? "Menunggu"
+          {t(phase === "lobby" ? "Menunggu"
             : phase === "briefing" ? "Baca skenario"
               : phase === "open" ? "Sedang menjawab"
-                : state.keyShown ? "Kunci jawaban" : "Diskusi"}
+                : state.keyShown ? "Kunci jawaban" : "Diskusi")}
         </span>
       </div>
 
       <div className="projbody">
         {phase === "lobby" ? (
           <div className="projlobby">
-            <h2>Masukkan kode unit Anda</h2>
-            <p className="muted">Satu perangkat per unit bisnis.</p>
+            <h2>{t("Masukkan kode unit Anda")}</h2>
+            <p className="muted">{t("Satu perangkat per unit bisnis.")}</p>
           </div>
         ) : (
           <div className="projmid">
             <div className="projleft">
-              {inject?.condition && <p className="projcond">{inject.condition}</p>}
+              {inject?.condition && (
+                <Dual className="projcond" text={inject.condition} alt={inject.conditionAlt} />
+              )}
               {shown.map((q) => {
                 const k = key[q.qid];
                 return (
                   <div className="projq" key={q.qid}>
-                    <p className="projqtext">{q.text}</p>
-                    <p className="projtype">{TYPE_LABEL[kindOf(q)]}</p>
+                    <Dual className="projqtext" text={q.text} alt={q.alt} />
+                    <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
                     {q.choices?.length > 0 && (
                       <div className="projopts">
                         {q.choices.map((c, i) => {
@@ -2572,7 +2681,7 @@ function Screen() {
                           return (
                             <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
                               <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
-                              <span className="otxt">{c.text}</span>
+                              <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
                               {n != null && <span className="on mono">{n}</span>}
                             </div>
                           );
@@ -2590,7 +2699,7 @@ function Screen() {
         )}
 
         <div className="projstrip">
-          <span className="lab">Kode</span>
+          <span className="lab">{t("Kode")}</span>
           {deck.roles.map((r, i) => {
             const code = Object.keys(codes).find((c) => codes[c] === r);
             const seat = seatOf(r);
@@ -2607,7 +2716,7 @@ function Screen() {
               </span>
             );
           })}
-          {status !== "live" && <span className="offline">Menyambung ulang</span>}
+          {status !== "live" && <span className="offline">{t("Menyambung ulang")}</span>}
         </div>
       </div>
     </div>
@@ -2695,7 +2804,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
     const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Unit kerja",
       "Jawaban unit", "Benar", "Akurasi", "Detik", "Poin", "Poin unit", "Maks unit", "Skor unit %",
       "Nilai esai (1-10)", "Waktu menjawab (detik)", "Catatan"];
-    const lines = [head.map(esc).join(",")];
+    const lines = [head.map((h) => esc(t(h))).join(",")];
     model.injects.forEach((inj) => {
       const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
       inj.questions.forEach((q) => {
@@ -2705,7 +2814,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
           const poss = possibleFor(q.peran);
           lines.push([inj.siklus, inj.id, q.peran, q.text, q.type, q.answerRaw,
             p ? unitOf(p.peran) : "", a?.text || "",
-            a?.correct == null ? "" : a.correct ? "Ya" : a.acc > 0 ? "Sebagian" : "Tidak",
+            a?.correct == null ? "" : t(a.correct ? "Ya" : a.acc > 0 ? "Sebagian" : "Tidak"),
             a?.acc == null ? "" : Math.round(a.acc * 100) + "%",
             a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
             p ? p.total ?? "" : "", poss || "",
@@ -2764,7 +2873,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
     const head = ["Siklus", "Inject", "Unit ditanya", "Jumlah soal", "Soal esai", "Jawaban masuk",
       "Diharapkan", "Penuh", "Sebagian", "Nol", "Akurasi rata rata", "Rata nilai esai",
       "Esai belum dinilai", "Rata detik", "Tercepat", "Terlama", "Poin"];
-    const lines = [head.map(esc).join(",")];
+    const lines = [head.map((h) => esc(t(h))).join(",")];
     byInject.forEach((d) => lines.push([d.siklus, d.id, d.units, d.questions, d.essays,
       d.answered, d.expected, d.full, d.partial, d.zero,
       d.acc == null ? "" : Math.round(d.acc * 100) + "%",
@@ -2784,27 +2893,25 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
 
   return (
     <>
-      <Bar left={<b className="wordmark">Debrief · {fileName}</b>} onExit={onBack} exitLabel="Kembali" />
+      <Bar left={<b className="wordmark">{t("Debrief")} · {fileName}</b>} onExit={onBack} exitLabel={t("Kembali")} />
       <main className="report">
         <div className="repinner">
-          <h1>Hasil latihan</h1>
+          <h1>{t("Hasil latihan")}</h1>
           <div className="kpis">
-            <div><b className="mono">{people.length}</b><span>unit ikut</span></div>
-            <div><b className="mono">{all.length}</b><span>pertanyaan</span></div>
-            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "·"}</b><span>jawaban benar</span></div>
+            <div><b className="mono">{people.length}</b><span>{t("unit ikut")}</span></div>
+            <div><b className="mono">{all.length}</b><span>{t("pertanyaan")}</span></div>
+            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "·"}</b><span>{t("jawaban benar")}</span></div>
             <div><b className="mono">{avgPct == null ? "·" : `${Math.round(avgPct)}%`}</b>
-              <span>rata-rata skor unit</span>
-              <em className="kpisub mono">{totalPts.toLocaleString()} poin total</em></div>
+              <span>{t("rata-rata skor unit")}</span>
+              <em className="kpisub mono">{tf("{0} poin total", totalPts.toLocaleString())}</em></div>
           </div>
 
           {settings.mode === "auto" && settings.leaderboard && board.length > 0 && (
             <>
-              <h3>Posisi tiap unit</h3>
+              <h3>{t("Posisi tiap unit")}</h3>
               <p className="hint boardnote">
-                Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah
-                pertanyaan per unit tidak selalu sama.{uneven
-                  ? " Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak."
-                  : ""}
+                {t("Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah pertanyaan per unit tidak selalu sama.")}
+                {uneven ? " " + t("Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.") : ""}
               </p>
               <ol className="board">
                 {board.map((p, i) => (
@@ -2820,12 +2927,12 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
                       <b className="mono">{p.pct == null ? "·" : `${Math.round(p.pct)}%`}</b>
                       <em className="mono">
                         {(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}
-                        {p.asked ? ` · ${p.asked} soal` : ""}
+                        {p.asked ? " · " + tf("{0} soal", p.asked) : ""}
                       </em>
                     </span>
                     {p.asked > 0 && p.asked < 3 && (
-                      <span className="thin" title="Soalnya terlalu sedikit untuk dibandingkan dengan unit lain">
-                        belum cukup data
+                      <span className="thin" title={t("Soalnya terlalu sedikit untuk dibandingkan dengan unit lain")}>
+                        {t("belum cukup data")}
                       </span>
                     )}
                   </li>
@@ -2834,17 +2941,15 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
             </>
           )}
 
-          <h3>Statistik per Inject</h3>
+          <h3>{t("Statistik per Inject")}</h3>
           <p className="hint">
-            Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan
-            pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan
-            pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.
+            {t("Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.")}
           </p>
           <div className="tblwrap">
             <table className="tbl">
-              <thead><tr><th>Inject</th><th>Unit</th><th>Soal</th><th>Menjawab</th>
-                <th>Penuh</th><th>Sebagian</th><th>Nol</th><th>Akurasi</th>
-                <th>Esai</th><th>Rata detik</th><th>Tercepat</th><th>Terlama</th><th>Poin</th></tr></thead>
+              <thead><tr><th>{t("Inject")}</th><th>{t("Unit")}</th><th>{t("Soal")}</th><th>{t("Menjawab")}</th>
+                <th>{t("Penuh")}</th><th>{t("Sebagian")}</th><th>{t("Nol")}</th><th>{t("Akurasi")}</th>
+                <th>{t("Esai")}</th><th>{t("Rata detik")}</th><th>{t("Tercepat")}</th><th>{t("Terlama")}</th><th>{t("Poin")}</th></tr></thead>
               <tbody>
                 {byInject.map((d) => (
                   <tr key={d.id}>
@@ -2857,8 +2962,8 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
                     <td className="mono">{d.zero || "·"}</td>
                     <td className="mono strong">{d.acc == null ? "·" : `${Math.round(d.acc * 100)}%`}</td>
                     <td className="mono">
-                      {d.essays ? (d.quality == null ? `${d.essays} soal` : `${d.quality.toFixed(1)}/10`) : "·"}
-                      {d.ungraded ? <em className="ungraded"> {d.ungraded} belum dinilai</em> : null}
+                      {d.essays ? (d.quality == null ? tf("{0} soal", d.essays) : `${d.quality.toFixed(1)}/10`) : "·"}
+                      {d.ungraded ? <em className="ungraded"> {tf("{0} belum dinilai", d.ungraded)}</em> : null}
                     </td>
                     <td className="mono">{d.secs == null ? "·" : d.secs.toFixed(1)}</td>
                     <td className="mono dimcell">{d.fastest == null ? "·" : d.fastest.toFixed(1)}</td>
@@ -2870,12 +2975,12 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
             </table>
           </div>
 
-          <h3>Rincian per Peran</h3>
+          <h3>{t("Rincian per Peran")}</h3>
           <div className="tblwrap">
             <table className="tbl">
-              <thead><tr><th>Peran</th><th>Ditanya</th><th>Benar</th><th>Sebagian</th>
-                <th>Akurasi</th><th>Poin</th><th>Maks</th><th>Skor</th>
-<th>Nilai esai</th></tr></thead>
+              <thead><tr><th>{t("Peran")}</th><th>{t("Ditanya")}</th><th>{t("Benar")}</th><th>{t("Sebagian")}</th>
+                <th>{t("Akurasi")}</th><th>{t("Poin")}</th><th>{t("Maks")}</th><th>{t("Skor")}</th>
+<th>{t("Nilai esai")}</th></tr></thead>
               <tbody>
                 {Object.entries(byRole).map(([role, d]) => (
                   <tr key={role}>
@@ -2889,7 +2994,7 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
                     <td className="mono strong">{d.pct == null ? "·" : `${Math.round(d.pct)}%`}</td>
                     <td className="mono">
                       {d.scored ? `${(d.sum / d.scored).toFixed(1)}/10` : "·"}
-                      {d.ungraded ? <em className="ungraded"> {d.ungraded} belum dinilai</em> : null}
+                      {d.ungraded ? <em className="ungraded"> {tf("{0} belum dinilai", d.ungraded)}</em> : null}
                     </td>
                   </tr>
                 ))}
@@ -2898,12 +3003,12 @@ function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran
           </div>
 
           <div className="repactions">
-            <button className="btn" onClick={exportCSV}>Unduh CSV jawaban</button>
-            <button className="btn quiet" onClick={exportStats}>Unduh statistik inject</button>
-            <button className="btn quiet" onClick={onBack}>Kembali ke latihan</button>
-            <button className="btn danger" onClick={onEnd}>Akhiri sesi</button>
+            <button className="btn" onClick={exportCSV}>{t("Unduh CSV jawaban")}</button>
+            <button className="btn quiet" onClick={exportStats}>{t("Unduh statistik inject")}</button>
+            <button className="btn quiet" onClick={onBack}>{t("Kembali ke latihan")}</button>
+            <button className="btn danger" onClick={onEnd}>{t("Akhiri sesi")}</button>
           </div>
-          <p className="hint">Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.</p>
+          <p className="hint">{t("Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.")}</p>
         </div>
       </main>
     </>
@@ -3044,6 +3149,18 @@ html,body{background:var(--ink)}
 .ptsbadge{font-size:14px;font-weight:700;color:var(--signal-text)}
 
 /* ---------- theme switch ---------- */
+.langbtn{display:inline-flex;align-items:center;gap:2px;height:34px;padding:0 4px;border-radius:10px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);flex:none}
+.langbtn b{font-family:var(--disp);font-size:10.5px;font-weight:800;letter-spacing:.05em;
+  padding:5px 7px;border-radius:7px;color:var(--faint)}
+.langbtn b.on{background:var(--signal);color:var(--signal-ink)}
+/* Terjemahan di bawah teks utama. Selalu satu blok tersendiri supaya tidak pernah
+   menyambung jadi satu kalimat dengan bahasa pertama. */
+.ttx .altline{display:block;margin-top:6px;color:var(--faint);font-size:.88em;
+  font-style:italic;line-height:1.45}
+.ttx .projcond .altline,.ttx .projqtext .altline{margin-top:10px;font-size:.78em}
+.ttx .projopt .altline{margin-top:2px;font-size:.8em}
+.ttx .qtext .altline,.ttx .pqtext .altline{font-weight:400}
 .themebtn{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;
   color:var(--dim);background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);
   transition:color .14s,box-shadow .14s}
@@ -3457,7 +3574,8 @@ html,body{background:var(--ink)}
 .projtop{display:flex;align-items:center;gap:20px;padding:22px 34px;background:var(--slab);
   border-bottom:1px solid var(--edge2)}
 .projtop h1{font-size:26px;margin:2px 0 0}
-.projphase{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
+.projlang{margin-left:auto}
+.projphase{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
   letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
 .projphase .pulse{margin:0;width:12px;height:12px}
 .projphase.revealed{color:var(--signal-text)}
@@ -3590,3 +3708,338 @@ html,body{background:var(--ink)}
 }
 @media (prefers-reduced-motion:reduce){.ttx *{animation:none!important;transition:none!important}}
 `;
+
+/* ========================= KAMUS BAHASA INGGRIS =========================
+   Kunci: kalimat bahasa Indonesia persis seperti yang ditulis di kode.
+   Kalimat yang tidak ada di sini tampil apa adanya, jadi menambah teks baru
+   tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
+   nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
+const EN = {
+  " · {0} dicentang": " · {0} ticked",
+  ", esai {0}": ", essay {0}",
+  ", tapi sedang offline": ", but is currently offline",
+  ", unit {0} yang menjawab": ", the {0} unit to answer",
+  ", yaitu {0}": ", namely {0}",
+  ", ~{0}~ salah": ", ~{0}~ wrong",
+  ". Waktu menjawab pilihan {0}": ". Answer time for choice questions {0}",
+  ". Waktu menulis esai {0}": ". Essay writing time {0}",
+  "Acak": "Shuffle",
+  "Ada yang rusak": "Something broke",
+  "Akhiri sesi": "End session",
+  "Akses Anda dicabut oleh pemilik ruangan.": "Your access was revoked by the room owner.",
+  "Akurasi": "Accuracy",
+  "Akurasi rata rata": "Average accuracy",
+  "Alamatnya tidak memuat latihan": "This address carries no exercise",
+  "Ambil alih kursi": "Take over the seat",
+  "Ambil kursi": "Take the seat",
+  "Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.": "You may start before anyone has joined. Units that join later drop straight into the inject already running.",
+  "Anda masuk sebagai": "You are signed in as",
+  "Anda memantau. Perpindahan inject dipegang fasilitator utama.": "You are observing. Moving between injects is held by the lead facilitator.",
+  "Anda memilih": "You chose",
+  "Anda mencentang": "You ticked",
+  "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama.": "You grade essays and write notes. Moving between injects is held by the lead facilitator.",
+  "atau jatuhkan di sini": "or drop it here",
+  "Baca skenario": "Read the scenario",
+  "Baca skenarionya. Pertanyaan segera dibuka": "Read the scenario. The questions open shortly",
+  "Bahasa": "Language",
+  "Batal": "Cancel",
+  "Batas waktu default (detik, 0 = tanpa batas)": "Default time limit (seconds, 0 = no limit)",
+  "Batas waktu esai (detik, 0 = tanpa batas)": "Essay time limit (seconds, 0 = no limit)",
+  "Belum ada kabar dari server.": "Nothing from the server yet.",
+  "Belum ada kode.": "No codes yet.",
+  "Belum ada unit yang mengambil kursi untuk inject ini": "No unit has taken a seat for this inject yet",
+  "belum cukup data": "not enough data",
+  "belum dinilai": "not yet graded",
+  "Belum dinilai": "Not yet graded",
+  "Belum optimal": "Not optimal",
+  "Benar": "Correct",
+  "Benar sebagian": "Partly correct",
+  "Bergabung sebagai fasilitator": "Join as a facilitator",
+  "Bersihkan dan mulai ulang": "Clear and restart",
+  "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.": "Stars can also be tiered when one answer is better and another is weaker. `***` for the best, `**` for acceptable, `*` for weak, no star for wrong. Points are scaled against the highest tier in that question, so `3 2 1` and `30 20 10` give the same result.",
+  "Bisa memajukan fase, membuka jawaban, menampilkan kunci, dan menilai esai.": "Can advance the phase, open answering, show the key, and grade essays.",
+  "Bisa menilai esai dan menulis catatan. Tidak bisa memajukan fase.": "Can grade essays and write notes. Cannot advance the phase.",
+  "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.": "Weights can also be set by hand with a number in square brackets, at the start or the end of the line: `[3] B. Verify the alert` or `B. Verify the alert [3]`. Zero means the option is worth nothing. A manual weight overrides stars, and the numbers are still scaled against the highest number in that question.",
+  "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.": "More than one is allowed. A wrong tick cancels out a correct one.",
+  "Briefing": "Briefing",
+  "Buat kode": "Create code",
+  "Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.": "Create one code per person and decide yourself what they may do. This is not a unit code, so participants cannot use it to join.",
+  "buka jawaban": "open answering",
+  "Buka jawaban": "Open answers",
+  "Buka lagi": "Open again",
+  "Buka ruangan": "Open the room",
+  "Buka tampilan proyektor": "Open the projector view",
+  "Buka tampilan proyektor dari layar fasilitator lewat tombol *Proyektor*, supaya id latihannya ikut terbawa.": "Open the projector view from the facilitator screen with the *Projector* button, so the exercise id comes along.",
+  "Buka untuk menjawab": "Open for answering",
+  "Cabut": "Revoke",
+  "Catatan": "Notes",
+  "Catatan fasilitator": "Facilitator notes",
+  "Centang atau lepas kapan saja. Setiap perubahan langsung terkirim, dan waktu Anda mengikuti perubahan terakhir.": "Tick or untick at any time. Every change is sent immediately, and your time follows the last change.",
+  "Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi, bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.": "Try clearing first. If it comes straight back, this is an application fault, not your device. Send this message to the exercise organiser.",
+  "Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali tanpa kehilangan apa pun.": "The server refreshes this list every eight seconds. If your screen feels behind the other facilitators, press resync: it disconnects and reconnects without losing anything.",
+  "dari {0} kursi": "of {0} seats",
+  "dari {0} poin yang tersedia untuk unit Anda": "of {0} points available to your unit",
+  "Debrief": "Debrief",
+  "detik": "seconds",
+  "Detik": "Seconds",
+  "Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.": "In this exercise they are not the same, so raw points would favour whoever was asked more.",
+  "Dibuat internal dengan bantuan AI": "Built in house with AI assistance",
+  "Diharapkan": "Expected",
+  "Dijawab dalam ~{0} dtk~": "Answered in ~{0} s~",
+  "Diskusi": "Discussion",
+  "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat.": "Discuss first. Reveal the key once the room has finished arguing.",
+  "Ditanya": "Asked",
+  "Ditanyakan ke": "Asked of",
+  "Ditentukan oleh yang men-deploy aplikasi ini": "Set by whoever deployed this application",
+  "Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah pertanyaan per unit tidak selalu sama.": "Ranked by each unit's percentage of its own maximum, because the number of questions per unit is not always the same.",
+  "Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.": "Four characters from the facilitator. This code places your device in the right unit. One device per unit, so use the code given to your unit.",
+  "esai": "essay",
+  "Esai": "Essay",
+  "Esai belum dinilai": "Essays not graded",
+  "Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.": "Essays are graded by the facilitator after the discussion. The number appears here once it is graded.",
+  "Fasilitator": "Facilitator",
+  "Fasilitator di ruangan ini": "Facilitators in this room",
+  "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.": "The facilitator reads the code out, or you can see it on the projector screen.",
+  "Fasilitator sedang memimpin diskusi.": "The facilitator is leading the discussion.",
+  "File itu tidak bisa dibaca. Simpan sebagai .xlsx atau .csv lalu coba lagi.": "That file could not be read. Save it as .xlsx or .csv and try again.",
+  "Ganti ke tema gelap": "Switch to dark theme",
+  "Ganti ke tema terang": "Switch to light theme",
+  "Hanya melihat jalannya latihan.": "Watches the exercise only.",
+  "Hapus sesi tersimpan": "Delete saved session",
+  "Hasil latihan": "Exercise results",
+  "Hubungi pemilik ruangan kalau Anda perlu hak yang lain.": "Contact the room owner if you need different rights.",
+  "Ini jawaban untuk seluruh unit.": "This is the answer for the whole unit.",
+  "Inject": "Inject",
+  "Inject berikutnya": "Next inject",
+  "Inject ini tidak melibatkan unit Anda. Simak saja.": "This inject does not involve your unit. Just follow along.",
+  "Inject ini tidak punya esai": "This inject has no essay",
+  "Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.": "This inject has no scenario text. Deliver it from your own notes.",
+  "Inject {0}": "Inject {0}",
+  "Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.": "Inject {0} has more than one Situation. Only the first is shown.",
+  "Inject {0} tidak punya teks Kondisi.": "Inject {0} has no Situation text.",
+  "Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.": "Inject {0}: marked as checkbox but the Answer cell holds no options, so it is treated as an essay.",
+  "jawaban benar": "correct answers",
+  "Jawaban masuk": "Answer received",
+  "Jawaban model": "Model answer",
+  "Jawaban sudah dibuka.": "Answering is open.",
+  "Jawaban sudah ditutup.": "Answering is closed.",
+  "Jawaban sudah masuk": "Your answer is in",
+  "Jawaban teks bebas, dinilai fasilitator setelah diskusi.": "Free text answer, graded by the facilitator after the discussion.",
+  "Jawaban terbaik": "Best answer",
+  "Jawaban terkirim": "Answer sent",
+  "Jawaban unit": "Unit answer",
+  "Jawaban unit Anda sudah tercatat.": "Your unit's answer has been recorded.",
+  "Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.": "The number of scored questions per unit is uneven ({0}). Raw points would favour whoever was asked more, so the ranking is computed from each unit's percentage of its own maximum. Raw points are still shown.",
+  "Jumlah soal": "Questions",
+  "Kata sandi fasilitator": "Facilitator password",
+  "Kata sandi itu tidak diterima.": "That password was not accepted.",
+  "ke-{0}": "{0}",
+  "Kelonggaran mengetik esai (detik)": "Essay typing allowance (seconds)",
+  "Keluar": "Leave",
+  "Kembali": "Back",
+  "Kembali ke latihan": "Back to the exercise",
+  "Kembali ke ruang tunggu": "Back to the waiting room",
+  "Kendali penuh": "Full control",
+  "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda.": "Tap another box to change it. Only the last choice counts, and that is what sets your time.",
+  "Kirim jawaban": "Send answer",
+  "Kode": "Code",
+  "KODE": "CODE",
+  "Kode fasilitator": "Facilitator codes",
+  "Kode fasilitator itu tidak dikenali.": "That facilitator code is not recognised.",
+  "Kode unit Anda": "Your unit code",
+  "Kolom *Tipe* opsional menentukan langsung: `pg`, `checkbox` atau `esai`. Kosongkan, atau hilangkan kolomnya, dan bentuk sel Jawaban yang menentukan.": "The optional *Type* column decides outright: `choice`, `checkbox` or `essay`. Leave it blank, or leave the column out, and the shape of the Answer cell decides.",
+  "Kondisi": "Situation",
+  "Kosongkan semua, ikuti angka default": "Clear them all and follow the default",
+  "kuat": "strong",
+  "Kunci jawaban": "Answer key",
+  "Kunci jawaban sudah tampil di semua layar.": "The answer key is showing on every screen.",
+  "Kuncinya adalah": "The key is",
+  "kurang dari semenit": "less than a minute",
+  "kursi": "seats",
+  "Kursi": "Seats",
+  "kursi kosong": "seat open",
+  "Kursi sudah terisi": "Seat already taken",
+  "Lama tiap unit boleh menjawab. Kosong berarti memakai default, {0} detik untuk pilihan dan {1} detik untuk esai. Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya bisa diubah saat latihan berjalan.": "How long each unit may answer. Blank means the default is used, {0} seconds for choice questions and {1} seconds for essays. Filled from the Time and Essay Time columns if your sheet has them, and both can be changed while the exercise is running.",
+  "lanjut": "next",
+  "Lanjut ke inject {0}": "Continue to inject {0}",
+  "Laporan": "Report",
+  "Latihan Tabletop": "Tabletop Exercise",
+  "lemah": "weak",
+  "Lepas": "Release",
+  "Lihat jawaban model": "Show model answer",
+  "Maks": "Max",
+  "Maks unit": "Unit max",
+  "Manual (Anda yang menilai)": "Manual (you grade)",
+  "Masuk": "Sign in",
+  "Masukkan kode unit Anda": "Enter your unit code",
+  "memadai": "adequate",
+  "Memeriksa…": "Checking…",
+  "Memuat": "Loading",
+  "Menambah kedua jam": "Adds to both clocks",
+  "Menambah waktu menjawab": "Adds to the answering time",
+  "Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.": "Ending the session deletes the room for everyone. Download the CSV first.",
+  "Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.": "Taking over evicts the other device, and this unit's answers and points stay intact. Use this if your unit changed device or lost the page.",
+  "Mengambil kursi untuk": "Taking the seat for",
+  "Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.": "Returns every device to standby. Your scores and notes are kept.",
+  "Menjawab": "Answering",
+  "Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.": "Answered counts the questions actually submitted, against the questions whose unit was present in the room. Average accuracy covers choice questions only, while essays are reported as an average grade from 1 to 10.",
+  "Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu dan menunggu, dan inject baru tertutup setelah jam terpanjang habis. Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong nilai.": "Writing an essay takes longer than tapping a box, so essays have their own clock. Units that only get choice questions finish first and wait, and an inject closes only once the longest clock has run out. The typing allowance is added to the essay clock and does not count as lateness, so the time spent typing and pressing send does not cut the score.",
+  "Menunggu": "Waiting",
+  "Menunggu fasilitator memulai.": "Waiting for the facilitator to start.",
+  "Menunggu jawaban, {0} dari {1} unit sudah duduk": "Waiting for answers, {0} of {1} units seated",
+  "Menunggu latihan": "Waiting for an exercise",
+  "Menyambung ulang": "Reconnecting",
+  "Menyambung ulang…": "Reconnecting…",
+  "Mode penilaian": "Scoring mode",
+  "Muat contoh latihan saja": "Load the sample exercise instead",
+  "Muat sheet inject Anda": "Load your inject sheet",
+  "Mulai baru": "Start fresh",
+  "Mulai latihan": "Start the exercise",
+  "Muncul di daftar fasilitator, opsional": "Shows in the facilitator list, optional",
+  "Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.": "It may have expired, or the service restarted without a storage volume.",
+  "Nama Anda": "Your name",
+  "Nama Anda, opsional": "Your name, optional",
+  "Nama atau keterangan, opsional": "Name or description, optional",
+  "Nilai": "Grade",
+  "Nilai 1 sampai 10": "Grade 1 to 10",
+  "Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih menambah hingga separuh. Unit melihat angkanya begitu Anda menekan * Tampilkan kunci jawaban*.": "Grade 1 to 10. The final points come from that grade, and answering early still adds up to half again. The unit sees the number as soon as you press * Show answer key*.",
+  "Nilai esai": "Essay grade",
+  "Nilai esai (1-10)": "Essay grade (1-10)",
+  "Nilai fasilitator ~{0}/10~": "Facilitator grade ~{0}/10~",
+  "Nilai {0} dari 10": "Graded {0} out of 10",
+  "Nol": "Zero",
+  "Nomor inject {0} dipakai di lebih dari satu siklus. Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.": "Inject number {0} is used in more than one cycle. Those rows were merged into one inject. Give them different numbers if they should be separate.",
+  "Otomatis (pilihan)": "Automatic (choice)",
+  "Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan tanpa opsi selalu jatuh ke penilaian manual.": "Automatic scores choice answers on correctness and speed. Manual leaves answers unscored so you can grade them after the discussion. Questions with no options always fall to manual grading.",
+  "Pemantau": "Observer",
+  "Pemilik ruangan": "Room owner",
+  "Penilai": "Grader",
+  "Penilaian": "Scoring",
+  "Penuh": "Full",
+  "Peran": "Role",
+  "Perangkat lain": "Another device",
+  "Perangkat lain mengambil kursi unit ini": "Another device took this unit's seat",
+  "Perbarui jawaban": "Update answer",
+  "pertanyaan": "questions",
+  "Pertanyaan": "Question",
+  "Pertanyaan di inject ini": "Questions in this inject",
+  "Pilih file": "Choose file",
+  "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.": "Pick one answer. Each option can be worth a different amount.",
+  "Pilih semua yang sesuai": "Tick all that apply",
+  "pilihan": "choice",
+  "Pilihan": "Choice",
+  "Pilihan berbobot": "Weighted choice",
+  "pindah inject": "move inject",
+  "Pindahkan semua ke inject {0}?": "Move everyone to inject {0}?",
+  "poin": "points",
+  "Poin": "Points",
+  "Poin per pertanyaan": "Points per question",
+  "poin total": "points in total",
+  "Poin unit": "Unit points",
+  "Posisi tiap unit": "Where each unit stands",
+  "proyektor": "projector",
+  "Proyektor": "Projector",
+  "Rata detik": "Avg seconds",
+  "Rata nilai esai": "Avg essay grade",
+  "rata-rata skor unit": "average unit score",
+  "Rincian per Peran": "Breakdown by Role",
+  "Salah": "Wrong",
+  "sangat kuat": "very strong",
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional and sets how long that inject may be answered, in minutes.",
+  "Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.": "One answer for the whole unit. Decide together, then tap.",
+  "satu kursi": "one seat",
+  "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused.",
+  "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak. Ubah kode mana pun, atau buat yang baru.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused. Change any code, or generate new ones.",
+  "Satu perangkat per unit bisnis.": "One device per business unit.",
+  "Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit harus mulai dari nol.": "One device per unit. A unit that loses its page can enter its code again and reclaim the seat with its answers intact. Release a seat only if a unit has to start from nothing.",
+  "sebagian": "partial",
+  "Sebagian": "Partial",
+  "Sebelum mulai": "Before you start",
+  "Sebelumnya": "Previous",
+  "sedang menjawab": "answering",
+  "Sedang menjawab": "Answering now",
+  "Sedang terhubung": "Currently connected",
+  "Selesai": "Finish",
+  "Sembunyikan jawaban model": "Hide model answer",
+  "Sembunyikan nama unit": "Hide unit names",
+  "Semua unit sudah menjawab": "Every unit has answered",
+  "Sesi Anda terputus dari ruangan. Masukkan lagi kode fasilitator Anda.": "Your session was cut off from the room. Enter your facilitator code again.",
+  "Sesi ini sudah tidak ada di server": "This session no longer exists on the server",
+  "Sheet dua bahasa ditulis dalam sel yang sama. Bahasa Indonesia di atas, satu baris berisi `---` sebagai pemisah, bahasa Inggris di bawah. Berlaku untuk sel Kondisi, Pertanyaan dan Jawaban. Pada sel Jawaban, urutan opsi di blok kedua mengikuti blok pertama, dan bintang atau bobot cukup ditulis di blok pertama saja. Sheet yang hanya satu bahasa tidak perlu diubah.": "A bilingual sheet is written in the same cell. The first language on top, one line holding `---` as the separator, the second language below. This works for the Situation, Question and Answer cells. In an Answer cell, the options in the second block follow the order of the first, and stars or weights need only be written in the first block. A single language sheet needs no change.",
+  "Sheet ini tidak berisi baris data.": "This sheet holds no data rows.",
+  "Siklus": "Cycle",
+  "Sinkronkan ulang": "Resync",
+  "sisa": "left",
+  "Skor": "Score",
+  "Skor unit %": "Unit score %",
+  "Soal": "Questions",
+  "Soal esai": "Essay questions",
+  "Soalnya terlalu sedikit untuk dibandingkan dengan unit lain": "Too few questions to compare with the other units",
+  "Spasi": "Space",
+  "Statistik per Inject": "Statistics by Inject",
+  "Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.": "Has someone already opened the room? Enter the facilitator code the room owner gave you. That code decides what you may do.",
+  "sudah duduk": "seated",
+  "sudah duduk · offline": "seated · offline",
+  "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab.": "Showing on every device. Read it out, then open the answering time.",
+  "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.": "Showing on every device. Waiting for the lead facilitator to open the answering time.",
+  "Tambah": "Add",
+  "Tampilan di layar": "What the screens show",
+  "tampilkan kunci": "show key",
+  "Tampilkan kunci jawaban": "Show answer key",
+  "Tampilkan nama unit": "Show unit names",
+  "tanpa nama": "no name",
+  "Tercepat": "Fastest",
+  "Terkirim.": "Sent.",
+  "Terkirim. Masih bisa direvisi sampai jawaban ditutup.": "Sent. You can still revise it until answering closes.",
+  "Terlama": "Slowest",
+  "Tersambung": "Connected",
+  "Tersambung.": "Connected.",
+  "Tidak": "No",
+  "Tidak ada inject yang terbaca. Pastikan baris header ada di baris pertama.": "No inject could be read. Make sure the header row is the first row.",
+  "Tidak ada jawaban terkirim": "No answer was sent",
+  "Tidak ada kolom yang cocok untuk \"{0}\". Periksa ejaan baris header.": "No column matches \"{0}\". Check the spelling in the header row.",
+  "Tidak ada latihan dengan kode itu.": "No exercise has that code.",
+  "Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.": "No option is marked correct in your sheet, so nothing earns a score.",
+  "Tidak dinilai otomatis": "Not scored automatically",
+  "Tim": "Team",
+  "Tipe": "Type",
+  "Tulis jawaban unit Anda": "Write your unit's answer",
+  "Tutup": "Close",
+  "Unduh CSV jawaban": "Download answers CSV",
+  "Unduh statistik inject": "Download inject statistics",
+  "unit": "units",
+  "Unit": "Unit",
+  "Unit Anda sudah masuk": "Your unit is in",
+  "Unit ditanya": "Units asked",
+  "unit ikut": "units taking part",
+  "Unit ini tidak menjawab.": "This unit did not answer.",
+  "Unit kerja": "Business unit",
+  "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi.": "Other units may still be writing essays. Wait for the facilitator to open the discussion.",
+  "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi.": "The units with essay questions are still writing, and essays are given a longer clock on purpose. Wait for the facilitator to open the discussion.",
+  "Unit {0}": "Unit {0}",
+  "unit ~{0}~ yang menjawab": "the ~{0}~ unit to answer",
+  "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.": "For a multiple choice question, write each option on its own line in the Answer cell (`A. …` / `B. …`) and put a `*` in front of the correct one. Mark *two or more options* and the question becomes tick all that apply.",
+  "Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: {0}.": "The inject order in the application differs from the row order in the sheet. What will run: {0}.",
+  "Waktu esai untuk inject ini": "Essay time for this inject",
+  "Waktu habis": "Time is up",
+  "Waktu habis, jawaban terkunci": "Time is up, the answer is locked",
+  "Waktu menjawab (detik)": "Answer window (seconds)",
+  "Waktu per inject": "Time per inject",
+  "Waktu untuk pertanyaan ini sudah habis.": "Time for this question has run out.",
+  "Ya": "Yes",
+  "Ya, lanjut": "Yes, continue",
+  "{0} belum dinilai": "{0} not yet graded",
+  "{0} dtk": "{0} s",
+  "{0} hal yang perlu dicek": "{0} things to check",
+  "{0} jam": "{0} hours",
+  "{0} menit": "{0} minutes",
+  "{0} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.": "{0} choice questions have no answer key. Put a * in front of the correct option, otherwise those questions are worth nothing.",
+  "{0} poin total": "{0} points in total",
+  "{0} soal": "{0} questions",
+  "{0} sudah memegang kursi ini selama {1}{2}. Satu unit hanya punya satu kursi, jadi perangkat ini tidak bisa ikut bergabung.": "{0} has held this seat for {1}{2}. A unit has only one seat, so this device cannot join as well.",
+  "{0} tingkat": "{0} tiers",
+  "{0} unit, {1} kursi": "{0} units, {1} seats",
+  "{0}% dari kunci": "{0}% of the key",
+  "{0}/{1} kunci": "{0}/{1} keys",
+  "~{0}~ dari {1} kunci benar": "~{0}~ of {1} keys correct",
+};
