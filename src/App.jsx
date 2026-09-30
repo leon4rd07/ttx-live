@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b33";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b34";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -473,9 +473,11 @@ function buildModel(rows) {
   flat.forEach((r) => {
     if (!byInject.has(r.inject)) {
       byInject.set(r.inject, { id: r.inject, siklus: r.siklus, window: r.window,
-        ewindow: r.ewindow, conditions: [], questions: [] });
+        ewindow: r.ewindow, seen: byInject.size, siklusAll: new Set(),
+        conditions: [], questions: [] });
     }
     const inj = byInject.get(r.inject);
+    if (r.siklus) inj.siklusAll.add(r.siklus);
     if (r.condition && !inj.conditions.includes(r.condition)) inj.conditions.push(r.condition);
     if (!inj.window && r.window) inj.window = r.window;
     if (!inj.ewindow && r.ewindow) inj.ewindow = r.ewindow;
@@ -521,12 +523,66 @@ function buildModel(rows) {
     });
   });
 
-  const num = (s) => { const m = String(s).match(/\d+/); return m ? parseInt(m[0], 10) : 9999; };
-  const injects = [...byInject.values()].map((inj) => {
+  /* Urutan inject.
+
+     Aturan lama membaca angka pertama yang ditemukan di mana pun dalam teks, jadi
+     siklus bernama "Sosialisasi Aplikasi 2026" dinilai 2026 dan terlempar ke
+     belakang, sedangkan siklus tanpa angka sama sekali dinilai 9999 dan selalu
+     jatuh paling akhir. Sekarang yang dibaca hanya angka di awal label, dan label
+     tanpa angka memakai urutan kemunculannya di sheet.
+
+     Nomor inject dibandingkan secara alami, potongan angka sebagai angka dan
+     potongan huruf sebagai huruf, sehingga 0.1 mendahului 1, 3 mendahului 3.K1,
+     dan 9 mendahului 10. */
+  const leadNum = (v) => {
+    const m = String(v ?? "").trim().match(/^(\d+(?:[.,]\d+)?)/);
+    return m ? parseFloat(m[1].replace(",", ".")) : null;
+  };
+  const chunks = (v) => String(v ?? "").trim().toLowerCase()
+    .split(/(\d+(?:\.\d+)?)/).filter((x) => x !== "")
+    .map((x) => (/^\d/.test(x) ? parseFloat(x) : x));
+  const natCmp = (a, b) => {
+    const x = chunks(a), y = chunks(b);
+    for (let i = 0; i < Math.min(x.length, y.length); i += 1) {
+      const p = x[i], q = y[i];
+      if (typeof p === "number" && typeof q === "number") { if (p !== q) return p - q; continue; }
+      const ps = String(p), qs = String(q);
+      if (ps !== qs) return ps < qs ? -1 : 1;
+    }
+    return x.length - y.length;
+  };
+
+  const sikOrder = new Map();      // label siklus -> urutan kemunculan di sheet
+  [...byInject.values()].forEach((i) => {
+    if (!sikOrder.has(i.siklus)) sikOrder.set(i.siklus, sikOrder.size);
+  });
+  /* Satu aturan saja untuk seluruh sheet, jangan dicampur. Kalau setiap siklus
+     diberi nomor di depan labelnya, nomor itu yang menentukan urutan. Begitu ada
+     satu saja yang tidak bernomor, seluruhnya memakai urutan baris di sheet,
+     karena di situ jelas penulisnya yang mengatur urutan, bukan penomoran. */
+  const allNumbered = [...sikOrder.keys()].every((label) => leadNum(label) != null);
+  const sikKey = (inj) => (allNumbered ? leadNum(inj.siklus) : sikOrder.get(inj.siklus));
+
+  const raw = [...byInject.values()].map((inj) => {
     const rs = [];
     inj.questions.forEach((q) => { if (!rs.includes(q.peran)) rs.push(q.peran); });
     return { ...inj, roles: rs, condition: inj.conditions[0] || "", splitNarrative: inj.conditions.length > 1 };
-  }).sort((a, b) => num(a.siklus) - num(b.siklus) || num(a.id) - num(b.id));
+  });
+  const injects = [...raw].sort((a, b) =>
+    sikKey(a) - sikKey(b) || natCmp(a.id, b.id) || a.seen - b.seen);
+  /* Kalau hasilnya tidak sama dengan urutan baris di sheet, katakan. Fasilitator
+     berhak tahu bahwa yang akan tayang bukan urutan yang ia lihat di Excel. */
+  const mixed = [...byInject.values()].filter((i) => i.siklusAll && i.siklusAll.size > 1);
+  if (mixed.length) {
+    warnings.push(
+      `Nomor inject ${mixed.map((i) => i.id).join(", ")} dipakai di lebih dari satu siklus. ` +
+      `Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.`);
+  }
+  if (injects.some((inj, i) => inj.id !== raw[i].id)) {
+    warnings.push(
+      `Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: ` +
+      injects.map((i) => i.id).join(", ") + ".");
+  }
 
   const allQ = injects.flatMap((i) => i.questions);
   const mc = allQ.filter((q) => q.type === "choice" || q.type === "checkbox").length;
