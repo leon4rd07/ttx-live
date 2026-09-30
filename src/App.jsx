@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b36";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b38";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -1287,21 +1287,21 @@ function Host({ onExit }) {
                   <p className="hint span2">
                     {t("Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu dan menunggu, dan inject baru tertutup setelah jam terpanjang habis. Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong nilai.")}
                   </p>
-                  <Check label="Bonus kecepatan" checked={settings.speedBonus}
+                  <Check label={t("Bonus kecepatan")} checked={settings.speedBonus}
                     onChange={(v) => patchSettings({ speedBonus: v })}
-                    hint="Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat." />
-                  <Check label="Buka jawaban otomatis saat waktu habis" checked={settings.autoReveal}
+                    hint={t("Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat.")} />
+                  <Check label={t("Buka jawaban otomatis saat waktu habis")} checked={settings.autoReveal}
                     onChange={(v) => patchSettings({ autoReveal: v })}
-                    hint="Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol." />
-                  <Check label="Tampilkan peringkat" checked={settings.leaderboard}
+                    hint={t("Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.")} />
+                  <Check label={t("Tampilkan peringkat")} checked={settings.leaderboard}
                     onChange={(v) => patchSettings({ leaderboard: v })}
-                    hint="Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan." />
+                    hint={t("Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.")} />
                 </>
               )}
 
-              <Check label="Tampilkan nama unit" checked={settings.showUnits}
+              <Check label={t("Tampilkan nama unit")} checked={settings.showUnits}
                 onChange={(v) => patchSettings({ showUnits: v })}
-                hint="Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa." />
+                hint={t("Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa.")} />
             </div>
 
             {settings.mode === "auto" && (
@@ -1484,7 +1484,9 @@ function Host({ onExit }) {
           </div>
         </aside>
 
-        <section className="stage">
+        {/* Ruang tunggu memakai lebar penuh: kartu kodenya harus terbaca dari
+            jauh dan semuanya muat tanpa menggulung layar. */}
+        <section className={`stage ${phase === "lobby" ? "wide" : ""}`}>
           {phase === "lobby" ? (
             <Lobby {...{ codes, people, model, unitOf, seatOf }}
               onBegin={canDrive ? () => { echo.current = ""; setPhase("briefing"); } : null}
@@ -1863,7 +1865,7 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
                 <span className="cname">{unitOf(r)}</span>
                 <b className="bigcode mono">{code}</b>
                 <span className={seat && seat.live !== false ? "tin" : "tmiss"}>
-                  {!seat ? "kosong" : seat.live === false ? "offline" : "sudah duduk"}
+                  {t(!seat ? "kosong" : seat.live === false ? "offline" : "sudah duduk")}
                 </span>
                 {seat && canDrive && (confirm === r
                   ? <span className="confirm">
@@ -1878,9 +1880,9 @@ function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
 
         {canDrive && (<>
           <h3>{t("Tampilan di layar")}</h3>
-          <Check label="Nama unit" checked={settings.showUnits}
+          <Check label={t("Nama unit")} checked={settings.showUnits}
             onChange={(v) => onSetting({ showUnits: v })}
-            hint="Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya." />
+            hint={t("Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya.")} />
 
           <button className="btn quiet wide" onClick={onLobby}>{t("Kembali ke ruang tunggu")}</button>
           <p className="hint">
@@ -1997,7 +1999,7 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
                         ))}
                       </div>
                       <span className="gout">
-                        {a.quality == null ? "belum dinilai"
+                        {a.quality == null ? t("belum dinilai")
                           : <>{qualityWord(a.quality)} · <b className="mono">+{(a.points || 0).toLocaleString()}</b> {t("poin")}</>}
                       </span>
                     </div>
@@ -2658,6 +2660,23 @@ function Screen() {
           <div className="projlobby">
             <h2>{t("Masukkan kode unit Anda")}</h2>
             <p className="muted">{t("Satu perangkat per unit bisnis.")}</p>
+            {/* Kodenya dibaca ramai ramai dari kursi paling belakang, jadi di
+                ruang tunggu ia tampil besar dan melebar ke samping, bukan
+                sebagai deretan kecil di kaki layar. */}
+            <ul className="projcodes">
+              {deck.roles.map((r, i) => {
+                const code = Object.keys(codes).find((c) => codes[c] === r);
+                const seat = seatOf(r);
+                return (
+                  <li key={r} className={seat ? "in" : ""} style={{ "--c": UNIT_VARS[i % 6] }}>
+                    <Crest peran={r} idx={i} size={26} />
+                    {settings?.showUnits !== false && <span className="pcunit">{r}</span>}
+                    <b className="pccode mono">{code}</b>
+                    <span className="pcstate">{t(seat ? "sudah duduk" : "kursi kosong")}</span>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         ) : (
           <div className="projmid">
@@ -2693,7 +2712,7 @@ function Screen() {
               })}
             </div>
             {phase === "open" && state.limit > 0 && settings?.mode === "auto" && (
-              <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap="left" />
+              <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap={t("sisa")} />
             )}
           </div>
         )}
@@ -3154,6 +3173,13 @@ html,body{background:var(--ink)}
 .langbtn b{font-family:var(--disp);font-size:10.5px;font-weight:800;letter-spacing:.05em;
   padding:5px 7px;border-radius:7px;color:var(--faint)}
 .langbtn b.on{background:var(--signal);color:var(--signal-ink)}
+/* Enter di dalam sel Excel ikut tampil sebagai ganti baris. Tanpa ini HTML
+   melipat semuanya jadi satu paragraf panjang, dan skenario yang ditulis
+   berparagraf kehilangan bentuknya. Spasi tetap dirapikan, jadi indentasi
+   dari Excel tidak ikut terbawa. */
+.ttx .scenario,.ttx .condition,.ttx .projcond,
+.ttx .qtext,.ttx .pqtext,.ttx .projqtext,
+.ttx .altline,.ttx .answers p{white-space:pre-line}
 /* Terjemahan di bawah teks utama. Selalu satu blok tersendiri supaya tidak pernah
    menyambung jadi satu kalimat dengan bahasa pertama. */
 .ttx .altline{display:block;margin-top:6px;color:var(--faint);font-size:.88em;
@@ -3270,6 +3296,9 @@ html,body{background:var(--ink)}
 
 /* ---------- stage ---------- */
 .stage{padding:26px 30px 90px;max-width:900px}
+/* Layar kode dibaca ramai ramai di ruangan, jadi kartunya melebar ke samping
+   sampai selebar jendela, bukan menumpuk dua kolom ke bawah. */
+.stage.wide{max-width:none;width:100%}
 .scenario{font-size:17.5px;line-height:1.62;margin:0 0 20px;padding:20px 22px;background:var(--slab);
   box-shadow:inset 0 0 0 1px var(--edge2);border-radius:18px;max-width:62ch}
 .scenario .eyebrow,.condition .eyebrow{display:block;margin-bottom:9px}
@@ -3346,14 +3375,14 @@ html,body{background:var(--ink)}
 .waitbox p{font-size:13px;line-height:1.5;color:var(--dim)}
 
 /* ---------- lobby ---------- */
-.lobby{max-width:760px}
+.lobby{max-width:1480px}
 .lobbytop{display:flex;align-items:flex-start;gap:22px;flex-wrap:wrap;margin-bottom:20px}
-.lobbytop p{max-width:56ch;font-size:13.5px;margin-top:4px}
+.lobbytop p{max-width:70ch;font-size:13.5px;margin-top:4px}
 .dial{margin-left:auto;text-align:right;flex:none}
 .dial b{display:block;font-size:34px;font-weight:700;line-height:1;letter-spacing:-.04em}
 .dial span{font-size:11px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase;font-weight:700}
 .codegrid{list-style:none;margin:0;padding:0;display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:11px}
+  grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:11px}
 .codegrid li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
   padding:16px 17px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
 .codegrid li::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c)}
@@ -3580,8 +3609,24 @@ html,body{background:var(--ink)}
 .projphase .pulse{margin:0;width:12px;height:12px}
 .projphase.revealed{color:var(--signal-text)}
 .projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 34px}
-.projlobby{text-align:center;padding:8vh 0}
+.projlobby{text-align:center;padding:5vh 0 0}
 .projlobby h2{font-size:40px}
+/* Kartu kode di ruang tunggu proyektor. Melebar ke samping selebar layar dan
+   turun ke baris berikutnya hanya kalau sudah tidak muat, jadi ruangan dengan
+   sepuluh unit tetap terbaca tanpa menggulung. */
+.projcodes{list-style:none;margin:34px auto 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:16px;max-width:1560px}
+.projcodes li{background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);border-radius:18px;
+  padding:18px 14px 15px;display:flex;flex-direction:column;align-items:center;gap:9px;
+  position:relative;overflow:hidden}
+.projcodes li::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:var(--c)}
+.projcodes li.in{background:var(--live-soft);box-shadow:inset 0 0 0 2px var(--live-edge)}
+.pcunit{font-size:14px;font-weight:700;color:var(--dim);line-height:1.3;overflow-wrap:anywhere}
+.pccode{font-family:var(--mono);font-size:38px;font-weight:700;letter-spacing:.13em;
+  color:var(--c);line-height:1}
+.projcodes li.in .pccode{color:var(--live)}
+.pcstate{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.projcodes li.in .pcstate{color:var(--live)}
 .projmid{display:flex;gap:36px;align-items:flex-start;flex:1}
 .projleft{flex:1;display:flex;flex-direction:column;gap:22px;min-width:0}
 .projcond{font-size:19px;line-height:1.55;color:var(--dim);max-width:62ch;
@@ -3697,7 +3742,7 @@ html,body{background:var(--ink)}
   .gscale button{min-width:26px}
   .nav{flex-wrap:wrap;gap:9px}
   .nav .btn{flex:1 1 auto}
-  .codegrid{grid-template-columns:1fr}
+  .codegrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
   .tblwrap{overflow-x:auto}
   .panel{width:100%}
 }
@@ -3761,11 +3806,13 @@ const EN = {
   "Bisa menilai esai dan menulis catatan. Tidak bisa memajukan fase.": "Can grade essays and write notes. Cannot advance the phase.",
   "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.": "Weights can also be set by hand with a number in square brackets, at the start or the end of the line: `[3] B. Verify the alert` or `B. Verify the alert [3]`. Zero means the option is worth nothing. A manual weight overrides stars, and the numbers are still scaled against the highest number in that question.",
   "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.": "More than one is allowed. A wrong tick cancels out a correct one.",
+  "Bonus kecepatan": "Speed bonus",
   "Briefing": "Briefing",
   "Buat kode": "Create code",
   "Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.": "Create one code per person and decide yourself what they may do. This is not a unit code, so participants cannot use it to join.",
   "buka jawaban": "open answering",
   "Buka jawaban": "Open answers",
+  "Buka jawaban otomatis saat waktu habis": "Open answers automatically when time runs out",
   "Buka lagi": "Open again",
   "Buka ruangan": "Open the room",
   "Buka tampilan proyektor": "Open the projector view",
@@ -3819,6 +3866,7 @@ const EN = {
   "Inject {0} tidak punya teks Kondisi.": "Inject {0} has no Situation text.",
   "Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.": "Inject {0}: marked as checkbox but the Answer cell holds no options, so it is treated as an essay.",
   "jawaban benar": "correct answers",
+  "Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat.": "A correct answer earns half the points, plus up to half again for answering sooner.",
   "Jawaban masuk": "Answer received",
   "Jawaban model": "Model answer",
   "Jawaban sudah dibuka.": "Answering is open.",
@@ -3831,6 +3879,8 @@ const EN = {
   "Jawaban unit Anda sudah tercatat.": "Your unit's answer has been recorded.",
   "Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.": "The number of scored questions per unit is uneven ({0}). Raw points would favour whoever was asked more, so the ranking is computed from each unit's percentage of its own maximum. Raw points are still shown.",
   "Jumlah soal": "Questions",
+  "Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya.": "When off, the screens show Unit A, Unit B instead of the real Role names.",
+  "Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa.": "When off, each Role is replaced by a neutral label on your screen. Useful when projecting and you do not want the room to know which unit answered what.",
   "Kata sandi fasilitator": "Facilitator password",
   "Kata sandi itu tidak diterima.": "That password was not accepted.",
   "ke-{0}": "{0}",
@@ -3849,6 +3899,7 @@ const EN = {
   "Kode unit Anda": "Your unit code",
   "Kolom *Tipe* opsional menentukan langsung: `pg`, `checkbox` atau `esai`. Kosongkan, atau hilangkan kolomnya, dan bentuk sel Jawaban yang menentukan.": "The optional *Type* column decides outright: `choice`, `checkbox` or `essay`. Leave it blank, or leave the column out, and the shape of the Answer cell decides.",
   "Kondisi": "Situation",
+  "kosong": "empty",
   "Kosongkan semua, ikuti angka default": "Clear them all and follow the default",
   "kuat": "strong",
   "Kunci jawaban": "Answer key",
@@ -3874,6 +3925,7 @@ const EN = {
   "Masukkan kode unit Anda": "Enter your unit code",
   "memadai": "adequate",
   "Memeriksa…": "Checking…",
+  "Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.": "Ranking units against each other can make participants defensive rather than open. For a first exercise it is safer left off.",
   "Memuat": "Loading",
   "Menambah kedua jam": "Adds to both clocks",
   "Menambah waktu menjawab": "Adds to the answering time",
@@ -3888,6 +3940,7 @@ const EN = {
   "Menunggu fasilitator memulai.": "Waiting for the facilitator to start.",
   "Menunggu jawaban, {0} dari {1} unit sudah duduk": "Waiting for answers, {0} of {1} units seated",
   "Menunggu latihan": "Waiting for an exercise",
+  "Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.": "Closes answering and moves the room to discussion the moment the clock hits zero.",
   "Menyambung ulang": "Reconnecting",
   "Menyambung ulang…": "Reconnecting…",
   "Mode penilaian": "Scoring mode",
@@ -3900,6 +3953,7 @@ const EN = {
   "Nama Anda": "Your name",
   "Nama Anda, opsional": "Your name, optional",
   "Nama atau keterangan, opsional": "Name or description, optional",
+  "Nama unit": "Unit names",
   "Nilai": "Grade",
   "Nilai 1 sampai 10": "Grade 1 to 10",
   "Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih menambah hingga separuh. Unit melihat angkanya begitu Anda menekan * Tampilkan kunci jawaban*.": "Grade 1 to 10. The final points come from that grade, and answering early still adds up to half again. The unit sees the number as soon as you press * Show answer key*.",
@@ -3909,6 +3963,7 @@ const EN = {
   "Nilai {0} dari 10": "Graded {0} out of 10",
   "Nol": "Zero",
   "Nomor inject {0} dipakai di lebih dari satu siklus. Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.": "Inject number {0} is used in more than one cycle. Those rows were merged into one inject. Give them different numbers if they should be separate.",
+  "offline": "offline",
   "Otomatis (pilihan)": "Automatic (choice)",
   "Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan tanpa opsi selalu jatuh ke penilaian manual.": "Automatic scores choice answers on correctness and speed. Manual leaves answers unscored so you can grade them after the discussion. Questions with no options always fall to manual grading.",
   "Pemantau": "Observer",
@@ -3987,6 +4042,7 @@ const EN = {
   "tampilkan kunci": "show key",
   "Tampilkan kunci jawaban": "Show answer key",
   "Tampilkan nama unit": "Show unit names",
+  "Tampilkan peringkat": "Show the leaderboard",
   "tanpa nama": "no name",
   "Tercepat": "Fastest",
   "Terkirim.": "Sent.",
