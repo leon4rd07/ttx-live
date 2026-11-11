@@ -1,0 +1,4500 @@
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+
+/* ------------------------------------------------------------------ *
+ * TTX Live — b19
+ *
+ * Three surfaces off one socket:
+ *   /        participants, one device per business unit
+ *   /host    the facilitator
+ *   /screen  the projector, read-only
+ *
+ * A join code is a SEAT, not a password. One business unit sends one
+ * device; a second device on the same code is refused and offered a
+ * take-over, which is how a unit that refreshed or dropped gets back in
+ * without losing its answers.
+ *
+ * Multiple choice is scored on correctness and speed, server-side.
+ * Essay questions fall through to facilitator scoring.
+ * ------------------------------------------------------------------ */
+
+/* Bumping this version invalidates every stored session. A leftover
+   session from an older build was the cause of the white screens. */
+const V = "v4";
+const BUILD = "b39";  // shown in the corner so you can confirm what is deployed
+const K_HOST = `ttx:${V}:host`;
+const K_ME = `ttx:${V}:me`;
+const K_KEY = `ttx:${V}:key`;
+const K_NAME = `ttx:${V}:hostname`;
+const K_THEME = "ttx:theme";
+
+const isHostRoute = () =>
+  /^\/host\/?$/i.test(location.pathname) || /^#\/?host$/i.test(location.hash);
+const isScreenRoute = () => /^\/screen\/?$/i.test(location.pathname);
+const screenRoom = () =>
+  (location.hash || "").replace(/^#/, "").trim() ||
+  new URLSearchParams(location.search).get("room") || "";
+
+/* Four fixed shapes. The same shape, colour and letter appear on the phone,
+   the host screen and the projector, so the facilitator can call an option
+   out loud — "siapa yang pilih segitiga?" — and the room knows what he means. */
+const SHAPES = {
+  triangle: "M12 3l9.5 17H2.5z",
+  diamond: "M12 2l10 10-10 10L2 12z",
+  circle: "M12 2a10 10 0 100 20 10 10 0 000-20z",
+  square: "M3.5 3.5h17v17h-17z",
+};
+const OPT_SHAPES = ["triangle", "diamond", "circle", "square"];
+const OPT_NAMES_ID = ["segitiga", "wajik", "bulat", "kotak"];
+const OPT_VAR = ["var(--oA)", "var(--oB)", "var(--oC)", "var(--oD)"];
+const optOf = (i) => {
+  const k = ((i % 4) + 4) % 4;
+  return { shape: OPT_SHAPES[k], name: OPT_NAMES_ID[k], c: OPT_VAR[k], ltr: String.fromCharCode(65 + i) };
+};
+const Glyph = ({ shape, size = 16 }) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
+    <path d={SHAPES[shape] || SHAPES.circle} />
+  </svg>
+);
+
+const UNIT_VARS = ["var(--u1)", "var(--u2)", "var(--u3)", "var(--u4)", "var(--u5)", "var(--u6)"];
+const SKIP_WORDS = /^(&|dan|and|of|the|de|dari)$/i;
+function monogram(s) {
+  const w = String(s || "").split(/[\s/]+/).filter((x) => /[A-Za-z0-9]/.test(x) && !SKIP_WORDS.test(x));
+  if (!w.length) return "??";
+  if (w.length >= 2) return (w[0][0] + w[1][0]).toUpperCase();
+  return w[0].slice(0, 2).toUpperCase();
+}
+
+/* Which kind of question this is, said out loud on every surface. Without this
+   a unit that happens to be asked only single-choice never learns the others exist. */
+const TYPE_LABEL = {
+  choice: "Pilihan berbobot",
+  weighted: "Pilihan berbobot",
+  checkbox: "Pilih semua yang sesuai",
+  open: "Esai",
+};
+const TYPE_HINT = {
+  choice: "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.",
+  weighted: "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.",
+  checkbox: "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.",
+  open: "Jawaban teks bebas, dinilai fasilitator setelah diskusi.",
+};
+/* Satu nama untuk semua pertanyaan berpilihan tunggal, baik yang tiap opsinya
+   bernilai berbeda maupun yang hanya punya satu jawaban benar. */
+const kindOf = (q) => (q.type === "choice" ? "weighted" : q.type);
+const TypeBadge = ({ q }) => {
+  const k = kindOf(q);
+  return <span className={`typebadge ${k}`}>{t(TYPE_LABEL[k]) || k}</span>;
+};
+
+/* Essays are graded 1-10 by the facilitator. The number is not the score: the
+   server turns it into points, and answering early still earns up to half again,
+   so the same grade is worth more to whoever committed sooner. */
+const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const qualityWord = (v) => t(
+  v == null ? "belum dinilai"
+    : v >= 9 ? "sangat kuat" : v >= 7 ? "kuat" : v >= 5 ? "memadai" : v >= 3 ? "sebagian" : "lemah");
+const gradeCls = (v) => (v == null ? "" : v >= 7 ? "ok" : v >= 4 ? "part" : "no");
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+const rand = (n = 4) => Array.from({ length: n }, () => ALPHABET[Math.floor(Math.random() * 32)]).join("");
+const fmt = (s) => `${Math.floor((s || 0) / 60)}:${String(Math.floor(s || 0) % 60).padStart(2, "0")}`;
+const fmtAgo = (ms) => {
+  const m = Math.floor((ms || 0) / 60000);
+  if (m < 1) return t("kurang dari semenit");
+  if (m < 60) return tf("{0} menit", m);
+  return tf("{0} jam", Math.floor(m / 60));
+};
+const nth = (n) => tf("ke-{0}", n);
+
+function nukeAll() {
+  try {
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("ttx:") && k !== K_THEME)
+      .forEach((k) => localStorage.removeItem(k));
+  } catch (e) { /* private mode */ }
+}
+const lsGet = (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode */ } };
+const lsDel = (k) => { try { localStorage.removeItem(k); } catch (e) { /* private mode */ } };
+
+/* ---------------------------- theme ---------------------------- */
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === "auto") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", mode);
+  try { localStorage.setItem(K_THEME, mode); } catch (e) { /* private mode */ }
+}
+/* One button. Until someone presses it the app follows the device's own setting;
+   the first press pins a theme and it is remembered from then on. The icon shows
+   where the press will take you, not where you are. */
+function ThemeToggle() {
+  const dark = useIsDark();
+  const next = dark ? "light" : "dark";  // token value, not shown to anyone
+  return (
+    <button className="themebtn" onClick={() => applyTheme(next)}
+      title={t(dark ? "Ganti ke tema terang" : "Ganti ke tema gelap")}
+      aria-label={t(dark ? "Ganti ke tema terang" : "Ganti ke tema gelap")}>
+      {dark ? (
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.1M12 19.3v2.1M4.4 4.4l1.5 1.5M18.1 18.1l1.5 1.5M2.6 12h2.1M19.3 12h2.1M4.4 19.6l1.5-1.5M18.1 5.9l1.5-1.5" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20.6 14.4A8.6 8.6 0 019.6 3.4a8.6 8.6 0 1011 11z" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/* Bahasa tampilan isi, disimpan per perangkat. Peserta asing memilih English di
+   ponselnya sendiri tanpa mengubah apa pun untuk orang lain di ruangan. */
+const K_LANG = `ttx:${V}:lang`;
+let langNow = lsGet(K_LANG) === "en" ? "en" : "id";
+const langSubs = new Set();
+function setLang(v) {
+  langNow = v === "en" ? "en" : "id";
+  lsSet(K_LANG, langNow);
+  langSubs.forEach((fn) => fn(langNow));
+}
+function useLang() {
+  const [l, set] = useState(langNow);
+  useEffect(() => { langSubs.add(set); return () => { langSubs.delete(set); }; }, []);
+  /* pick mengembalikan bahasa kedua hanya kalau memang ada terjemahannya. */
+  const pick = useCallback((text, alt) => (l === "en" && alt ? alt : text), [l]);
+  return { lang: l, pick };
+}
+
+/* Panduan menulis sheet. Tiap baris satu paragraf penuh, jadi terjemahannya
+   boleh menyusun ulang kalimatnya sendiri. */
+const HELP_SHEET = [
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.",
+  "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.",
+  "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.",
+  "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.",
+  "Kolom *Tipe* opsional menentukan langsung: `pg`, `checkbox` atau `esai`. Kosongkan, atau hilangkan kolomnya, dan bentuk sel Jawaban yang menentukan.",
+  "Sheet dua bahasa ditulis dalam sel yang sama. Bahasa Indonesia di atas, satu baris berisi `---` sebagai pemisah, bahasa Inggris di bawah. Berlaku untuk sel Kondisi, Pertanyaan dan Jawaban. Pada sel Jawaban, urutan opsi di blok kedua mengikuti blok pertama, dan bintang atau bobot cukup ditulis di blok pertama saja. Sheet yang hanya satu bahasa tidak perlu diubah.",
+];
+
+/* Paragraf bantuan memuat potongan tebal dan potongan kode. Menerjemahkan tiap
+   potongan sendiri sendiri akan mengacaukan urutan kata, karena susunan kalimat
+   Inggris berbeda, jadi kalimatnya disimpan utuh dengan penanda di dalamnya:
+   *tebal* dan `kode`. Satu kunci kamus untuk satu paragraf penuh. */
+function Rich({ children }) {
+  const parts = String(children).split(/(\*[^*]+\*|`[^`]+`|~[^~]+~)/g).filter(Boolean);
+  const wrap = (x) => (x.length > 2 && x[0] === x[x.length - 1] ? x.slice(1, -1) : null);
+  return (
+    <>
+      {parts.map((x, i) => {
+        const inner = wrap(x);
+        if (inner != null && x[0] === "*") return <b key={i}>{inner}</b>;
+        if (inner != null && x[0] === "~") return <b className="mono" key={i}>{inner}</b>;
+        if (inner != null && x[0] === "`") return <code key={i}>{inner}</code>;
+        return <React.Fragment key={i}>{x}</React.Fragment>;
+      })}
+    </>
+  );
+}
+
+/* Teks antarmuka. Kuncinya kalimat bahasa Indonesia apa adanya, jadi kalimat
+   yang belum sempat diterjemahkan tetap tampil utuh, bukan hilang atau berubah
+   jadi kode. Kamusnya ada di akhir berkas ini, dekat EN.
+
+   t() dipanggil saat render, dan App berlangganan useLang, jadi menukar bahasa
+   membuat seluruh pohon dirender ulang dan tiap t() membaca nilai yang baru.
+   Tidak ada komponen yang dibungkus memo, jadi tidak ada yang tertinggal. */
+function t(s) {
+  if (langNow !== "en") return s;
+  return Object.prototype.hasOwnProperty.call(EN, s) ? EN[s] : s;
+}
+/* Kalimat bersisipan angka atau nama. Penanda {0}, {1} dipakai supaya urutan
+   kata boleh berbeda antara kedua bahasa. */
+function tf(s, ...v) {
+  return t(s).replace(/\{(\d+)\}/g, (m, i) => (v[i] == null ? m : String(v[i])));
+}
+
+function LangToggle() {
+  const { lang } = useLang();
+  return (
+    <button className="langbtn" onClick={() => setLang(lang === "en" ? "id" : "en")}
+      title={lang === "en" ? "Tampilkan bahasa Indonesia" : "Show English"}
+      aria-label={t("Bahasa")}>
+      <b className={lang === "id" ? "on" : ""}>{t("ID")}</b>
+      <b className={lang === "en" ? "on" : ""}>{t("EN")}</b>
+    </button>
+  );
+}
+
+/* Teks dua bahasa yang perlu dibaca berdampingan. Bahasa yang dipilih tampil
+   penuh, terjemahannya menyusul dengan warna redup. Dipakai di layar fasilitator
+   dan proyektor, tidak di perangkat peserta: peserta hanya perlu satu bahasa. */
+function Dual({ text, alt, className, tag: T = "p", children }) {
+  const { lang } = useLang();
+  const main = lang === "en" && alt ? alt : text;
+  const other = alt ? (lang === "en" ? text : alt) : "";
+  return (
+    <T className={className}>
+      {children}{main}
+      {other ? <span className="altline">{other}</span> : null}
+    </T>
+  );
+}
+
+function useIsDark() {
+  const read = () => {
+    const a = document.documentElement.getAttribute("data-theme");
+    if (a === "dark") return true;
+    if (a === "light") return false;
+    return window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)").matches : false;
+  };
+  const [dark, setDark] = useState(read);
+  useEffect(() => {
+    const upd = () => setDark(read());
+    const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    if (mq?.addEventListener) mq.addEventListener("change", upd);
+    const mo = new MutationObserver(upd);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      if (mq?.removeEventListener) mq.removeEventListener("change", upd);
+      mo.disconnect();
+    };
+  }, []);
+  return dark;
+}
+
+/* ---------------------------- brand mark ---------------------------- */
+
+/* Tanda huruf, bukan gambar logo. Aplikasi ini berjalan di domain yang bukan
+   milik bank, dan logo bank di domain pihak ketiga persis pola yang dicari
+   pengklasifikasi phishing Google Safe Browsing. Huruf tidak bisa dicocokkan
+   sebagai gambar merek, jadi tanda ini aman dipakai di mana pun ia berjalan. */
+function BrandLogo({ className = "" }) {
+  return <span className={`brandmark ${className}`} aria-hidden="true">{t("MBI")}</span>;
+}
+
+/* One fixed line in the bottom-left corner, on every screen. Small and quiet:
+   there for anyone who looks, out of the way of anyone running the exercise. */
+const AiNote = () => (
+  <p className="aidisc">{t("Dibuat internal dengan bantuan AI")}</p>
+);
+
+/* ------------------------- the one true clock -------------------------- *
+ * Every countdown is (now - openedAt) and openedAt is stamped by the server.
+ * Each end was subtracting its OWN Date.now(), so a laptop ten seconds off the
+ * server drew a countdown ten seconds off the phones. Measure the offset once
+ * per connection and count in server time everywhere.
+ * ---------------------------------------------------------------------- */
+let clockOffset = 0, bestRtt = Infinity;
+const serverNow = () => Date.now() + clockOffset;
+function noteTimeSample(c, srv) {
+  const now = Date.now(), rtt = now - c;
+  if (rtt < 0 || rtt > 4000) return;
+  if (rtt <= bestRtt) { bestRtt = rtt; clockOffset = srv + rtt / 2 - now; }
+}
+/* Four probes on every (re)connect; the round trip with the least latency gives
+   the least-wrong offset. */
+function useClockSync(send, gen) {
+  useEffect(() => {
+    if (!gen) return;
+    bestRtt = Infinity;
+    let n = 0, tm;
+    const probe = () => { send({ t: "time", c: Date.now() }); if (++n < 4) tm = setTimeout(probe, 350); };
+    probe();
+    return () => clearTimeout(tm);
+  }, [send, gen]);
+}
+
+/* ---------------------------- transport ---------------------------- */
+
+/* True once the answering window has closed. Recomputed on a tick so the
+   UI locks itself rather than relying on the server to refuse a tap. */
+function useExpired(openedAt, limit, active) {
+  const [over, setOver] = useState(false);
+  useEffect(() => {
+    if (!active || !limit || !openedAt) { setOver(false); return; }
+    const check = () => setOver(serverNow() - openedAt >= limit * 1000);
+    check();
+    const iv = setInterval(check, 250);
+    return () => clearInterval(iv);
+  }, [openedAt, limit, active]);
+  return over;
+}
+
+/* Ponsel membekukan tab yang di latar belakang, dan soketnya ikut mati tanpa
+   memicu onclose. Tab itu lalu tampak hidup padahal tidak menerima apa apa lagi:
+   inilah yang membuat co-host tertinggal sendirian sementara layar host masih
+   mengira ia hadir. Jadi soket ini memantau dirinya sendiri, mengirim denyut
+   berkala, dan memaksa sambung ulang begitu sunyi terlalu lama atau begitu
+   halaman kembali terlihat. */
+const QUIET_MS = 25000;     // sunyi selama ini berarti soketnya sudah mati
+const BEAT_MS = 10000;      // denyut ke server, dibalas pesan time
+
+function useSocket(onMessage) {
+  const ws = useRef(null);
+  const handler = useRef(onMessage);
+  const queue = useRef([]);
+  const lastSeen = useRef(Date.now());
+  const bounce = useRef(() => {});
+  const [status, setStatus] = useState("connecting");
+  /* Bumped on every successful open. A reconnect gives the server a brand new
+     socket with no room attached, so whoever owns the session has to re-register
+     or they silently stop receiving phase changes. */
+  const [gen, setGen] = useState(0);
+  handler.current = onMessage;
+
+  useEffect(() => {
+    let closed = false, retry = 0, timer;
+    const open = () => {
+      if (closed) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const sock = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.current = sock;
+      sock.onopen = () => {
+        retry = 0; setStatus("live"); lastSeen.current = Date.now();
+        queue.current.splice(0).forEach((m) => sock.send(JSON.stringify(m)));
+        setGen((g) => g + 1);
+      };
+      sock.onmessage = (e) => {
+        lastSeen.current = Date.now();
+        try { handler.current?.(JSON.parse(e.data)); } catch (err) { /* junk */ }
+      };
+      sock.onclose = () => {
+        if (closed) return;
+        setStatus("reconnecting");
+        retry = Math.min(retry + 1, 6);
+        timer = setTimeout(open, 400 * 2 ** retry);
+      };
+      sock.onerror = () => sock.close();
+    };
+    /* Putuskan yang lama, biar onclose menjadwalkan sambungan baru. Kalau soketnya
+       sudah terlanjur zombie, buka langsung. */
+    const kick = () => {
+      if (closed) return;
+      const sock = ws.current;
+      if (sock && sock.readyState === 1) { try { sock.close(); } catch (e) { /* sudah mati */ } }
+      else if (!sock || sock.readyState === 3) { clearTimeout(timer); retry = 0; open(); }
+    };
+    bounce.current = kick;
+
+    open();
+
+    const beat = setInterval(() => {
+      if (closed) return;
+      const sock = ws.current;
+      const quiet = Date.now() - lastSeen.current;
+      if (sock?.readyState === 1) {
+        if (quiet > QUIET_MS) { setStatus("reconnecting"); kick(); return; }
+        try { sock.send(JSON.stringify({ t: "time", c: Date.now() })); } catch (e) { kick(); }
+      } else if (sock && sock.readyState !== 0 && quiet > QUIET_MS) kick();
+    }, BEAT_MS);
+
+    /* Kembali dari latar belakang, atau jaringan kembali ada: jangan tunggu denyut
+       berikutnya, periksa sekarang juga. */
+    const wake = () => {
+      if (closed || document.visibilityState === "hidden") return;
+      const sock = ws.current;
+      if (!sock || sock.readyState !== 1 || Date.now() - lastSeen.current > QUIET_MS) kick();
+    };
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+
+    return () => {
+      closed = true; clearTimeout(timer); clearInterval(beat);
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
+      ws.current?.close();
+    };
+  }, []);
+
+  const send = useCallback((msg) => {
+    if (ws.current?.readyState === 1) ws.current.send(JSON.stringify(msg));
+    else queue.current.push(msg);
+  }, []);
+
+  /* Dipakai tombol sinkronkan ulang di panel fasilitator. */
+  const resync = useCallback(() => bounce.current(), []);
+
+  return { send, status, gen, resync };
+}
+
+/* ---------------------------- parsing ---------------------------- */
+
+const HEADER_ALIASES = {
+  inject: "inject", injectno: "inject", injectnumber: "inject", injectnum: "inject",
+  no: "inject", nomor: "inject", nomorinject: "inject",
+  condition: "condition", kondisi: "condition", skenario: "condition",
+  scenario: "condition", situation: "condition", situasi: "condition",
+  peran: "peran", role: "peran", roles: "peran", unit: "peran",
+  businessunit: "peran", bu: "peran", audience: "peran", target: "peran",
+  siklus: "siklus", cycle: "siklus", phase: "siklus", fase: "siklus",
+  round: "siklus", babak: "siklus", tahap: "siklus",
+  question: "question", pertanyaan: "question", q: "question", prompt: "question",
+  answer: "answer", jawaban: "answer", expectedanswer: "answer",
+  jawabanyangdiharapkan: "answer", kuncijawaban: "answer", key: "answer",
+  window: "window", windowmin: "window", waktu: "window", time: "window",
+  answertime: "window", responsewindow: "window", timelimit: "window",
+  decisionwindow: "window", bataswaktu: "window", windowminutes: "window",
+  waktuesai: "ewindow", waktuessay: "ewindow", essaywindow: "ewindow",
+  waktuuraian: "ewindow", essaytime: "ewindow", waktujawabanesai: "ewindow",
+  windowesai: "ewindow", essaywindowminutes: "ewindow",
+  tipe: "qtype", type: "qtype", jenis: "qtype", format: "qtype",
+  tipesoal: "qtype", jenissoal: "qtype", questiontype: "qtype", answertype: "qtype",
+};
+
+/* An optional Tipe column decides the question type outright. Leave it blank, or
+   leave the column out entirely, and the shape of the Answer cell decides, so
+   every sheet written before b20 still imports unchanged.
+
+   Note "multiple choice" maps to single choice, because that is what people mean
+   by it. Ticking several boxes is "checkbox" / "centang" / "pilih banyak". */
+const TYPE_ALIASES = {
+  pg: "choice", pilihan: "choice", pilihanganda: "choice", choice: "choice", mc: "choice",
+  multiplechoice: "choice", single: "choice", singlechoice: "choice", radio: "choice",
+  tunggal: "choice", pgtunggal: "choice", satujawaban: "choice",
+  checkbox: "checkbox", kotakcentang: "checkbox", centang: "checkbox", multi: "checkbox",
+  multiselect: "checkbox", multipleselect: "checkbox", pilihbanyak: "checkbox",
+  pgmulti: "checkbox", banyakjawaban: "checkbox", pilihsemua: "checkbox",
+  esai: "open", essay: "open", uraian: "open", terbuka: "open", open: "open",
+  text: "open", teks: "open", isian: "open", jawabansingkat: "open", shortanswer: "open",
+};
+const normKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+/* Split only on unambiguous list separators. "&", "/", "dan" and "and" all
+   appear inside real unit names — "Hukum & Kepatuhan" is one unit, not two. */
+const splitPeran = (v) => [...new Set(
+  String(v || "").split(/[,;|]|\r?\n/).map((s) => s.trim()).filter(Boolean)
+)];
+
+function detectAnswerType(raw) {
+  const head = splitLang(raw).text.trim();
+  if (!head) return "open";
+  const lines = head.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const bare = lines.map((l) => l.replace(/^\s*\*+\s*/, ""));
+  /* Dua baris atau lebih yang dibuka bobot manual sudah cukup untuk menyebut
+     sel ini daftar pilihan, walau penulisnya tidak memakai awalan A. atau 1). */
+  if (bare.filter((s) => /^\[\d+(?:[.,]\d+)?\]\s*\S/.test(s)).length >= 2) return "choice";
+  const plain = bare.map((l) => l.replace(/^\s*\[\d+(?:[.,]\d+)?\]\s*/, ""));
+  if (plain.filter((s) => /^(?:[A-Ea-e][.)]|[1-6][.)])\s+\S/.test(s)).length >= 2) return "choice";
+  return "open";
+}
+/* Stars are tiers, not a yes or no. Three stars is the best answer, two is
+   workable, one is weak, none is wrong. A sheet written with a single star per
+   question still behaves exactly as before, because one star is then the top
+   tier and everything else is zero. */
+/* Satu sel boleh memuat dua bahasa, dipisah satu baris berisi tiga tanda hubung
+   atau lebih. Bagian atas bahasa utama, bagian bawah bahasa kedua.
+
+       Apa langkah pertama Anda?
+       ---
+       What is your first step?
+
+   Tanpa pemisah, sel itu tetap satu bahasa dan tidak ada yang berubah. */
+const LANG_SPLIT = /^[ \t]*(?:-{3,}|={3,})[ \t]*$/m;
+function splitLang(raw) {
+  const full = String(raw ?? "");
+  if (!LANG_SPLIT.test(full)) return { text: full.trim(), alt: "" };
+  const at = full.search(LANG_SPLIT);
+  const head = full.slice(0, at);
+  const tail = full.slice(at).replace(/^[^\n]*\n?/, "");   // buang baris pemisahnya
+  return { text: head.trim(), alt: tail.trim() };
+}
+
+const parseChoices = (raw) => String(raw || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+  .map((s) => {
+    const lead = (s.match(/^\s*(\*+)/) || [null, ""])[1].length;
+    const trail = (s.match(/(\*+)\s*$/) || [null, ""])[1].length;
+    const flagged = /\(correct\)|\[x\]/i.test(s);
+    const stars = Math.max(lead, trail) || (flagged ? 1 : 0);
+    /* Bobot manual ditulis dalam kurung siku, di awal atau akhir baris:
+       "[3] B. Verifikasi alert" atau "B. Verifikasi alert [3]". Angkanya boleh
+       berapa pun, termasuk nol, dan tidak bentrok dengan penanda [x]. */
+    const manual = s.match(/^\s*\[(\d+(?:[.,]\d+)?)\]/) || s.match(/\[(\d+(?:[.,]\d+)?)\]\s*$/);
+    const wRaw = manual ? Number(String(manual[1]).replace(",", ".")) : null;
+    return {
+      /* strip the markers first, then the A./1) prefix. The other order leaves
+         the letter in the text and the UI renders it twice. */
+      text: s
+        .replace(/^\s*\*+\s*/, "").replace(/\s*\*+\s*$/, "")
+        .replace(/\(correct\)|\[x\]/gi, "")
+        .replace(/^\s*\[\d+(?:[.,]\d+)?\]\s*/, "").replace(/\s*\[\d+(?:[.,]\d+)?\]\s*$/, "")
+        .replace(/^\s*(?:[A-Ea-e][.)]|[1-6][.)])\s*/, "")
+        .trim(),
+      stars,
+      wRaw,
+      correct: stars > 0,
+    };
+  });
+
+/* Sel Jawaban dua bahasa memuat dua blok pilihan. Bobot dan tanda kunci diambil
+   dari blok pertama saja, blok kedua hanya teksnya, dipasangkan menurut urutan.
+   Jumlah yang tidak sama tidak dianggap galat: yang tidak punya pasangan jatuh
+   kembali ke bahasa utama. */
+function parseChoicesBilingual(raw) {
+  const { text, alt } = splitLang(raw);
+  const main = parseChoices(text);
+  if (!alt) return main;
+  const other = parseChoices(alt);
+  main.forEach((c, i) => { c.alt = other[i] ? other[i].text : ""; });
+  return main;
+}
+
+function buildModel(rows) {
+  if (!rows.length) return { injects: [], roles: [], warnings: [t("Sheet ini tidak berisi baris data.")] };
+  const hmap = {};
+  /* Take the union of every row's keys, not just the first row's. A sheet whose
+     first row leaves an optional column blank can arrive without that key, and
+     reading only row one would drop the column for the whole file. */
+  const headers = [];
+  rows.forEach((r) => Object.keys(r).forEach((k) => { if (!headers.includes(k)) headers.push(k); }));
+  headers.forEach((k) => {
+    const hit = HEADER_ALIASES[normKey(k)];
+    if (hit && !hmap[hit]) hmap[hit] = k;
+  });
+  const warnings = [];
+  ["inject", "peran", "question"].forEach((f) => {
+    if (!hmap[f]) {
+      const NAMA = { inject: "Inject No.", peran: "Peran", question: "Pertanyaan" };
+      warnings.push(tf('Tidak ada kolom yang cocok untuk "{0}". Periksa ejaan baris header.', NAMA[f] || f));
+    }
+  });
+  const get = (row, f) => (hmap[f] ? String(row[hmap[f]] ?? "").trim() : "");
+
+  let lastInject = "", lastCondition = "", lastSiklus = "", lastWindow = "", lastEWindow = "";
+  const flat = [];
+  rows.forEach((row, i) => {
+    const rawInject = get(row, "inject");
+    const inject = rawInject || lastInject;
+    if (rawInject) { lastInject = rawInject; lastCondition = ""; lastWindow = ""; lastEWindow = ""; }
+    if (get(row, "condition")) lastCondition = get(row, "condition");
+    if (get(row, "siklus")) lastSiklus = get(row, "siklus");
+    if (get(row, "window")) lastWindow = get(row, "window");
+    if (get(row, "ewindow")) lastEWindow = get(row, "ewindow");
+    const question = get(row, "question");
+    const peranRaw = get(row, "peran");
+    if (!question && !peranRaw && !inject) return;
+    flat.push({
+      srcRow: i + 2, inject: inject || "(unnumbered)",
+      condition: get(row, "condition") || lastCondition,
+      siklus: get(row, "siklus") || lastSiklus || "(no siklus)",
+      window: get(row, "window") || lastWindow,
+      ewindow: get(row, "ewindow") || lastEWindow,
+      question, answer: get(row, "answer"), roles: splitPeran(peranRaw),
+      qtype: TYPE_ALIASES[normKey(get(row, "qtype"))] || "",
+    });
+  });
+
+  const roles = [];
+  flat.forEach((r) => r.roles.forEach((x) => { if (!roles.includes(x)) roles.push(x); }));
+
+  const byInject = new Map();
+  let noKey = 0;
+  const badCheck = [];
+  flat.forEach((r) => {
+    if (!byInject.has(r.inject)) {
+      byInject.set(r.inject, { id: r.inject, siklus: r.siklus, window: r.window,
+        ewindow: r.ewindow, seen: byInject.size, siklusAll: new Set(),
+        conditions: [], questions: [] });
+    }
+    const inj = byInject.get(r.inject);
+    if (r.siklus) inj.siklusAll.add(r.siklus);
+    if (r.condition && !inj.conditions.includes(r.condition)) inj.conditions.push(r.condition);
+    if (!inj.window && r.window) inj.window = r.window;
+    if (!inj.ewindow && r.ewindow) inj.ewindow = r.ewindow;
+    if (!r.question) return;
+    /* The Tipe column wins; otherwise fall back to reading the Answer cell, and
+       treat two or more starred options as a checkbox question. */
+    let type = r.qtype || detectAnswerType(r.answer);
+    let choices = type === "choice" || type === "checkbox" ? parseChoicesBilingual(r.answer) : [];
+    const topStars = choices.length ? Math.max(...choices.map((c) => c.stars)) : 0;
+    /* Two or more stars on one option means graded tiers, so it stays a single
+       choice. Several options at one star each is the tick-all-that-apply case. */
+    const tiered = topStars >= 2;
+    if (!r.qtype && type === "choice" && !tiered && choices.filter((c) => c.correct).length > 1) {
+      type = "checkbox";
+    }
+    if (r.qtype === "checkbox" && !choices.length) { type = "open"; choices = []; badCheck.push(r.inject); }
+    let weighted = false;
+    /* Bobot manual menang atas bintang, supaya angka yang ditulis fasilitator
+       di sel Jawaban dipakai apa adanya. */
+    const hasManual = type === "choice" && choices.some((c) => c.wRaw != null);
+    const topManual = hasManual ? Math.max(...choices.map((c) => c.wRaw ?? 0)) : 0;
+    if (hasManual && topManual > 0) {
+      weighted = true;
+      choices.forEach((c) => {
+        c.w = (c.wRaw ?? 0) / topManual;
+        c.correct = (c.wRaw ?? 0) === topManual;
+      });
+    } else if (type === "choice" && topStars > 0) {
+      weighted = tiered;
+      /* Normalised against the best tier in this question, so 3/2/1 and 30/20/10
+         score identically. Only the top tier counts as the correct answer, which
+         keeps the answer key, the report and the projector unchanged. */
+      choices.forEach((c) => { c.w = c.stars / topStars; c.correct = c.stars === topStars; });
+    } else {
+      choices.forEach((c) => { c.w = c.correct ? 1 : 0; });
+    }
+    if ((type === "choice" || type === "checkbox") && !choices.some((c) => c.correct)) noKey += 1;
+    (r.roles.length ? r.roles : ["(untargeted)"]).forEach((peran, k) => {
+      const qq = splitLang(r.question);
+      inj.questions.push({
+        qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
+        peran, text: qq.text, alt: qq.alt, answerRaw: r.answer, type, choices, weighted,
+      });
+    });
+  });
+
+  /* Urutan inject.
+
+     Aturan lama membaca angka pertama yang ditemukan di mana pun dalam teks, jadi
+     siklus bernama "Sosialisasi Aplikasi 2026" dinilai 2026 dan terlempar ke
+     belakang, sedangkan siklus tanpa angka sama sekali dinilai 9999 dan selalu
+     jatuh paling akhir. Sekarang yang dibaca hanya angka di awal label, dan label
+     tanpa angka memakai urutan kemunculannya di sheet.
+
+     Nomor inject dibandingkan secara alami, potongan angka sebagai angka dan
+     potongan huruf sebagai huruf, sehingga 0.1 mendahului 1, 3 mendahului 3.K1,
+     dan 9 mendahului 10. */
+  const leadNum = (v) => {
+    const m = String(v ?? "").trim().match(/^(\d+(?:[.,]\d+)?)/);
+    return m ? parseFloat(m[1].replace(",", ".")) : null;
+  };
+  const chunks = (v) => String(v ?? "").trim().toLowerCase()
+    .split(/(\d+(?:\.\d+)?)/).filter((x) => x !== "")
+    .map((x) => (/^\d/.test(x) ? parseFloat(x) : x));
+  const natCmp = (a, b) => {
+    const x = chunks(a), y = chunks(b);
+    for (let i = 0; i < Math.min(x.length, y.length); i += 1) {
+      const p = x[i], q = y[i];
+      if (typeof p === "number" && typeof q === "number") { if (p !== q) return p - q; continue; }
+      const ps = String(p), qs = String(q);
+      if (ps !== qs) return ps < qs ? -1 : 1;
+    }
+    return x.length - y.length;
+  };
+
+  const sikOrder = new Map();      // label siklus -> urutan kemunculan di sheet
+  [...byInject.values()].forEach((i) => {
+    if (!sikOrder.has(i.siklus)) sikOrder.set(i.siklus, sikOrder.size);
+  });
+  /* Satu aturan saja untuk seluruh sheet, jangan dicampur. Kalau setiap siklus
+     diberi nomor di depan labelnya, nomor itu yang menentukan urutan. Begitu ada
+     satu saja yang tidak bernomor, seluruhnya memakai urutan baris di sheet,
+     karena di situ jelas penulisnya yang mengatur urutan, bukan penomoran. */
+  const allNumbered = [...sikOrder.keys()].every((label) => leadNum(label) != null);
+  const sikKey = (inj) => (allNumbered ? leadNum(inj.siklus) : sikOrder.get(inj.siklus));
+
+  const raw = [...byInject.values()].map((inj) => {
+    const rs = [];
+    inj.questions.forEach((q) => { if (!rs.includes(q.peran)) rs.push(q.peran); });
+    const cond = splitLang(inj.conditions[0] || "");
+    return { ...inj, roles: rs, condition: cond.text, conditionAlt: cond.alt,
+      splitNarrative: inj.conditions.length > 1 };
+  });
+  const injects = [...raw].sort((a, b) =>
+    sikKey(a) - sikKey(b) || natCmp(a.id, b.id) || a.seen - b.seen);
+  /* Kalau hasilnya tidak sama dengan urutan baris di sheet, katakan. Fasilitator
+     berhak tahu bahwa yang akan tayang bukan urutan yang ia lihat di Excel. */
+  const mixed = [...byInject.values()].filter((i) => i.siklusAll && i.siklusAll.size > 1);
+  if (mixed.length) {
+    warnings.push(tf("Nomor inject {0} dipakai di lebih dari satu siklus. Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.",
+      mixed.map((i) => i.id).join(", ")));
+  }
+  if (injects.some((inj, i) => inj.id !== raw[i].id)) {
+    warnings.push(tf("Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: {0}.",
+      injects.map((i) => i.id).join(", ")));
+  }
+
+  const allQ = injects.flatMap((i) => i.questions);
+  const mc = allQ.filter((q) => q.type === "choice" || q.type === "checkbox").length;
+  if (badCheck.length) {
+    warnings.push(tf("Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.", [...new Set(badCheck)].join(", ")));
+  }
+  if (noKey > 0) {
+    warnings.push(tf("{0} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.", noKey));
+  }
+  injects.forEach((i) => {
+    if (i.splitNarrative) warnings.push(tf("Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.", i.id));
+    if (!i.condition) warnings.push(tf("Inject {0} tidak punya teks Kondisi.", i.id));
+  });
+  /* Units are not asked the same number of questions, so say so before the run
+     rather than letting it surface as a lopsided leaderboard afterwards. */
+  const perRole = {};
+  allQ.forEach((q) => {
+    if (q.type !== "choice" && q.type !== "checkbox") return;
+    if (!(q.choices || []).some((c) => c.correct)) return;
+    perRole[q.peran] = (perRole[q.peran] || 0) + 1;
+  });
+  const counts = Object.values(perRole);
+  if (counts.length > 1 && Math.max(...counts) !== Math.min(...counts)) {
+    const spread = Object.entries(perRole).sort((a, b) => b[1] - a[1])
+      .map(([r, n]) => `${r} ${n}`).join(", ");
+    warnings.push(tf("Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.", spread));
+  }
+  return { injects, roles, warnings, mcCount: mc };
+}
+
+const SAMPLE = [
+  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?", Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati" },
+  { "Inject No.": "2", Siklus: "Siklus 1 - Deteksi", Waktu: "1.5", Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.", Peran: "Risk Management", Tipe: "pg", Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?", Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox", Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.", Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "", Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?", Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
+  { "Inject No.": "3", Siklus: "Siklus 2 - Respons", Waktu: "2", Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.", Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg", Pertanyaan: "Apa yang masuk dalam respons pertama?", Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai", Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.", Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "", Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?", Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
+];
+
+/* ------------------------- crash containment ------------------------- */
+
+class Boundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <div className="crash">
+        <h1>{t("Ada yang rusak")}</h1>
+        <p className="muted">
+          {t("Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi, bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.")}
+        </p>
+        <pre>{String(this.state.err?.message || this.state.err)}</pre>
+        <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>
+          {t("Bersihkan dan mulai ulang")}
+        </button>
+      </div>
+    );
+  }
+}
+
+/* ================================================================== */
+
+export default function App() {
+  /* Satu langganan di akar sudah cukup. Menukar bahasa mengubah state di sini,
+     seluruh pohon dirender ulang, dan tiap panggilan t() membaca bahasa baru. */
+  useLang();
+  const [route, setRoute] = useState(() =>
+    isScreenRoute() ? "screen" : isHostRoute() ? "host" : "participant");
+  useEffect(() => {
+    const onPop = () => setRoute(isScreenRoute() ? "screen" : isHostRoute() ? "host" : "participant");
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const leaveHost = () => { history.pushState({}, "", "/"); setRoute("participant"); };
+
+  return (
+    <div className="ttx">
+      <style>{CSS}</style>
+      <Boundary>
+        {route === "screen" ? <Screen />
+          : route === "host" ? <Host onExit={leaveHost} />
+            : <Participant />}
+      </Boundary>
+      <AiNote />
+    </div>
+  );
+}
+
+/* --------------------------- shared pieces --------------------------- */
+
+function Ring({ openedAt, limit, size = "s72", cap }) {
+  const [left, setLeft] = useState(limit);
+  useEffect(() => {
+    const tick = () => setLeft(Math.max(0, limit - (serverNow() - (openedAt || serverNow())) / 1000));
+    tick();
+    const iv = setInterval(tick, 200);
+    return () => clearInterval(iv);
+  }, [openedAt, limit]);
+  const CIRC = 2 * Math.PI * 52;
+  const frac = limit ? Math.max(0, left / limit) : 0;
+  const cls = left <= 0 ? "done" : left <= 10 ? "urgent" : frac <= 0.34 ? "warn" : "";
+  return (
+    <div className={`ring ${size} ${cls}`}>
+      <svg viewBox="0 0 120 120">
+        <circle className="rtrack" cx="60" cy="60" r="52" />
+        <circle className="rfill" cx="60" cy="60" r="52"
+          style={{ strokeDasharray: `${CIRC * frac} ${CIRC}` }} />
+      </svg>
+      <span className="rlabel">
+        <span className="rnum">{fmt(Math.ceil(left))}</span>
+        {cap && <span className="rcap">{cap}</span>}
+      </span>
+    </div>
+  );
+}
+
+const Crest = ({ peran, idx, size }) => (
+  <span className="crest" style={{
+    background: UNIT_VARS[(idx < 0 ? 0 : idx) % 6],
+    ...(size ? { width: size, height: size, fontSize: Math.round(size * 0.42) } : {}),
+  }}>{monogram(peran)}</span>
+);
+
+function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
+  return (
+    <header className="bar striped">
+      <div className="brand"><BrandLogo />{left}</div>
+      <div className="barright">
+        {conn && conn !== "live" && <span className="offline">{t("Menyambung ulang")}</span>}
+        {right}
+        {/* Tombol bahasa selalu ada, bukan hanya waktu sheetnya dua bahasa:
+            antarmukanya sendiri bisa diganti ke Inggris walau soalnya tidak. */}
+        <LangToggle />
+        {theme && <ThemeToggle />}
+        <span className="build">{BUILD}</span>
+        {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel || t("Keluar")}</button>}
+      </div>
+    </header>
+  );
+}
+
+const PHASES = [
+  { k: "lobby", label: "Menunggu" },
+  { k: "briefing", label: "Briefing" },
+  { k: "open", label: "Menjawab" },
+  { k: "revealed", label: "Diskusi" },
+];
+function PhaseSteps({ phase, onPick }) {
+  const at = PHASES.findIndex((p) => p.k === phase);
+  return (
+    <div className="phases" role="group" aria-label={t("Phase")}>
+      {PHASES.map((p, i) => (
+        <button key={p.k} className={i === at ? "on" : i < at ? "past" : ""}
+          disabled={!onPick} onClick={() => onPick && onPick(p.k)}>{t(p.label)}</button>
+      ))}
+    </div>
+  );
+}
+
+/* Peran fasilitator, ditentukan pemilik ruangan lewat kode yang ia bagikan. */
+const ROLE_LABEL = {
+  owner: "Pemilik ruangan",
+  full: "Kendali penuh",
+  grader: "Penilai",
+  viewer: "Pemantau",
+};
+const ROLE_HINT = {
+  full: "Bisa memajukan fase, membuka jawaban, menampilkan kunci, dan menilai esai.",
+  grader: "Bisa menilai esai dan menulis catatan. Tidak bisa memajukan fase.",
+  viewer: "Hanya melihat jalannya latihan.",
+};
+
+const Check = ({ label, checked, onChange, hint }) => (
+  <label className="chk span2">
+    <input type="checkbox" checked={!!checked} onChange={(e) => onChange(e.target.checked)} />
+    <span><b>{label}</b>{hint && <em>{hint}</em>}</span>
+  </label>
+);
+
+/* ============================== HOST ============================== */
+
+function Host({ onExit }) {
+  const [screen, setScreen] = useState("setup"); // setup | config | run | report
+  const [roomId, setRoomId] = useState("");
+  const [codes, setCodes] = useState({});
+  const [draftCodes, setDraftCodes] = useState({});
+  const [settings, setSettings] = useState({
+    mode: "auto", timeLimit: 60, essayLimit: 300, essayGrace: 60, points: 1000,
+    speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
+  });
+  const [times, setTimes] = useState({});
+  const [etimes, setEtimes] = useState({});     // jendela esai per inject
+  const [ran, setRan] = useState([]);           // inject yang pernah dibuka
+  const [model, setModel] = useState(null);
+  const [warnings, setWarnings] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [parseError, setParseError] = useState("");
+  const [phase, setPhase] = useState("lobby");
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [openedAt, setOpenedAt] = useState(null);
+  const [keyShown, setKeyShown] = useState(false);
+  const [people, setPeople] = useState([]);
+  const [notes, setNotes] = useState({});
+  const [revealKey, setRevealKey] = useState({});
+  const [roomOpen, setRoomOpen] = useState(false);
+  const [confirmNext, setConfirmNext] = useState(false);
+  const echo = useRef("");
+  const [booted, setBooted] = useState(false);
+  const [keyRequired, setKeyRequired] = useState(false);
+  const [keyIn, setKeyIn] = useState(() => lsGet(K_KEY) || "");
+  const [denied, setDenied] = useState(false);
+  /* Beberapa fasilitator dalam satu ruangan. Yang membuka ruangan adalah pemilik
+     dan dialah yang menentukan peran tiap kode co-host. */
+  const [role, setRole] = useState("owner");
+  const [ownerKey, setOwnerKey] = useState("");
+  const [hostCode, setHostCode] = useState("");
+  const [hostCodes, setHostCodes] = useState({});
+  const [hosts, setHosts] = useState([]);
+  const [hostName, setHostName] = useState(() => lsGet(K_NAME) || "");
+  const [joinCode, setJoinCode] = useState("");
+  const [joinErr, setJoinErr] = useState("");
+  /* onMsg dibuat sekali, jadi ia membaca layar lewat ref, bukan lewat state. */
+  const screenRef = useRef("setup");
+  const [teamOpen, setTeamOpen] = useState(false);
+  const [recapOpen, setRecapOpen] = useState(false);
+  /* Inject lama yang sedang tampil di proyektor, dipegang server supaya
+     fasilitator kedua melihat keadaan yang sama. */
+  const [recapId, setRecapId] = useState(null);
+  const fileRef = useRef(null);
+
+  /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
+     latihan, penilai hanya menilai esai dan menulis catatan, pemantau melihat. */
+  const isOwner = role === "owner";
+  const canDrive = role === "owner" || role === "full";
+  const canGrade = canDrive || role === "grader";
+
+  /* Bahasa tampilan. Fasilitator melihat keduanya pada skenario dan pertanyaan,
+     jadi pick hanya dipakai untuk baris ringkas seperti daftar rencana. */
+  const { pick } = useLang();
+
+  const onMsg = useCallback((m) => {
+    if (m.t === "hosted") {
+      setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
+      setEtimes(m.etimes || {});
+      if (m.ran) setRan(m.ran);
+      setRecapId(m.recap ?? null);
+      setRole(m.role || "owner");
+      if (m.ownerKey) setOwnerKey(m.ownerKey);
+      setHostCodes(m.hostCodes || {});
+      setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
+      setKeyShown(!!m.state.keyShown);
+      setOpenedAt(m.state.openedAt); setScreen("run");
+    } else if (m.t === "cohosted") {
+      /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
+         karena tidak memegang ownerKey, dan co-host terputus untuk seterusnya. */
+      if (m.code) setHostCode(m.code);
+      /* Fasilitator tambahan tidak memuat sheet apa pun: decknya datang dari server. */
+      setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
+      setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
+      setRole(m.role || "viewer"); setOwnerKey("");
+      if (m.ran) setRan(m.ran);
+      setRecapId(m.recap ?? null);
+      setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
+      setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
+      setJoinErr(""); setScreen("run");
+    } else if (m.t === "recap") setRecapId(m.injectId ?? null);
+    else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
+    else if (m.t === "hosts") setHosts(m.hosts || []);
+    else if (m.t === "nosuchhost") {
+      setJoinErr("Kode fasilitator itu tidak dikenali.");
+      setHostCode("");
+    }
+    else if (m.t === "hostgone") {
+      lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup");
+      setJoinErr("Akses Anda dicabut oleh pemilik ruangan.");
+    } else if (m.t === "state") {
+      /* remember what arrived so the push effect below doesn't echo it back */
+      echo.current = `${m.activeIdx}:${m.phase}`;
+      if (m.ran) setRan(m.ran);
+      setActiveIdx(m.activeIdx);
+      setPhase(m.phase);
+      setKeyShown(!!m.keyShown);
+      if (m.openedAt) setOpenedAt(m.openedAt);
+    } else if (m.t === "roster") setPeople(m.people || []);
+    else if (m.t === "settings") {
+      setSettings(m.settings);
+      if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
+    }
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
+    else if (m.t === "hello") setKeyRequired(!!m.keyRequired);
+    else if (m.t === "denied") {
+      if (screenRef.current === "run") {
+        /* Penolakan saat menyambung ulang, bukan salah kata sandi. Jangan diamkan
+           sesi yang sudah putus, katakan apa yang harus dilakukan. */
+        lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup");
+        setJoinErr("Sesi Anda terputus dari ruangan. Masukkan lagi kode fasilitator Anda.");
+      } else { setDenied(true); lsDel(K_KEY); }
+    }
+    else if (m.t === "gone") { lsDel(K_HOST); setModel(null); setRoomId(""); setScreen("setup"); }
+  }, []);
+  const { send, status, gen, resync } = useSocket(onMsg);
+  useClockSync(send, gen);
+
+  /* re-attach after any reconnect */
+  useEffect(() => {
+    if (gen <= 1 || !roomId) return;
+    if (hostCode) send({ t: "cohost", roomId, code: hostCode, name: hostName });
+    else send({ t: "rehost", roomId, ownerKey, hostName });
+  }, [gen, roomId, send, hostCode, ownerKey, hostName]);
+
+  useEffect(() => {
+    const s = lsGet(K_HOST);
+    if (s?.roomId && s?.model) {
+      setRoomId(s.roomId); setModel(s.model); setFileName(s.fileName || "");
+      setNotes(s.notes || {});
+      setCodes(s.codes || {}); setSettings(s.settings || settings); setTimes(s.times || {});
+      setEtimes(s.etimes || {}); setRan(s.ran || []); setRole(s.role || "owner");
+      setOwnerKey(s.ownerKey || ""); setHostCode(s.hostCode || "");
+      setScreen("run");
+      if (s.hostCode) send({ t: "cohost", roomId: s.roomId, code: s.hostCode, name: s.hostName || "" });
+      else send({ t: "rehost", roomId: s.roomId, ownerKey: s.ownerKey || "", hostName: s.hostName || "" });
+    }
+    setBooted(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [send]);
+
+  useEffect(() => {
+    if (!booted || !model || !roomId) return;
+    const tm = setTimeout(() => {
+      lsSet(K_HOST, { roomId, model, fileName, notes, codes, settings, times, etimes, ran,
+        role, ownerKey, hostCode, hostName });
+    }, 500);
+    return () => clearTimeout(tm);
+  }, [booted, model, roomId, fileName, notes, codes, settings, times, etimes, ran,
+      role, ownerKey, hostCode, hostName]);
+
+  useEffect(() => {
+    if (!roomId || screen !== "run" || !canDrive) return;
+    const sig = `${activeIdx}:${phase}`;
+    if (echo.current === sig) return; // this change came from the server
+    send({ t: "state", roomId, activeIdx, phase });
+  }, [roomId, screen, activeIdx, phase, send, canDrive]);
+
+  useEffect(() => { screenRef.current = screen; }, [screen]);
+
+  const roleIdx = useCallback((p) => (model ? model.roles.indexOf(p) : -1), [model]);
+
+  function loadRows(rows, name) {
+    const built = buildModel(rows);
+    if (!built.injects.length) { setParseError("Tidak ada inject yang terbaca. Pastikan baris header ada di baris pertama."); return; }
+    setModel({ injects: built.injects, roles: built.roles });
+    setWarnings(built.warnings); setFileName(name); setParseError("");
+    setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
+    setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
+    setEtimes(Object.fromEntries(built.injects.map((i) => [i.id, i.ewindow ? String(Math.round(Number(i.ewindow) * 60)) : ""])));
+    setNotes({}); setActiveIdx(0); setPhase("lobby");
+    setScreen("config");
+  }
+
+  async function handleFile(file) {
+    if (!file) return;
+    try {
+      const XLSX = await import("xlsx");
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      loadRows(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" }), file.name);
+    } catch (e) {
+      setParseError("File itu tidak bisa dibaca. Simpan sebagai .xlsx atau .csv lalu coba lagi.");
+    }
+  }
+
+  const start = () => {
+    setDenied(false);
+    if (keyIn) lsSet(K_KEY, keyIn);
+    if (hostName) lsSet(K_NAME, hostName);
+    send({ t: "host", deck: model, settings, codes: draftCodes, times, etimes,
+      key: keyIn, hostName });
+  };
+
+  const setInjectTime = (id, v) => {
+    setTimes((m) => ({ ...m, [id]: v }));
+    if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
+  };
+  const setInjectETime = (id, v) => {
+    setEtimes((m) => ({ ...m, [id]: v }));
+    if (roomId) send({ t: "settings", roomId, etimes: { [id]: v } });
+  };
+  const limitOf = (id) => {
+    const v = times[id];
+    return v === "" || v == null ? settings.timeLimit : Number(v);
+  };
+  /* Esai memakai jendelanya sendiri: override inject, lalu default esai, lalu
+     jendela biasa. Dibaca sama persis seperti di server. */
+  const elimitOf = (id) => {
+    const v = etimes[id];
+    const base = v !== "" && v != null ? Number(v)
+      : settings.essayLimit === "" || settings.essayLimit == null
+        ? limitOf(id) : Number(settings.essayLimit);
+    return base ? base + (Number(settings.essayGrace) || 0) : base;
+  };
+  const hasEssay = (inj) => (inj?.questions || []).some((q) => q.type === "open");
+  /* Inject selesai ketika pertanyaan paling lambat selesai. */
+  const longestOf = (inj) => {
+    const a = limitOf(inj?.id);
+    if (!hasEssay(inj)) return a;
+    const b = elimitOf(inj?.id);
+    return !a || !b ? 0 : Math.max(a, b);
+  };
+  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan. */
+  const addTime = (id, secs, essay) => {
+    const cur = essay ? elimitOf(id) : limitOf(id);
+    const next = String(Math.max(0, Math.round(cur + secs)));
+    if (essay) setInjectETime(id, next); else setInjectTime(id, next);
+  };
+
+  const patchSettings = (patch) => {
+    setSettings((s) => ({ ...s, ...patch }));
+    if (roomId) send({ t: "settings", roomId, settings: patch });
+  };
+
+  function endSession() {
+    if (roomId) send({ t: "end", roomId });
+    lsDel(K_HOST);
+    setModel(null); setRoomId(""); setPeople([]); setScreen("setup"); onExit();
+  }
+
+  const inject = model?.injects[activeIdx];
+  const unitOf = (peran) => {
+    if (settings.showUnits) return peran;
+    const i = roleIdx(peran);
+    return tf("Unit {0}", i < 0 ? "?" : String.fromCharCode(65 + i));
+  };
+  const seatOf = (peran) => people.find((p) => p.peran === peran);
+  const openProjector = useCallback(() => {
+    if (roomId) window.open(`/screen#${roomId}`, "_blank", "noopener");
+  }, [roomId]);
+
+  /* ---- keyboard: the room is watching, don't hunt for buttons ---- */
+  const goNext = useCallback(() => {
+    if (!model) return;
+    setConfirmNext(false); echo.current = "";
+    setActiveIdx((i) => Math.min(model.injects.length - 1, i + 1));
+    setPhase("briefing");
+  }, [model]);
+  const goPrev = useCallback(() => {
+    setConfirmNext(false); echo.current = "";
+    setActiveIdx((i) => Math.max(0, i - 1));
+    setPhase("briefing");
+  }, []);
+  const advance = useCallback(() => {
+    echo.current = "";
+    if (phase === "lobby") setPhase("briefing");
+    else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
+    else if (phase === "open") setPhase("revealed");
+    else goNext();
+  }, [phase, goNext]);
+
+  useEffect(() => {
+    if (screen !== "run") return;
+    const onKey = (e) => {
+      if (e.target.closest && e.target.closest("input, textarea, select")) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = String(e.key).toLowerCase();
+      if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
+      else if (k === "r" && phase === "open" && canDrive) { echo.current = ""; setPhase("revealed"); }
+      else if (k === "k" && phase === "revealed" && !keyShown && canDrive) send({ t: "showkey", roomId });
+      else if (k === "c") setRoomOpen((v) => !v);
+      else if (k === "p") openProjector();
+      else if (e.key === "ArrowRight") { if (canDrive) goNext(); }
+      else if (e.key === "ArrowLeft") { if (canDrive) goPrev(); }
+      else if (e.key === "Escape") setRoomOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector, canDrive]);
+
+  /* ---- setup ---- */
+  if (screen === "setup") {
+    return (
+      <>
+        <Bar left={<b className="wordmark">{t("TTX Live")}</b>} onExit={onExit} exitLabel={t("Kembali")} conn={status} />
+        <main className="load">
+          <div className="loadinner">
+            <p className="eyebrow">{t("Fasilitator")}</p>
+            <h1>{t("Muat sheet inject Anda")}</h1>
+            {HELP_SHEET.map((k) => (
+              <p className="lede" key={k}><Rich>{t(k)}</Rich></p>
+            ))}
+            <div className="drop" onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden
+                onChange={(e) => handleFile(e.target.files[0])} />
+              <button className="btn" onClick={() => fileRef.current?.click()}>{t("Pilih file")}</button>
+              <span className="or">{t("atau jatuhkan di sini")}</span>
+            </div>
+            {parseError && <div className="err">{t(parseError)}</div>}
+            <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
+              {t("Muat contoh latihan saja")}
+            </button>
+
+            {/* Fasilitator kedua tidak memuat sheet. Ia masuk dengan kode dari
+                pemilik ruangan, dan kode itu yang menentukan haknya. */}
+            <div className="joinhost">
+              <h3>{t("Bergabung sebagai fasilitator")}</h3>
+              <p className="hint">
+                {t("Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.")}
+              </p>
+              <div className="joinrow">
+                <input className="cinput" maxLength={8} placeholder={t("KODE")} value={joinCode}
+                  autoComplete="off"
+                  onChange={(e) => { setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "")); setJoinErr(""); }}
+                  onKeyDown={(e) => e.key === "Enter" && joinCode.length >= 4 && send({ t: "cohost", code: joinCode, name: hostName })} />
+                <input placeholder={t("Nama Anda, opsional")} value={hostName} autoComplete="off"
+                  onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
+                <button className="btn" disabled={joinCode.length < 4}
+                  onClick={() => send({ t: "cohost", code: joinCode, name: hostName })}>{t("Masuk")}</button>
+              </div>
+              {joinErr && <div className="err">{t(joinErr)}</div>}
+            </div>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  /* ---- config ---- */
+  if (screen === "config") {
+    return (
+      <>
+        <Bar left={<b className="wordmark">{t("Sebelum mulai")}</b>}
+          onExit={() => setScreen("setup")} exitLabel={t("Kembali")} conn={status} />
+        <main className="load">
+          <div className="loadinner wide">
+            <h1>{t("Sebelum mulai")}</h1>
+
+            {warnings.length > 0 && (
+              <details className="warn" open>
+                <summary>{tf("{0} hal yang perlu dicek", warnings.length)}</summary>
+                <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+              </details>
+            )}
+
+            <h3>{t("Penilaian")}</h3>
+            <div className="setgrid">
+              <div className="fld span2">
+                <span>{t("Mode penilaian")}</span>
+                <div className="seg2">
+                  {[["auto", "Otomatis (pilihan)"], ["manual", "Manual (Anda yang menilai)"]].map(([v, l]) => (
+                    <button key={v} className={settings.mode === v ? "on" : ""}
+                      onClick={() => patchSettings({ mode: v })}>{t(l)}</button>
+                  ))}
+                </div>
+              </div>
+              <p className="hint span2">
+                {t("Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan tanpa opsi selalu jatuh ke penilaian manual.")}
+              </p>
+
+              {settings.mode === "auto" && (
+                <>
+                  <label className="fld">
+                    <span>{t("Poin per pertanyaan")}</span>
+                    <input type="number" min="0" step="100" value={settings.points}
+                      onChange={(e) => patchSettings({ points: Number(e.target.value) })} />
+                  </label>
+                  <label className="fld">
+                    <span>{t("Batas waktu default (detik, 0 = tanpa batas)")}</span>
+                    <input type="number" min="0" step="5" value={settings.timeLimit}
+                      onChange={(e) => patchSettings({ timeLimit: Number(e.target.value) })} />
+                  </label>
+                  <label className="fld">
+                    <span>{t("Batas waktu esai (detik, 0 = tanpa batas)")}</span>
+                    <input type="number" min="0" step="30" value={settings.essayLimit}
+                      onChange={(e) => patchSettings({ essayLimit: Number(e.target.value) })} />
+                  </label>
+                  <label className="fld">
+                    <span>{t("Kelonggaran mengetik esai (detik)")}</span>
+                    <input type="number" min="0" step="15" value={settings.essayGrace}
+                      onChange={(e) => patchSettings({ essayGrace: Number(e.target.value) })} />
+                  </label>
+                  <p className="hint span2">
+                    {t("Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu dan menunggu, dan inject baru tertutup setelah jam terpanjang habis. Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong nilai.")}
+                  </p>
+                  <Check label={t("Bonus kecepatan")} checked={settings.speedBonus}
+                    onChange={(v) => patchSettings({ speedBonus: v })}
+                    hint={t("Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat.")} />
+                  <Check label={t("Buka jawaban otomatis saat waktu habis")} checked={settings.autoReveal}
+                    onChange={(v) => patchSettings({ autoReveal: v })}
+                    hint={t("Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.")} />
+                  <Check label={t("Tampilkan peringkat")} checked={settings.leaderboard}
+                    onChange={(v) => patchSettings({ leaderboard: v })}
+                    hint={t("Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.")} />
+                </>
+              )}
+
+              <Check label={t("Tampilkan nama unit")} checked={settings.showUnits}
+                onChange={(v) => patchSettings({ showUnits: v })}
+                hint={t("Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa.")} />
+            </div>
+
+            {settings.mode === "auto" && (
+              <>
+                <h3>{t("Waktu per inject")}</h3>
+                <p className="hint">
+                  {tf("Lama tiap unit boleh menjawab. Kosong berarti memakai default, {0} detik untuk pilihan dan {1} detik untuk esai. Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya bisa diubah saat latihan berjalan.",
+                    settings.timeLimit, settings.essayLimit)}
+                </p>
+                <p className="hint">
+                  <button className="link" onClick={() => {
+                    const blank = Object.fromEntries(model.injects.map((i) => [i.id, ""]));
+                    setTimes(blank); setEtimes(blank);
+                    if (roomId) send({ t: "settings", roomId, times: blank, etimes: blank });
+                  }}>{t("Kosongkan semua, ikuti angka default")}</button>
+                </p>
+                <ul className="codelist">
+                  <li className="cohead">
+                    <span className="cname">{t("Inject")}</span>
+                    <span className="colcap">{t("Pilihan")}</span>
+                    <span className="colcap">{t("Esai")}</span>
+                  </li>
+                  {model.injects.map((i) => (
+                    <li key={i.id}>
+                      <span className="cname"><b className="mono">{i.id}</b> {i.siklus}</span>
+                      <input className="cinput narrow" type="number" min="0" step="5"
+                        placeholder={String(settings.timeLimit)}
+                        value={times[i.id] ?? ""}
+                        onChange={(e) => setTimes((m) => ({ ...m, [i.id]: e.target.value }))} />
+                      <input className={`cinput narrow ${hasEssay(i) ? "" : "dim"}`} type="number" min="0" step="30"
+                        placeholder={String(settings.essayLimit)}
+                        title={t(hasEssay(i) ? "Waktu esai untuk inject ini" : "Inject ini tidak punya esai")}
+                        value={etimes[i.id] ?? ""}
+                        onChange={(e) => setEtimes((m) => ({ ...m, [i.id]: e.target.value }))} />
+                      <span className="unit">{t("detik")}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            <h3>{t("Kursi")}</h3>
+            <p className="hint">
+              {t("Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak. Ubah kode mana pun, atau buat yang baru.")}
+            </p>
+            <ul className="codelist">
+              {model.roles.map((r, i) => (
+                <li key={r}>
+                  <Crest peran={r} idx={i} />
+                  <span className="cname">{r}</span>
+                  <input className="cinput" maxLength={8} value={draftCodes[r] || ""}
+                    onChange={(e) => setDraftCodes((d) => ({ ...d, [r]: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") }))} />
+                  <button className="btn quiet" onClick={() => setDraftCodes((d) => ({ ...d, [r]: rand(4) }))}>
+                    {t("Acak")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            <h3>{t("Nama Anda")}</h3>
+            <label className="fld">
+              <span>{t("Muncul di daftar fasilitator, opsional")}</span>
+              <input value={hostName} autoComplete="off"
+                onChange={(e) => { setHostName(e.target.value); lsSet(K_NAME, e.target.value); }} />
+            </label>
+
+            {keyRequired && (
+              <>
+                <h3>{t("Kata sandi fasilitator")}</h3>
+                <label className="fld">
+                  <span>{t("Ditentukan oleh yang men-deploy aplikasi ini")}</span>
+                  <input type="password" value={keyIn} autoComplete="off"
+                    onChange={(e) => { setKeyIn(e.target.value); setDenied(false); }} />
+                </label>
+              </>
+            )}
+            {denied && <div className="err">{t("Kata sandi itu tidak diterima.")}</div>}
+            <button className="btn wide" onClick={start}
+              disabled={keyRequired && !keyIn}>{t("Buka ruangan")}</button>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  /* ---- report ---- */
+  if (screen === "report") {
+    return <Report {...{ model, notes, people, settings, roleIdx, fileName, unitOf, ran }}
+      onBack={() => setScreen("run")} onEnd={endSession} />;
+  }
+
+  /* ---- run ---- */
+  if (!model || !inject) {
+    return (
+      <>
+        <Bar left={<b className="wordmark">{t("TTX Live")}</b>} onExit={onExit} exitLabel={t("Kembali")} conn={status} />
+        <div className="crash">
+          <h1>{t("Sesi ini sudah tidak ada di server")}</h1>
+          <p className="muted">{t("Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.")}</p>
+          <button className="btn" onClick={() => { nukeAll(); location.reload(); }}>{t("Mulai baru")}</button>
+        </div>
+      </>
+    );
+  }
+
+  const answeredBy = (q) => people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
+  const seatsHere = inject.roles.map(seatOf).filter(Boolean);
+  const allIn = seatsHere.length === inject.roles.length && seatsHere.length > 0 &&
+    inject.questions.every((q) => seatOf(q.peran)?.answers?.[q.qid]);
+
+  return (
+    <>
+      <Bar conn={status} onExit={onExit}
+        left={<>
+          <span className="crumb">{inject.siklus}</span>
+          <b className="injno">{tf("Inject {0}", inject.id)}</b>
+          <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
+            echo.current = "";
+            if (k === "open" && phase !== "open") setOpenedAt(serverNow());
+            setPhase(k);
+          } : null} />
+          {role !== "owner" && <span className={`rolepill ${role}`}>{t(ROLE_LABEL[role])}</span>}
+        </>}
+        right={<>
+          {canDrive && (<>
+            <button className={`btn quiet pill ${settings.showUnits ? "" : "off"}`}
+              title={t(settings.showUnits ? "Sembunyikan nama unit" : "Tampilkan nama unit")}
+              onClick={() => patchSettings({ showUnits: !settings.showUnits })}>{t("Unit")}</button>
+          </>)}
+          <button className="btn quiet" onClick={() => setTeamOpen(true)}
+            title={t("Fasilitator di ruangan ini")}>{t("Tim")} · {hosts.length || "·"}</button>
+          <button className="btn quiet" onClick={() => setRoomOpen(true)}>
+            {t("Kursi")} · {people.length}/{model.roles.length}
+          </button>
+          {ran.filter((x) => String(x) !== String(model.injects[activeIdx]?.id)).length > 0 && (
+            <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
+              title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
+          )}
+          <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
+          <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
+        </>} />
+
+      {roomOpen && (
+        <RoomPanel {...{ codes, model, settings, unitOf, seatOf, canDrive }}
+          onSetting={patchSettings}
+          onRelease={(peran) => send({ t: "release", roomId, peran })}
+          onClose={() => setRoomOpen(false)}
+          onLobby={() => { echo.current = ""; setPhase("lobby"); setRoomOpen(false); }} />
+      )}
+
+      {recapOpen && (
+        <RecapPanel {...{ model, ran, activeIdx, people, unitOf, roleIdx, settings, recapId, canDrive }}
+          onShow={(id) => { setRecapId(id); send({ t: "recap", roomId, injectId: id }); }}
+          onClose={() => setRecapOpen(false)} />
+      )}
+
+      {teamOpen && (
+        <TeamPanel {...{ hosts, hostCodes, isOwner, role, status }}
+          onResync={resync}
+          onAdd={(r, label) => send({ t: "cohost_add", roomId, role: r, label })}
+          onRemove={(code) => send({ t: "cohost_remove", roomId, code })}
+          onClose={() => setTeamOpen(false)} />
+      )}
+
+      <main className="run">
+        <aside className="rail">
+          <ol className="tl">
+            {model.injects.map((inj, i) => {
+              const head = i === 0 || model.injects[i - 1].siklus !== inj.siklus;
+              const state = i < activeIdx ? "done" : i === activeIdx ? "now" : "next";
+              const words = (inj.condition || "").split(/\s+/).slice(0, 6).join(" ");
+              return (
+                <React.Fragment key={inj.id}>
+                  {head && <li className="tlhead">{inj.siklus}</li>}
+                  <li className={`tlrow ${state}`}>
+                    <button disabled={!canDrive}
+                      onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
+                      <span className="tldot" aria-hidden="true" />
+                      <span className="tlno">{inj.id}</span>
+                      <span className="tltext">{words}{words ? "…" : "·"}</span>
+                    </button>
+                  </li>
+                </React.Fragment>
+              );
+            })}
+          </ol>
+          <div className="tlfoot">
+            <span className="mono">{activeIdx + 1}/{model.injects.length}</span>
+            <span className="tlprog"><i style={{ width: `${((activeIdx + 1) / model.injects.length) * 100}%` }} /></span>
+          </div>
+        </aside>
+
+        {/* Ruang tunggu memakai lebar penuh: kartu kodenya harus terbaca dari
+            jauh dan semuanya muat tanpa menggulung layar. */}
+        <section className={`stage ${phase === "lobby" ? "wide" : ""}`}>
+          {phase === "lobby" ? (
+            <Lobby {...{ codes, people, model, unitOf, seatOf }}
+              onBegin={canDrive ? () => { echo.current = ""; setPhase("briefing"); } : null}
+              injectId={inject.id} />
+          ) : (
+            <>
+              {inject.condition
+                ? <Dual tag="blockquote" className="scenario"
+                  text={inject.condition} alt={inject.conditionAlt}>
+                  <span className="eyebrow">{t("Kondisi")}</span>
+                </Dual>
+                : <div className="empty">{t("Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.")}</div>}
+
+              <div className="callon">
+                <span>{t("Ditanyakan ke")}</span>
+                {inject.roles.map((r) => (
+                  <span key={r} className="chip"><Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}</span>
+                ))}
+              </div>
+
+              <div className="actbar">
+                {phase === "briefing" && (<>
+                  <span className="msg">
+                    {t(canDrive
+                      ? "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab."
+                      : "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.")}
+                  </span>
+                  {settings.mode === "auto" && canDrive && (
+                    <span className="inlinetime">
+                      <input type="number" min="0" step="5" placeholder={String(settings.timeLimit)}
+                        value={times[inject.id] ?? ""}
+                        onChange={(e) => setInjectTime(inject.id, e.target.value)} />
+                      <span className="unit">{t("pilihan")}</span>
+                      {hasEssay(inject) && (<>
+                        <input type="number" min="0" step="30" placeholder={String(settings.essayLimit)}
+                          value={etimes[inject.id] ?? ""}
+                          onChange={(e) => setInjectETime(inject.id, e.target.value)} />
+                        <span className="unit">{t("esai")}</span>
+                      </>)}
+                    </span>
+                  )}
+                  {canDrive && (
+                    <button className="btn" onClick={() => {
+                      echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
+                    }}>{t("Buka untuk menjawab")}</button>
+                  )}
+                </>)}
+
+                {phase === "open" && (<>
+                  {settings.mode === "auto" && limitOf(inject.id) > 0
+                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)}
+                        cap={hasEssay(inject) ? t("pilihan") : ""} />
+                    : <span className="msg">{t("Jawaban sudah dibuka.")}</span>}
+                  {settings.mode === "auto" && hasEssay(inject) && elimitOf(inject.id) > 0 && (
+                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap={t("esai")} />
+                  )}
+                  <span className="msg">
+                    {seatsHere.length === 0 ? t("Belum ada unit yang mengambil kursi untuk inject ini")
+                      : allIn ? t("Semua unit sudah menjawab")
+                        : tf("Menunggu jawaban, {0} dari {1} unit sudah duduk", seatsHere.length, inject.roles.length)}
+                  </span>
+                  {canDrive && settings.mode === "auto" && (
+                    <span className="addtime">
+                      <span className="unit">{t("Tambah")}</span>
+                      {[60, 120, 300].map((sec) => (
+                        <button key={sec} className="btn quiet pill"
+                          title={t(hasEssay(inject) ? "Menambah kedua jam" : "Menambah waktu menjawab")}
+                          onClick={() => {
+                            addTime(inject.id, sec, false);
+                            if (hasEssay(inject)) addTime(inject.id, sec, true);
+                          }}>+{sec / 60}m</button>
+                      ))}
+                    </span>
+                  )}
+                  {canDrive && (
+                    <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                      {t("Buka jawaban")}
+                    </button>
+                  )}
+                </>)}
+
+                {phase === "revealed" && (<>
+                  <span className="msg">
+                    {t(keyShown
+                      ? "Kunci jawaban sudah tampil di semua layar."
+                      : "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat.")}
+                  </span>
+                  {!keyShown && canDrive && (
+                    <button className="btn" onClick={() => send({ t: "showkey", roomId })}>
+                      {t("Tampilkan kunci jawaban")}
+                    </button>
+                  )}
+                  {canDrive && (
+                    <button className="btn quiet" onClick={() => {
+                      echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
+                    }}>{t("Buka lagi")}</button>
+                  )}
+                </>)}
+              </div>
+
+              {phase === "briefing" && inject.questions.length > 0 && (
+                <div className="qplan">
+                  <h4>{t("Pertanyaan di inject ini")}</h4>
+                  <ul>
+                    {inject.questions.map((q) => (
+                      <li key={q.qid}>
+                        <Crest peran={q.peran} idx={roleIdx(q.peran)} />
+                        <span className="qpunit">{unitOf(q.peran)}</span>
+                        <TypeBadge q={q} />
+                        <span className="qptext">{pick(q.text, q.alt)}</span>
+                        {q.choices?.length > 0 && (
+                          <span className="qpkeys mono">
+                            {q.weighted
+                              ? tf("{0} tingkat", new Set(q.choices.map((c) => c.w).filter((w) => w > 0)).size)
+                              : tf("{0}/{1} kunci", q.choices.filter((c) => c.correct).length, q.choices.length)}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {phase === "open" && (
+                <div className="tracker">
+                  {inject.roles.map((r) => {
+                    const seat = seatOf(r);
+                    const qs = inject.questions.filter((q) => q.peran === r);
+                    const done = seat ? qs.filter((q) => seat.answers?.[q.qid]).length : 0;
+                    const pct = qs.length ? Math.round((done / qs.length) * 100) : 0;
+                    const finishedMs = seat && qs.length && done === qs.length
+                      ? Math.max(...qs.map((q) => seat.answers[q.qid]?.ms || 0)) : null;
+                    return (
+                      <div key={r} className={`trow ${seat && done === qs.length ? "in" : ""}`}
+                        style={{ "--c": UNIT_VARS[(roleIdx(r) < 0 ? 0 : roleIdx(r)) % 6] }}>
+                        <Crest peran={r} idx={roleIdx(r)} />
+                        <span className="tname">{unitOf(r)}</span>
+                        <span className="tbar"><i style={{ width: `${pct}%` }} /></span>
+                        <span className="tcount mono">{done}/{qs.length}</span>
+                        {finishedMs != null
+                          ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
+                          : !seat ? <span className="tmiss">{t("kursi kosong")}</span>
+                            : <span className="tmiss">{t("sedang menjawab")}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {phase === "revealed" && inject.roles.map((peran) => (
+                <div key={peran} className="rolegroup">
+                  <div className="rolerule" style={{ "--c": UNIT_VARS[(roleIdx(peran) < 0 ? 0 : roleIdx(peran)) % 6] }}>
+                    <Crest peran={peran} idx={roleIdx(peran)} />{unitOf(peran)}
+                  </div>
+                  {inject.questions.filter((q) => q.peran === peran).map((q) => (
+                    <QuestionResult key={q.qid} {...{ q, settings, keyShown, unitOf }}
+                      answers={answeredBy(q)}
+                      onGrade={canGrade
+                        ? (pid, qid, quality) => send({ t: "grade", roomId, pid, qid, quality })
+                        : null}
+                      showExpected={revealKey[q.qid]}
+                      toggleExpected={() => setRevealKey((v) => ({ ...v, [q.qid]: !v[q.qid] }))} />
+                  ))}
+                </div>
+              ))}
+
+              {phase === "revealed" && (
+                <div className="notes">
+                  <label htmlFor={`n-${inject.id}`}>{t("Catatan fasilitator")}</label>
+                  <textarea id={`n-${inject.id}`} rows={3} value={notes[inject.id] || ""}
+                    readOnly={!canGrade}
+                    onChange={(e) => setNotes((n) => ({ ...n, [inject.id]: e.target.value }))} />
+                </div>
+              )}
+
+              <div className="nav">
+                <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>{t("Sebelumnya")}</button>
+                {!canDrive ? (
+                  <span className="msg">
+                    {t(role === "grader"
+                      ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
+                      : "Anda memantau. Perpindahan inject dipegang fasilitator utama.")}
+                  </span>
+                ) : activeIdx < model.injects.length - 1 ? (
+                  confirmNext ? (
+                    <span className="confirm">
+                      <span className="msg">{tf("Pindahkan semua ke inject {0}?", model.injects[activeIdx + 1].id)}</span>
+                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>{t("Batal")}</button>
+                      <button className="btn" onClick={goNext}>{t("Ya, lanjut")}</button>
+                    </span>
+                  ) : (
+                    <button className="btn" onClick={() => setConfirmNext(true)}>{t("Inject berikutnya")}</button>
+                  )
+                ) : (
+                  <button className="btn" onClick={() => setScreen("report")}>{t("Selesai")}</button>
+                )}
+              </div>
+
+              <p className="keys">
+                <kbd>{t("Spasi")}</kbd> {t("lanjut")} · <kbd>R</kbd> {t("buka jawaban")} · <kbd>K</kbd> {t("tampilkan kunci")} ·{" "}
+                <kbd>←</kbd> <kbd>→</kbd> {t("pindah inject")} · <kbd>C</kbd> {t("kursi")} · <kbd>P</kbd> {t("proyektor")}
+              </p>
+            </>
+          )}
+        </section>
+      </main>
+    </>
+  );
+}
+
+/* --------------------------- host pieces --------------------------- */
+
+/* Beberapa fasilitator dalam satu ruangan. Pemilik membuat kode, dan tiap kode
+   membawa perannya sendiri, jadi peran ditentukan saat kode dibuat. */
+/* Rekap inject yang sudah dijalankan, untuk dibahas lagi di inject berikutnya.
+   Fasilitator memegang deck lengkap beserta tanda kunci, dan roster membawa
+   seluruh jawaban tiap unit sejak awal, jadi panel ini tidak meminta apa pun
+   ke server. Yang lewat jaringan hanya satu hal: nomor inject yang dilempar ke
+   proyektor. */
+function RecapPanel({ model, ran, activeIdx, people, unitOf, roleIdx, settings,
+  recapId, canDrive, onShow, onClose }) {
+  const [openId, setOpenId] = useState(null);
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+
+  const done = new Set((ran || []).map(String));
+  const list = model.injects
+    .map((inj, idx) => ({ inj, idx }))
+    .filter((x) => x.idx !== activeIdx && done.has(String(x.inj.id)));
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
+        aria-label={t("Rekap inject")}>
+        <div className="phead">
+          <h2>{t("Rekap inject")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.")}
+        </p>
+
+        {list.length === 0 && (
+          <p className="hint">{t("Belum ada inject yang selesai dijalankan.")}</p>
+        )}
+
+        <ul className="recaplist">
+          {list.map(({ inj }) => {
+            const open = openId === inj.id;
+            const onProj = String(recapId) === String(inj.id);
+            return (
+              <li key={inj.id} className={open ? "open" : ""}>
+                <div className="rchead">
+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
+                    <b>{tf("Inject {0}", inj.id)}</b>
+                    <small>{inj.siklus}</small>
+                  </button>
+                  {canDrive && (
+                    <button className={`btn quiet pill ${onProj ? "on" : ""}`}
+                      onClick={() => onShow(onProj ? null : inj.id)}>
+                      {t(onProj ? "Lepas dari proyektor" : "Tampilkan di proyektor")}
+                    </button>
+                  )}
+                </div>
+                {open && (
+                  <div className="rcbody">
+                    {inj.condition && (
+                      <blockquote className="rccond">{inj.condition}</blockquote>
+                    )}
+                    {inj.questions.map((q) => {
+                      const keyIdx = (q.choices || [])
+                        .map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
+                      const rs = people.filter((p) => p.peran === q.peran);
+                      return (
+                        <div className="rcq" key={q.qid}>
+                          <p className="rcpunit">
+                            <Crest peran={q.peran} idx={roleIdx(q.peran)} size={18} />
+                            {unitOf(q.peran)}
+                          </p>
+                          <p className="rcqtext">{q.text}</p>
+                          {keyIdx.length > 0 && (
+                            <p className="rckey">
+                              <span className="lab">{t("Kunci")}</span>
+                              {keyIdx.map((i) => q.choices[i].text).join("; ")}
+                            </p>
+                          )}
+                          <ul className="rcans">
+                            {rs.length === 0 && (
+                              <li className="none">{t("Unit ini tidak hadir di inject itu.")}</li>
+                            )}
+                            {rs.map((p) => {
+                              const a = p.answers?.[q.qid];
+                              if (!a) return (
+                                <li key={p.pid} className="none">{t("Tidak ada jawaban terkirim")}</li>
+                              );
+                              const cls = a.correct ? "ok" : a.acc > 0 ? "part"
+                                : a.correct === false ? "no" : "";
+                              return (
+                                <li key={p.pid} className={cls}>
+                                  <span className="rcatext">{a.text || "·"}</span>
+                                  {settings?.mode === "auto" && (
+                                    <span className="rcapts mono">
+                                      {a.points ? `+${a.points.toLocaleString()}` : "0"}
+                                    </span>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
+function TeamPanel({ hosts, hostCodes, isOwner, role, status, onAdd, onRemove, onResync, onClose }) {
+  const [newRole, setNewRole] = useState("grader");
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  const entries = Object.entries(hostCodes || {});
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("Fasilitator")}>
+        <div className="phead">
+          <h2>{t("Fasilitator")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+
+        <h3>{t("Sedang terhubung")}</h3>
+        <ul className="hostlist">
+          {hosts.length === 0 && <li className="muted">{t("Belum ada kabar dari server.")}</li>}
+          {hosts.map((h, i) => (
+            <li key={i}>
+              <span className={`rolepill ${h.role}`}>{t(ROLE_LABEL[h.role]) || h.role}</span>
+              <span className="hname">{h.name || t("tanpa nama")}</span>
+            </li>
+          ))}
+        </ul>
+        <div className="joinrow">
+          <span className={`connpill ${status === "live" ? "on" : ""}`}>
+            {t(status === "live" ? "Tersambung" : "Menyambung ulang")}
+          </span>
+          <button className="btn quiet" onClick={onResync}>{t("Sinkronkan ulang")}</button>
+        </div>
+        <p className="hint">
+          {t("Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali tanpa kehilangan apa pun.")}
+        </p>
+
+        {isOwner ? (
+          <>
+            <h3>{t("Kode fasilitator")}</h3>
+            <p className="hint">
+              {t("Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.")}
+            </p>
+            <div className="joinrow">
+              <select value={newRole} onChange={(e) => setNewRole(e.target.value)}>
+                <option value="full">{t(ROLE_LABEL.full)}</option>
+                <option value="grader">{t(ROLE_LABEL.grader)}</option>
+                <option value="viewer">{t(ROLE_LABEL.viewer)}</option>
+              </select>
+              <input placeholder={t("Nama atau keterangan, opsional")} value={label}
+                onChange={(e) => setLabel(e.target.value)} autoComplete="off" />
+              <button className="btn" onClick={() => { onAdd(newRole, label); setLabel(""); }}>
+                {t("Buat kode")}
+              </button>
+            </div>
+            <p className="hint">{t(ROLE_HINT[newRole])}</p>
+            <ul className="codelist">
+              {entries.length === 0 && <li className="muted">{t("Belum ada kode.")}</li>}
+              {entries.map(([code, v]) => (
+                <li key={code}>
+                  <b className="mono ccode">{code}</b>
+                  <span className={`rolepill ${v.role}`}>{t(ROLE_LABEL[v.role]) || v.role}</span>
+                  <span className="cname">{v.label || "·"}</span>
+                  <button className="btn quiet" onClick={() => onRemove(code)}>{t("Cabut")}</button>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="hint">
+            {t("Anda masuk sebagai")} <b>{t(ROLE_LABEL[role]) || role}</b>. {t(ROLE_HINT[role])}{" "}
+            {t("Hubungi pemilik ruangan kalau Anda perlu hak yang lain.")}
+          </p>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function Lobby({ codes, people, model, unitOf, seatOf, onBegin, injectId }) {
+  const taken = people.length;
+  return (
+    <div className="lobby">
+      <div className="lobbytop">
+        <div>
+          <h2>{tf("{0} unit, {1} kursi", model.roles.length, model.roles.length)}</h2>
+          <p className="muted">
+            {t("Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.")}
+          </p>
+        </div>
+        <div className="dial">
+          <b className="mono">{taken}</b><span>{tf("dari {0} kursi", model.roles.length)}</span>
+        </div>
+      </div>
+
+      <ul className="codegrid">
+        {model.roles.map((r, i) => {
+          const code = Object.keys(codes).find((c) => codes[c] === r);
+          const seat = seatOf(r);
+          return (
+            <li key={r} className={seat ? "in" : ""} style={{ "--c": UNIT_VARS[i % 6] }}>
+              <span className="cghead">
+                <Crest peran={r} idx={i} />
+                <b>{unitOf(r)}</b>
+              </span>
+              <b className="cgcode">{code}</b>
+              {/* Baris status memakai satu slot yang sama untuk kursi kosong
+                  maupun kursi terisi, jadi nama unit sepanjang apa pun tidak
+                  pernah mendorong badge keluar dari kartu. */}
+              {!seat ? (
+                <span className="seatopen">{t("kursi kosong")}</span>
+              ) : (
+                <span className="cgwho">
+                  {t(seat.live === false ? "sudah duduk · offline" : "sudah duduk")}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {onBegin && (
+        <button className="btn wide" onClick={onBegin}>
+          {injectId ? tf("Lanjut ke inject {0}", injectId) : t("Mulai latihan")}
+        </button>
+      )}
+      {taken === 0 && (
+        <p className="hint">
+          {t("Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RoomPanel({ codes, model, settings, unitOf, seatOf, canDrive = true,
+  onSetting, onRelease, onClose, onLobby }) {
+  const [confirm, setConfirm] = useState("");
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("Seats")}>
+        <div className="phead">
+          <h2>{t("Kursi")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit harus mulai dari nol.")}
+        </p>
+        <ul className="codelist big">
+          {model.roles.map((r, i) => {
+            const code = Object.keys(codes).find((c) => codes[c] === r);
+            const seat = seatOf(r);
+            return (
+              <li key={r}>
+                <Crest peran={r} idx={i} />
+                <span className="cname">{unitOf(r)}</span>
+                <b className="bigcode mono">{code}</b>
+                <span className={seat && seat.live !== false ? "tin" : "tmiss"}>
+                  {t(!seat ? "kosong" : seat.live === false ? "offline" : "sudah duduk")}
+                </span>
+                {seat && canDrive && (confirm === r
+                  ? <span className="confirm">
+                    <button className="btn quiet" onClick={() => setConfirm("")}>{t("Batal")}</button>
+                    <button className="btn danger" onClick={() => { onRelease(r); setConfirm(""); }}>{t("Lepas")}</button>
+                  </span>
+                  : <button className="btn quiet" onClick={() => setConfirm(r)}>{t("Lepas")}</button>)}
+              </li>
+            );
+          })}
+        </ul>
+
+        {canDrive && (<>
+          <h3>{t("Tampilan di layar")}</h3>
+          <Check label={t("Nama unit")} checked={settings.showUnits}
+            onChange={(v) => onSetting({ showUnits: v })}
+            hint={t("Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya.")} />
+
+          <button className="btn quiet wide" onClick={onLobby}>{t("Kembali ke ruang tunggu")}</button>
+          <p className="hint">
+            {t("Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.")}
+          </p>
+        </>)}
+      </aside>
+    </div>
+  );
+}
+
+const picksOf = (a) => (a ? (a.picks || (a.choice != null ? [a.choice] : [])) : []);
+
+function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExpected, keyShown, unitOf }) {
+  const isCheck = q.type === "checkbox";
+  const isAuto = settings.mode === "auto" && (q.type === "choice" || isCheck);
+  const correctIdx = q.choices ? q.choices.findIndex((c) => c.correct) : -1;
+  const { pick } = useLang();
+
+  const dist = useMemo(() => {
+    if (!q.choices?.length) return [];
+    return q.choices.map((c, i) => ({
+      ...c, i, n: answers.filter((p) => picksOf(p.answers[q.qid]).includes(i)).length,
+    }));
+  }, [q, answers]);
+  /* The bar is share of responding units, not share of ticks — on a checkbox
+     question the ticks add up to more than the number of units. */
+  const total = Math.max(1, answers.length);
+
+  return (
+    <div className="qcard">
+      {/* Badge tipe berdiri sebagai label di atas pertanyaan, bukan menggantung
+          di bawahnya, supaya tidak pernah terlihat menempel pada teks. */}
+      <p className="qtypeline"><TypeBadge q={q} /></p>
+      <Dual className="qtext" text={q.text} alt={q.alt} />
+
+      {isAuto ? (
+        <>
+          <ul className="votes">
+            {dist.map((c) => {
+              const o = optOf(c.i);
+              const isKey = keyShown && c.correct;
+              const tier = !q.weighted ? ""
+                : c.stars > 0 ? "★".repeat(c.stars)
+                  : c.wRaw != null && c.wRaw > 0 ? `bobot ${c.wRaw}` : "";
+              return (
+                <li key={c.i} className={`vrow ${isKey ? "correct" : ""}`} style={{ "--c": o.c }}>
+                  <span className="vglyph"><Glyph shape={o.shape} size={14} /></span>
+                  <span className="vtrack">
+                    <i className="vfill" style={{ width: `${(c.n / total) * 100}%` }} />
+                    <span className="vlabel">
+                      {pick(c.text, c.alt)}
+                      {/* Bobot hanya muncul setelah fasilitator menekan tombol
+                          tampilkan jawaban. Opsi tanpa bobot tidak diberi label. */}
+                      {q.weighted && keyShown && tier && (
+                        <span className={`tier ${c.correct ? "top" : "mid"}`}>{tier}</span>
+                      )}
+                      {/* Cincin hijau dan warna teksnya sudah menandai kunci. Pada soal
+                          centang, kuncinya bisa tiga atau empat, dan kata "kunci" di tiap
+                          baris hanya menambah keramaian tanpa menambah keterangan. */}
+                    </span>
+                  </span>
+                  <span className="vn mono">{c.n}<em>{t("unit")}</em></span>
+                </li>
+              );
+            })}
+          </ul>
+          {keyShown && correctIdx < 0 && (
+            <p className="hint warnhint">{t("Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.")}</p>
+          )}
+          <ul className="who-list">
+            {answers.map((p) => {
+              const a = p.answers[q.qid];
+              const picks = picksOf(a);
+              const part = a.correct === false && a.acc > 0;
+              return (
+                <li key={p.pid} className={!keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : ""}>
+                  {a.rank && <span className="rk mono">{a.rank}</span>}
+                  <span className="wname">{unitOf(p.peran)}</span>
+                  <span className="wopt">
+                    {picks.map((i) => {
+                      const o = optOf(i);
+                      return <span key={i} style={{ color: o.c }}><Glyph shape={o.shape} size={11} /></span>;
+                    })}
+                  </span>
+                  <span className="ms mono">{(a.ms / 1000).toFixed(1)}s</span>
+                  <span className="pts mono">{keyShown ? (a.points ? `+${a.points}` : "0") : "·"}</span>
+                </li>
+              );
+            })}
+            {answers.length === 0 && <li className="none">{t("Unit ini tidak menjawab.")}</li>}
+          </ul>
+        </>
+      ) : (
+        <>
+          {answers.length === 0
+            ? <p className="noanswer">{t("Unit ini tidak menjawab.")}</p>
+            : <ul className="answers">
+              {answers.map((p) => {
+                const a = p.answers[q.qid];
+                return (
+                  <li key={p.pid}>
+                    <span className="who">
+                      {unitOf(p.peran)} · {tf("{0} dtk", (a.ms / 1000).toFixed(0))}
+                    </span>
+                    <p>{a.text}</p>
+                    <div className="grade">
+                      <span className="dimlab">{t("Nilai")}</span>
+                      <div className="gscale" role="group" aria-label={t("Nilai 1 sampai 10")}>
+                        {GRADES.map((v) => (
+                          <button key={v} className={a.quality === v ? `on ${gradeCls(v)}` : ""}
+                            title={qualityWord(v)} disabled={!onGrade}
+                            onClick={() => onGrade && onGrade(p.pid, q.qid, a.quality === v ? null : v)}>{v}</button>
+                        ))}
+                      </div>
+                      <span className="gout">
+                        {a.quality == null ? t("belum dinilai")
+                          : <>{qualityWord(a.quality)} · <b className="mono">+{(a.points || 0).toLocaleString()}</b> {t("poin")}</>}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>}
+          <div className="qfoot">
+            <p className="hint">
+              <Rich>{t("Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih menambah hingga separuh. Unit melihat angkanya begitu Anda menekan * Tampilkan kunci jawaban*.")}</Rich>
+            </p>
+            {q.answerRaw && (
+              <button className="link" onClick={toggleExpected}>
+                {t(showExpected ? "Sembunyikan jawaban model" : "Lihat jawaban model")}
+              </button>
+            )}
+          </div>
+          {showExpected && q.answerRaw && <p className="model">{q.answerRaw}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* =========================== PARTICIPANT =========================== */
+
+/* Satu pertanyaan dari inject yang sudah lewat, dengan jawaban unit ini.
+   Dipakai blok konteks maupun panel riwayat, supaya keduanya tidak pernah
+   menampilkan hal yang sama dengan cara yang berbeda. */
+function PastQ({ q, a, k, pick }) {
+  const keyIdx = k ? (k.is || [k.i]) : null;
+  const names = (list) => (list || [])
+    .map((i) => { const c = q.choices?.[i]; return c ? pick(c.text, c.alt) : ""; })
+    .filter(Boolean).join("; ");
+  const mineIdx = a ? (a.picks || (a.choice != null ? [a.choice] : [])) : [];
+  const cls = !a ? "miss"
+    : a.correct ? "ok" : a.acc > 0 ? "part" : a.correct === false ? "no" : "";
+  return (
+    <div className={`pastq ${cls}`}>
+      <p className="pqq">{pick(q.text, q.alt)}</p>
+      <p className="pqa">
+        <span className="lab">{t("Jawaban unit Anda")}</span>
+        {a ? (names(mineIdx) || a.text || "·") : t("Tidak ada jawaban terkirim")}
+      </p>
+      {a && a.quality != null && (
+        <p className="pqn"><span className="lab">{t("Nilai esai")}</span>{tf("{0} dari 10", a.quality)}</p>
+      )}
+      {keyIdx && (
+        <p className="pqk">
+          <span className="lab">{t("Kunci")}</span>
+          {names(keyIdx) || (k.texts ? k.texts.join("; ") : k.text)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* Konteks inject sebelumnya di layar peserta. */
+function PrevContext({ inject, answers, keyMap, pick }) {
+  const [open, setOpen] = useState(false);
+  const qs = inject.questions || [];
+  if (!qs.length) return null;
+  return (
+    <div className={`prevctx ${open ? "open" : ""}`}>
+      <button className="pcbtn" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="lab">{tf("Inject {0} sebelumnya", inject.id)}</span>
+        <span className="pcmore">{t(open ? "Tutup" : "Lihat jawaban unit Anda")}</span>
+      </button>
+      {open && (
+        <div className="pcbody">
+          {inject.condition && (
+            <p className="pccond">{pick(inject.condition, inject.conditionAlt)}</p>
+          )}
+          {qs.map((q) => (
+            <PastQ key={q.qid} q={q} a={answers?.[q.qid]} k={keyMap[q.qid]} pick={pick} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Riwayat inject yang sudah lewat, hanya baca. */
+function HistoryPanel({ injects, answers, keys, pick, onClose }) {
+  const [openId, setOpenId] = useState(injects.length ? injects[injects.length - 1].id : null);
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
+        aria-label={t("Riwayat")}>
+        <div className="phead">
+          <h2>{t("Riwayat")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.")}
+        </p>
+        <ul className="recaplist">
+          {injects.map((inj) => {
+            const open = openId === inj.id;
+            return (
+              <li key={inj.id} className={open ? "open" : ""}>
+                <div className="rchead">
+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
+                    <b>{tf("Inject {0}", inj.id)}</b>
+                    <small>{inj.siklus}</small>
+                  </button>
+                </div>
+                {open && (
+                  <div className="rcbody">
+                    {inj.condition && (
+                      <blockquote className="rccond">{pick(inj.condition, inj.conditionAlt)}</blockquote>
+                    )}
+                    {(inj.questions || []).map((q) => (
+                      <PastQ key={q.qid} q={q} a={answers?.[q.qid]}
+                        k={(keys[inj.id] || {})[q.qid]} pick={pick} />
+                    ))}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
+function Participant() {
+  const [me, setMe] = useState(null);
+  const [codeIn, setCodeIn] = useState("");
+
+  const [peek, setPeek] = useState(null);     // { peran, taken, holder, sinceMs, live }
+  const [taken, setTaken] = useState(null);   // refusal from an actual join attempt
+  const [deck, setDeck] = useState(null);
+  const [state, setState] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [drafts, setDrafts] = useState({});
+  const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
+  const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
+  const [etimes, setEtimes] = useState({}); // jendela esai per inject
+  const [msg, setMsg] = useState("");
+  /* Kunci disimpan per inject, bukan satu wadah yang ditimpa tiap pindah inject.
+     Riwayat dan blok konteks membaca inject yang sudah lewat, jadi kuncinya
+     harus tetap ada setelah ruangan berpindah ke inject berikutnya. */
+  const [keys, setKeys] = useState({});
+  const [ran, setRan] = useState([]);       // inject yang pernah dibuka fasilitator
+  const [histOpen, setHistOpen] = useState(false);
+  const [booted, setBooted] = useState(false);
+  const [evicted, setEvicted] = useState(false);
+  const codeRef = useRef(null);
+
+  /* Peserta hanya melihat satu bahasa: yang ia pilih di perangkatnya sendiri.
+     Pilihan orang lain di ruangan tidak terpengaruh. */
+  const { pick } = useLang();
+  /* Teks pilihan diambil dari deck, bukan dari pesan kunci, supaya baris kunci
+     jawaban ikut bahasa yang dipilih peserta. */
+  const optText = useCallback((q, list) => (list || [])
+    .map((i) => { const c = q.choices?.[i]; return c ? pick(c.text, c.alt) : ""; })
+    .filter(Boolean).join("; "), [pick]);
+
+  const onMsg = useCallback((m) => {
+    if (m.t === "joined") {
+      const rec = { pid: m.pid, roomId: m.roomId, peran: m.peran, name: m.me.name,
+        seat: m.me.claimedAt, answers: m.me.answers || {}, total: m.me.total || 0,
+        possible: m.me.possible || 0, pct: m.me.pct ?? null };
+      setMe(rec); lsSet(K_ME, rec);
+      setDeck(m.deck); setState(m.state); setSettings(m.settings);
+      if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
+      if (m.ran) setRan(m.ran);
+      if (m.keys) setKeys(m.keys);
+      setMsg(""); setTaken(null); setEvicted(false);
+    } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
+    else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
+    else if (m.t === "state") {
+      setState({ activeIdx: m.activeIdx, phase: m.phase,
+        openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+      if (m.ran) setRan(m.ran);
+    }
+    else if (m.t === "settings") {
+      setSettings(m.settings);
+      if (m.times) setTimes(m.times);
+      if (m.etimes) setEtimes(m.etimes);
+    }
+    else if (m.t === "ack") {
+      setMe((p) => {
+        const n = { ...p, answers: m.me.answers, total: m.me.total,
+          possible: m.me.possible ?? p.possible, pct: m.me.pct ?? p.pct };
+        lsSet(K_ME, n); return n;
+      });
+      setMsg("Terkirim."); setTimeout(() => setMsg(""), 1800);
+    }
+    else if (m.t === "locked") setMsg("Jawaban sudah ditutup.");
+    else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
+    else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
+    else if (m.t === "key") {
+      /* Digabung, bukan ditimpa: inject lama tetap memegang kuncinya. */
+      setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
+    }
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
+    else if (m.t === "evicted") {
+      lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
+    }
+    else if (m.t === "left" || m.t === "gone" || m.t === "ended") {
+      lsDel(K_ME); setMe(null); setDeck(null); setState(null);
+    }
+  }, []);
+  const { send, status, gen } = useSocket(onMsg);
+  useClockSync(send, gen);
+
+  const meRoom = me?.roomId, mePid = me?.pid, meSeat = me?.seat;
+  useEffect(() => {
+    if (gen > 1 && meRoom && mePid) send({ t: "rejoin", roomId: meRoom, pid: mePid, seat: meSeat });
+  }, [gen, meRoom, mePid, meSeat, send]);
+
+  useEffect(() => {
+    const saved = lsGet(K_ME);
+    if (saved?.roomId && saved?.pid) {
+      setMe(saved);
+      send({ t: "rejoin", roomId: saved.roomId, pid: saved.pid, seat: saved.seat });
+    }
+    setBooted(true);
+  }, [send]);
+
+  const leave = () => {
+    if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
+    nukeAll(); setMe(null); setDeck(null); setState(null);
+    setCodeIn(""); setPeek(null); setTaken(null); setKeys({}); setRan([]);
+  };
+
+  /* Derived above every early return. useExpired sat below them, so it only
+     ran once a device had joined — the hook count changed between renders,
+     which is React error #310. */
+  const phase = state?.phase || "lobby";
+  const inject = deck?.injects?.[state?.activeIdx ?? 0];
+  const mine = inject?.questions || [];
+  /* Kunci inject yang sedang berjalan. Nama ini dipakai situs render yang sudah
+     ada, jadi perpindahan ke simpanan per inject berhenti di satu baris. */
+  const key = (inject && keys[inject.id]) || {};
+  /* Inject yang pernah dibuka fasilitator dan memang menanyakan sesuatu ke unit
+     ini. Yang sedang berjalan tidak ikut, dan urutannya mengikuti deck. */
+  const idxNow = state?.activeIdx ?? 0;
+  const history = useMemo(() => {
+    if (!deck?.injects) return [];
+    const done = new Set((ran || []).map(String));
+    return deck.injects
+      .map((i, idx) => ({ ...i, idx }))
+      .filter((i) => i.idx !== idxNow && done.has(String(i.id)) && (i.questions || []).length > 0);
+  }, [deck, ran, idxNow]);
+  /* Untuk blok konteks, yang dipakai hanya inject terakhir sebelum yang sekarang. */
+  const prevInject = useMemo(() => {
+    const before = history.filter((i) => i.idx < idxNow);
+    return before.length ? before[before.length - 1] : null;
+  }, [history, idxNow]);
+  /* Read the window the same way the server does, from the live `times` map, so
+     the facilitator editing it mid-brief changes what this device shows. */
+  const windowOf = (injId) => {
+    const v = times?.[injId];
+    if (v === "" || v == null) return Number(settings?.timeLimit ?? state?.limit ?? 0);
+    return Number(v);
+  };
+  const limit = inject ? windowOf(inject.id) : (state?.limit ?? 0);
+  /* Esai punya jamnya sendiri, dibaca dengan urutan yang sama seperti server:
+     override inject, lalu default esai, lalu jendela biasa. */
+  const ewindowOf = (injId) => {
+    const v = etimes?.[injId];
+    const base = v !== "" && v != null ? Number(v)
+      : settings?.essayLimit === "" || settings?.essayLimit == null
+        ? windowOf(injId) : Number(settings.essayLimit);
+    return base ? base + (Number(settings?.essayGrace) || 0) : base;
+  };
+  const elimit = inject ? ewindowOf(inject.id) : (state?.elimit ?? 0);
+  const autoMode = settings?.mode === "auto";
+  const runningNow = phase === "open" && !!me && !!deck;
+  const timeUp = useExpired(state?.openedAt, autoMode ? limit : 0, runningNow);
+  const essayUp = useExpired(state?.openedAt, autoMode ? elimit : 0, runningNow);
+  const iHaveEssay = mine.some((q) => q.type === "open");
+  const iHaveChoice = mine.some((q) => q.type !== "open");
+  /* Semua pertanyaan unit ini sudah terkunci padahal inject belum ditutup:
+     unit lain masih mengerjakan esainya. */
+  const allMineLocked = mine.length > 0
+    && (!iHaveChoice || timeUp) && (!iHaveEssay || essayUp);
+
+  if (!booted) return <div className="boot">{t("Memuat")}</div>;
+
+  /* ---- join: the front door for everyone but the facilitator ---- */
+  if (!me || !deck) {
+    const ready = codeIn.length >= 4;
+    const doJoin = (takeover) =>
+      send({ t: "join", code: codeIn, takeover: !!takeover });
+    const blocked = taken || (peek && peek.taken ? peek : null);
+    return (
+      <>
+        <Bar left={<b className="wordmark">{t("Latihan Tabletop")}</b>} conn={status} />
+        <main className="door">
+          <div className="doorinner">
+            <h1>{t("Masukkan kode unit Anda")}</h1>
+            <p className="lede">
+              {t("Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.")}
+            </p>
+
+            <div className="slots" onClick={() => codeRef.current?.focus()}>
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className={`slot ${codeIn[i] ? "filled" : i === codeIn.length ? "caret" : ""}`}>
+                  {codeIn[i] || ""}
+                </div>
+              ))}
+              <input ref={codeRef} className="codeghost" value={codeIn} maxLength={8}
+                autoComplete="off" autoCapitalize="characters" spellCheck="false"
+                aria-label={t("Kode unit Anda")}
+                onChange={(e) => {
+                  const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+                  setCodeIn(v); setPeek(null); setTaken(null); setEvicted(false);
+                  if (v.length >= 4) send({ t: "peek", code: v });
+                }}
+                onKeyDown={(e) => e.key === "Enter" && ready && !blocked && doJoin(false)} />
+            </div>
+
+            {evicted && (
+              <div className="resolved taken">
+                <div><small>{t("Keluar")}</small><b>{t("Perangkat lain mengambil kursi unit ini")}</b></div>
+              </div>
+            )}
+
+            {blocked ? (
+              <>
+                <div className="resolved taken">
+                  <Crest peran={blocked.peran} idx={0} size={34} />
+                  <div><small>{t("Kursi sudah terisi")}</small><b>{blocked.peran}</b></div>
+                </div>
+                <p className="hint">
+                  {tf("{0} sudah memegang kursi ini selama {1}{2}. Satu unit hanya punya satu kursi, jadi perangkat ini tidak bisa ikut bergabung.",
+                    blocked.name || blocked.holder || t("Perangkat lain"),
+                    fmtAgo(blocked.sinceMs),
+                    blocked.live === false ? t(", tapi sedang offline") : "")}
+                </p>
+                <button className="btn wide warnbtn" onClick={() => doJoin(true)}>
+                  {t("Ambil alih kursi")}
+                </button>
+                <p className="hint">
+                  {t("Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.")}
+                </p>
+              </>
+            ) : peek ? (
+              <>
+                <div className="resolved">
+                  <Crest peran={peek.peran} idx={0} size={34} />
+                  <div><small>{t("Mengambil kursi untuk")}</small><b>{peek.peran}</b></div>
+                </div>
+                {/* Nama operator tidak diminta lagi. Papan skor dan laporan memakai
+                    nama unit kerja, jadi isian ini hanya menambah langkah. */}
+                <button className="btn wide" onClick={() => doJoin(false)}>{t("Ambil kursi")}</button>
+              </>
+            ) : (
+              <p className="resolve">
+                {t(msg) || t(ready ? "Memeriksa…" : "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.")}
+              </p>
+            )}
+
+            <div className="doorfoot">
+              {(lsGet(K_ME) || lsGet(K_HOST)) && (
+                <button className="link quiet" onClick={() => { nukeAll(); location.reload(); }}>
+                  {t("Hapus sesi tersimpan")}
+                </button>
+              )}
+            </div>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Bar onExit={leave} exitLabel={t("Keluar")} conn={status}
+        left={<>
+          <Crest peran={me.peran} idx={0} />
+          <span className="unitblock">
+            <b className="unitname">{me.peran}</b>
+            <small className="seatline">{t("satu kursi")}</small>
+          </span>
+        </>}
+        right={<>
+          {history.length > 0 && (
+            <button className="btn quiet pill" onClick={() => setHistOpen(true)}
+              title={t("Lihat inject yang sudah lewat")}>{t("Riwayat")}</button>
+          )}
+          {settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
+            ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null}
+        </>} />
+      {histOpen && (
+        <HistoryPanel injects={history} answers={me.answers} keys={keys} pick={pick}
+          onClose={() => setHistOpen(false)} />
+      )}
+      <main className="pmain">
+        <div className="pinner">
+          {phase === "lobby" && (
+            <div className="standby">
+              <span className="pulse" />
+              <h2>{t("Unit Anda sudah masuk")}</h2>
+              <p className="muted">{t("Menunggu fasilitator memulai.")}</p>
+            </div>
+          )}
+
+          {phase !== "lobby" && inject && (
+            <>
+              <div className="eyebrow">{inject.siklus} · {tf("Inject {0}", inject.id)}</div>
+              {inject.condition && (
+                <blockquote className="condition">
+                  <span className="eyebrow">{t("Kondisi")}</span>{pick(inject.condition, inject.conditionAlt)}
+                </blockquote>
+              )}
+
+              {/* Konteks dari inject sebelumnya. Tertutup secara default supaya
+                  tidak merebut perhatian dari pertanyaan yang sedang berjalan,
+                  tapi ada di tempat yang sama tiap inject sehingga unit yang
+                  mencarinya tahu harus melihat ke mana. */}
+              {prevInject && phase !== "lobby" && (
+                <PrevContext inject={prevInject} answers={me.answers}
+                  keyMap={keys[prevInject.id] || {}} pick={pick} />
+              )}
+
+              {phase === "briefing" && (
+                <div className="standby small">
+                  <span className="pulse" />
+                  <p className="muted">
+                    {t("Baca skenarionya. Pertanyaan segera dibuka")}
+                    {iHaveChoice && limit > 0 ? tf(". Waktu menjawab pilihan {0}", fmt(limit)) : ""}
+                    {iHaveEssay && elimit > 0
+                      ? (iHaveChoice && limit > 0
+                        ? tf(", esai {0}", fmt(elimit))
+                        : tf(". Waktu menulis esai {0}", fmt(elimit)))
+                      : ""}.
+                  </p>
+                </div>
+              )}
+
+              {phase === "open" && (mine.length === 0 ? (
+                <div className="standby small">
+                  <p className="muted">{t("Inject ini tidak melibatkan unit Anda. Simak saja.")}</p>
+                </div>
+              ) : (
+                <>
+                  {autoMode && (limit > 0 || elimit > 0) && (
+                    <div className="ringwrap">
+                      {iHaveChoice && limit > 0 && (
+                        <Ring openedAt={state.openedAt} limit={limit} size="s150"
+                          cap={t(iHaveEssay ? "pilihan" : "sisa")} />
+                      )}
+                      {iHaveEssay && elimit > 0 && (
+                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap={t("esai")} />
+                      )}
+                    </div>
+                  )}
+
+                  {/* Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu.
+                      Katakan apa yang sedang ditunggu, jangan biarkan layarnya diam. */}
+                  {allMineLocked && (
+                    <div className="waitbox">
+                      <span className="pulse" />
+                      <div>
+                        <b>{t("Jawaban unit Anda sudah tercatat.")}</b>
+                        <p>
+                          {t(iHaveEssay
+                            ? "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi."
+                            : "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi.")}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {mine.map((q) => {
+                    const sent = me.answers?.[q.qid];
+                    const auto = settings.mode === "auto" && q.choices?.length;
+                    const isMC = q.type === "choice" && auto;
+                    const isCheck = q.type === "checkbox" && auto;
+                    /* Both kinds commit on tap. A checkbox sends the whole set on every
+                       tick, so there is no button to forget — and the server re-stamps the
+                       time each send, exactly as it does when a unit changes a single choice. */
+                    const cur = ticks[q.qid] ?? sent?.picks ?? [];
+                    /* Esai terkunci pada jam esai, sisanya pada jam pilihan. */
+                    const qUp = q.type === "open" ? essayUp : timeUp;
+                    const toggle = (i) => {
+                      const next = cur.includes(i)
+                        ? cur.filter((x) => x !== i)
+                        : [...cur, i].sort((a, b) => a - b);
+                      setTicks((m) => ({ ...m, [q.qid]: next }));
+                      send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: next } });
+                    };
+                    return (
+                      <div className="pq" key={q.qid}>
+                        <p className="qtypeline">
+                          <TypeBadge q={q} />
+                          <span>{t(TYPE_HINT[kindOf(q)])}</span>
+                        </p>
+                        <p className="pqtext">{pick(q.text, q.alt)}</p>
+                        {isMC || isCheck ? (
+                          <>
+                            <div className="opts">
+                              {q.choices.map((c, i) => {
+                                const o = optOf(i);
+                                const picked = isCheck ? cur.includes(i) : sent && sent.choice === i;
+                                const dim = isCheck
+                                  ? (qUp && !picked)
+                                  : ((sent || qUp) && !picked);
+                                return (
+                                  <button key={i} disabled={qUp}
+                                    className={`opt ${picked ? "picked" : ""} ${dim ? "faded" : ""}`}
+                                    style={{ "--c": o.c }}
+                                    aria-pressed={isCheck ? picked : undefined}
+                                    onClick={() => isCheck
+                                      ? toggle(i)
+                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
+                                    <span className="oglyph"><Glyph shape={o.shape} /></span>
+                                    <span className="otxt">{pick(c.text, c.alt)}</span>
+                                    {isCheck
+                                      ? <span className={`otick ${picked ? "on" : ""}`} aria-hidden="true">
+                                        {picked && (
+                                          <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+                                            stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M4 12.5l5.2 5.2L20 7" />
+                                          </svg>
+                                        )}
+                                      </span>
+                                      : <span className="oltr mono">{o.ltr}</span>}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {qUp ? (
+                              <div className="lockstamp">
+                                <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
+                                  stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                                  <path d="M7 11V8a5 5 0 0110 0v3" />
+                                  <rect x="4" y="11" width="16" height="9" rx="2.4" />
+                                </svg>
+                                {t("Waktu habis, jawaban terkunci")}
+                              </div>
+                            ) : sent ? (
+                              <>
+                                <p className="sentline">
+                                  <span className="tick">
+                                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+                                      stroke="currentColor" strokeWidth="4" strokeLinecap="round">
+                                      <path d="M4 12.5l5.2 5.2L20 7" />
+                                    </svg>
+                                  </span>
+                                  {t("Jawaban masuk")}{isCheck ? tf(" · {0} dicentang", cur.length) : ""}
+                                  {sent.rank ? tf(", unit {0} yang menjawab", nth(sent.rank)) : ""}
+                                </p>
+                                <p className="hint">
+                                  {t("Ini jawaban untuk seluruh unit.")} {t(isCheck
+                                    ? "Centang atau lepas kapan saja. Setiap perubahan langsung terkirim, dan waktu Anda mengikuti perubahan terakhir."
+                                    : "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda.")}
+                                </p>
+                              </>
+                            ) : (
+                              <p className="hint centre">
+                                {t("Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.")}
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={qUp}
+                              value={drafts[q.qid] ?? sent?.text ?? ""}
+                              onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
+                            <button className="btn wide" disabled={qUp}
+                              onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
+                              {t(sent ? "Perbarui jawaban" : "Kirim jawaban")}
+                            </button>
+                            {qUp
+                              ? <div className="lockstamp">{t("Waktu habis")}</div>
+                              : sent && <p className="hint centre">{t("Terkirim. Masih bisa direvisi sampai jawaban ditutup.")}</p>}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {msg && <p className="sentnote">{t(msg)}</p>}
+                </>
+              ))}
+
+              {phase === "revealed" && (
+                mine.length > 0 ? (
+                  <div className="myresult">
+                    {mine.map((q) => {
+                      const a = me.answers?.[q.qid];
+                      const k = key[q.qid];
+                      const keyIdx = k ? (k.is || [k.i]) : null;
+                      if (!a) {
+                        return (
+                          <div className="rescard miss" key={q.qid}>
+                            <p className="qtext small">{pick(q.text, q.alt)}</p>
+                            <p className="rline">{t("Tidak ada jawaban terkirim")}</p>
+                            {keyIdx && <KeyLine idx={keyIdx} text={optText(q, keyIdx) || (k.texts ? k.texts.join("; ") : k.text)} mine={false} />}
+                          </div>
+                        );
+                      }
+                      if (q.type === "open") {
+                        const shown = state?.keyShown;
+                        const graded = shown && a.quality != null;
+                        return (
+                          <div className={`rescard ${graded ? gradeCls(a.quality) : ""}`} key={q.qid}>
+                            <div className="verdict">
+                              <span className="badge">
+                                {graded
+                                  ? <b className="gnum mono">{a.quality}</b>
+                                  : <Glyph shape="circle" size={13} />}
+                              </span>
+                              <b>{!shown ? t("Jawaban terkirim")
+                                : a.quality == null ? t("Belum dinilai") : tf("Nilai {0} dari 10", a.quality)}</b>
+                              {graded && <span className="accpill">{qualityWord(a.quality)}</span>}
+                            </div>
+                            <p className="qtext small">{pick(q.text, q.alt)}</p>
+                            {graded && <div className="ptsbig mono">+{(a.points || 0).toLocaleString()}</div>}
+                            <div className="metarow">
+                              <span><Rich>{tf("Dijawab dalam ~{0} dtk~", (a.ms / 1000).toFixed(1))}</Rich></span>
+                              {graded && <span><Rich>{tf("Nilai fasilitator ~{0}/10~", a.quality)}</Rich></span>}
+                            </div>
+                            {shown && a.quality == null && (
+                              <p className="hint">{t("Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.")}</p>
+                            )}
+                            <p className="essayback">{a.text}</p>
+                          </div>
+                        );
+                      }
+                      const mineIdx = a.picks || (a.choice != null ? [a.choice] : []);
+                      const part = a.correct === false && a.acc > 0;
+                      const tiered = q.weighted;
+                      const cls = !state?.keyShown ? "" : a.correct ? "ok" : part ? "part" : a.correct === false ? "no" : "";
+                      const hits = keyIdx ? mineIdx.filter((i) => keyIdx.includes(i)).length : 0;
+                      const wrong = mineIdx.length - hits;
+                      return (
+                        <div className={`rescard ${cls}`} key={q.qid}>
+                          <div className="verdict">
+                            <span className="badge">
+                              {!state?.keyShown
+                                ? <Glyph shape={optOf(mineIdx[0] ?? 0).shape} size={15} />
+                                : a.correct
+                                  ? <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                    strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M4 12.5l5.2 5.2L20 7" /></svg>
+                                  : part
+                                    ? <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                      strokeWidth="3.4" strokeLinecap="round"><path d="M6 12h12" /></svg>
+                                    : <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                      strokeWidth="3.4" strokeLinecap="round">
+                                      <path d="M6 6l12 12M18 6L6 18" /></svg>}
+                            </span>
+                            <b>{t(!state?.keyShown ? "Jawaban terkirim"
+                              : a.correct == null ? "Tidak dinilai otomatis"
+                                : a.correct ? (tiered ? "Jawaban terbaik" : "Benar")
+                                  : part ? (tiered ? "Belum optimal" : "Benar sebagian")
+                                    : "Salah")}</b>
+                            {state?.keyShown && !tiered && a.acc != null && a.acc < 1 && a.acc > 0 && (
+                              <span className="accpill">{tf("{0}% dari kunci", Math.round(a.acc * 100))}</span>
+                            )}
+                          </div>
+                          <p className="qtext small">{pick(q.text, q.alt)}</p>
+                          {state?.keyShown && (
+                            <div className="ptsbig mono">{a.points ? `+${a.points.toLocaleString()}` : "0"}</div>
+                          )}
+                          <div className="metarow">
+                            <span><Rich>{tf("Dijawab dalam ~{0} dtk~", (a.ms / 1000).toFixed(1))}</Rich></span>
+                            {a.rank && <span><Rich>{tf("unit ~{0}~ yang menjawab", nth(a.rank))}</Rich></span>}
+                            {state?.keyShown && keyIdx && q.type === "checkbox" && (
+                              <span><Rich>{tf("~{0}~ dari {1} kunci benar", hits, keyIdx.length)
+                                + (wrong ? tf(", ~{0}~ salah", wrong) : "")}</Rich></span>
+                            )}
+                          </div>
+                          <KeyLine idx={mineIdx} text={optText(q, mineIdx) || a.text} mine />
+                          {keyIdx && !a.correct && (
+                            <KeyLine idx={keyIdx} text={optText(q, keyIdx) || (k.texts ? k.texts.join("; ") : k.text)} mine={false} />
+                          )}
+                        </div>
+                      );
+                    })}
+                    {settings?.leaderboard && state?.keyShown && (
+                      <div className="totalline">
+                        <b className="mono">{me.pct == null ? `${(me.total || 0).toLocaleString()} pts` : `${Math.round(me.pct)}%`}</b>
+                        <span className="mono">
+                          {(me.total || 0).toLocaleString()}
+                          {me.possible ? " " + tf("dari {0} poin yang tersedia untuk unit Anda", me.possible.toLocaleString()) : " " + t("poin total")}
+                        </span>
+                      </div>
+                    )}
+                    <p className="hint centre">{t("Fasilitator sedang memimpin diskusi.")}</p>
+                  </div>
+                ) : (
+                  <div className="standby small">
+                    <h2>{t("Jawaban sudah masuk")}</h2>
+                    <p className="muted">{t("Fasilitator sedang memimpin diskusi.")}</p>
+                  </div>
+                )
+              )}
+            </>
+          )}
+        </div>
+      </main>
+    </>
+  );
+}
+
+const KeyLine = ({ idx, text, mine }) => {
+  const list = idx || [];
+  if (!list.length) return null;
+  const many = list.length > 1;
+  const names = list.map((i) => optOf(i).name).join(", ");
+  return (
+    <div className="keyline">
+      <span className="kglyphs">
+        {list.map((i) => {
+          const o = optOf(i);
+          return (
+            <span key={i} className="kglyph" style={{ "--c": o.c }}>
+              <Glyph shape={o.shape} size={11} />
+            </span>
+          );
+        })}
+      </span>
+      <span>
+        {t(mine ? (many ? "Anda mencentang" : "Anda memilih") : "Kuncinya adalah")}{" "}
+        <b>{names}</b>{text ? tf(", yaitu {0}", text) : ""}
+      </span>
+    </div>
+  );
+};
+
+/* ============================= PROJECTOR ============================= */
+
+/* Daftar pertanyaan di proyektor. Dipakai dua kali, untuk inject yang sedang
+   berjalan dan untuk rekap inject lama, jadi hitungan suara dan kunci datang
+   sebagai argumen, bukan dibaca dari fase. */
+function ProjQuestions({ questions, keyMap, people, showCounts }) {
+  return (
+    <>
+      {questions.map((q) => {
+        const k = keyMap?.[q.qid];
+        return (
+          <div className="projq" key={q.qid}>
+            <Dual className="projqtext" text={q.text} alt={q.alt} />
+            <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
+            {q.choices?.length > 0 && (
+              <div className="projopts">
+                {q.choices.map((c, i) => {
+                  const o = optOf(i);
+                  const isKey = !!k && (k.is || [k.i]).includes(i);
+                  const n = showCounts
+                    ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
+                  return (
+                    <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
+                      <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
+                      <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
+                      {n != null && <span className="on mono">{n}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/* /screen#<roomId>. Read-only: condition, question, option shapes, a clock
+   you can read from the back of the room, and the join codes. Never the
+   facilitator's controls, notes or unit scores. */
+function Screen() {
+  const [roomId] = useState(screenRoom);
+  const [deck, setDeck] = useState(null);
+  const [codes, setCodes] = useState({});
+  const [state, setState] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [people, setPeople] = useState([]);
+  /* Kunci per inject, supaya rekap inject lama tetap bisa menampilkannya. */
+  const [keys, setKeys] = useState({});
+  /* Nomor inject yang sedang dilempar fasilitator ke layar ini, atau null. */
+  const [recap, setRecap] = useState(null);
+
+  /* Proyektor menampilkan kedua bahasa bertumpuk lewat Dual: satu layar untuk
+     seluruh ruangan, jadi tidak ada satu bahasa yang harus dipilih. */
+
+  const onMsg = useCallback((m) => {
+    if (m.t === "screened") {
+      setDeck(m.deck); setCodes(m.codes); setState(m.state); setSettings(m.settings);
+      if (m.keys) setKeys(m.keys);
+      setRecap(m.recap ?? null);
+    } else if (m.t === "state") {
+      setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
+        limit: m.limit, keyShown: !!m.keyShown });
+    } else if (m.t === "roster") setPeople(m.people || []);
+    else if (m.t === "recap") setRecap(m.injectId ?? null);
+    else if (m.t === "settings") setSettings(m.settings);
+    else if (m.t === "key") setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
+    else if (m.t === "time") noteTimeSample(m.c, m.s);
+    else if (m.t === "gone" || m.t === "ended") { setDeck(null); setState(null); }
+  }, []);
+  const { send, status, gen } = useSocket(onMsg);
+  useClockSync(send, gen);
+
+  useEffect(() => { if (roomId) send({ t: "watch", roomId }); }, [roomId, gen, send]);
+
+  if (!roomId) {
+    return (
+      <div className="crash">
+        <h1>{t("Alamatnya tidak memuat latihan")}</h1>
+        <p className="muted">
+          <Rich>{t("Buka tampilan proyektor dari layar fasilitator lewat tombol *Proyektor*, supaya id latihannya ikut terbawa.")}</Rich>
+        </p>
+      </div>
+    );
+  }
+  if (!deck || !state) {
+    return (
+      <div className="projwait">
+        <span className="pulse" />
+        <h1>{t("Menunggu latihan")}</h1>
+        <p className="muted">{t(status === "live" ? "Tersambung." : "Menyambung ulang…")}</p>
+      </div>
+    );
+  }
+
+  const inject = deck.injects[state.activeIdx];
+  const phase = state.phase;
+  const seatOf = (peran) => people.find((p) => p.peran === peran);
+  const shown = phase === "lobby" ? [] : (inject?.questions || []);
+  const key = (inject && keys[inject.id]) || {};
+  /* Inject lama yang sedang dilempar fasilitator ke layar ini. Selama ada, dia
+     menggantikan seluruh badan layar, termasuk saat ruangan masih di fase
+     menunggu, supaya pembahasan tidak terpotong tampilan ruang tunggu. */
+  const recapInject = recap == null ? null
+    : deck.injects.find((i) => String(i.id) === String(recap)) || null;
+
+  return (
+    <div className="screen">
+      <div className="projtop striped">
+        <BrandLogo className="big" />
+        <div>
+          <p className="eyebrow">{(recapInject || inject)?.siklus}</p>
+          <h1>{tf("Inject {0}", (recapInject || inject)?.id)}</h1>
+        </div>
+        <span className="projlang"><LangToggle /></span>
+        {recapInject ? (
+          <span className="projphase recapmark">
+            {t("Rekap inject sebelumnya")}
+          </span>
+        ) : (
+          <span className={`projphase ${phase}`}>
+            <span className="pulse" />
+            {t(phase === "lobby" ? "Menunggu"
+              : phase === "briefing" ? "Baca skenario"
+                : phase === "open" ? "Sedang menjawab"
+                  : state.keyShown ? "Kunci jawaban" : "Diskusi")}
+          </span>
+        )}
+      </div>
+
+      <div className="projbody">
+        {recapInject ? (
+          /* Rekap: kondisi dan pertanyaan inject lama, dengan hitungan suara dan
+             kunci kalau kuncinya memang sudah pernah dibuka untuk inject itu. */
+          <div className="projmid">
+            <div className="projleft">
+              {recapInject.condition && (
+                <Dual className="projcond" text={recapInject.condition}
+                  alt={recapInject.conditionAlt} />
+              )}
+              <ProjQuestions questions={recapInject.questions || []}
+                keyMap={keys[recapInject.id] || {}} people={people} showCounts />
+            </div>
+          </div>
+        ) : phase === "lobby" ? (
+          <div className="projlobby">
+            <h2>{t("Masukkan kode unit Anda")}</h2>
+            <p className="muted">{t("Satu perangkat per unit bisnis.")}</p>
+            {/* Kodenya dibaca ramai ramai dari kursi paling belakang, jadi di
+                ruang tunggu ia tampil besar dan melebar ke samping, bukan
+                sebagai deretan kecil di kaki layar. */}
+            <ul className="projcodes">
+              {deck.roles.map((r, i) => {
+                const code = Object.keys(codes).find((c) => codes[c] === r);
+                const seat = seatOf(r);
+                return (
+                  <li key={r} className={seat ? "in" : ""} style={{ "--c": UNIT_VARS[i % 6] }}>
+                    <Crest peran={r} idx={i} size={26} />
+                    {settings?.showUnits !== false && <span className="pcunit">{r}</span>}
+                    <b className="pccode mono">{code}</b>
+                    <span className="pcstate">{t(seat ? "sudah duduk" : "kursi kosong")}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ) : (
+          <div className="projmid">
+            <div className="projleft">
+              {inject?.condition && (
+                <Dual className="projcond" text={inject.condition} alt={inject.conditionAlt} />
+              )}
+              <ProjQuestions questions={shown} keyMap={key} people={people}
+                showCounts={phase === "revealed"} />
+            </div>
+            {phase === "open" && state.limit > 0 && settings?.mode === "auto" && (
+              <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap={t("sisa")} />
+            )}
+          </div>
+        )}
+
+        <div className="projstrip">
+          <span className="lab">{t("Kode")}</span>
+          {deck.roles.map((r, i) => {
+            const code = Object.keys(codes).find((c) => codes[c] === r);
+            const seat = seatOf(r);
+            return (
+              <span key={r} className={`jcode ${seat ? "in" : ""}`}>
+                <Crest peran={r} idx={i} size={20} />
+                <b className="mono">{code}</b>
+                {seat && (
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                    strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 12.5l5.2 5.2L20 7" />
+                  </svg>
+                )}
+              </span>
+            );
+          })}
+          {status !== "live" && <span className="offline">{t("Menyambung ulang")}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================= REPORT ============================= */
+
+function Report({ model, notes, people, settings, roleIdx, fileName, unitOf, ran = [], onBack, onEnd }) {
+  const all = useMemo(() => model.injects.flatMap((i) =>
+    i.questions.map((q) => ({ ...q, injectId: i.id, siklus: i.siklus }))), [model]);
+
+  /* A unit asked ten questions can out-point a unit asked three without being
+     any better at the exercise. Every comparison here is therefore a percentage
+     of what that unit could have scored; raw points stay visible beside it.
+     Questions with no key marked are excluded, so a sheet mistake costs nobody. */
+  /* Harus persis sama dengan possibleFor di server. Esai ikut dihitung, karena
+     esai juga menghasilkan poin. Sempat tidak dihitung di sini, dan itulah yang
+     membuat sebuah unit tampil 171 persen: poin esainya dibagi maksimum yang
+     tidak memuat esai. */
+  const ranSet = useMemo(() => new Set(ran), [ran]);
+  const wasRun = useCallback((id) => ranSet.size === 0 || ranSet.has(id), [ranSet]);
+  const possibleOf = useCallback((role) => {
+    if (settings.mode !== "auto") return 0;
+    const n = model.injects.filter((i) => wasRun(i.id)).flatMap((i) => i.questions).filter((q) => {
+      if (q.peran !== role) return false;
+      if (q.type === "open") return true;
+      if (q.type !== "choice" && q.type !== "checkbox") return false;
+      return (q.choices || []).some((c) => c.correct);
+    }).length;
+    return n * (Number(settings.points) || 0);
+  }, [model, settings.mode, settings.points, wasRun]);
+  /* Angka dari server selalu menang, supaya layar, CSV dan papan skor memakai
+     pembagi yang sama. */
+  const possibleFor = useCallback((role) => {
+    const seat = people.find((p) => p.peran === role && p.possible != null);
+    return seat ? seat.possible : possibleOf(role);
+  }, [people, possibleOf]);
+
+  const askedOf = useCallback((role) => model.injects.filter((i) => wasRun(i.id))
+    .flatMap((i) => i.questions).filter((q) => q.peran === role).length, [model, wasRun]);
+
+  const board = useMemo(() => [...people]
+    .map((p) => {
+      const possible = p.possible ?? possibleOf(p.peran);
+      return { ...p, possible, asked: askedOf(p.peran),
+        pct: possible ? ((p.total || 0) / possible) * 100 : null };
+    })
+    .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || (b.total || 0) - (a.total || 0)),
+  [people, possibleOf, askedOf]);
+
+  const byRole = useMemo(() => {
+    const o = {};
+    all.forEach((q) => {
+      if (!o[q.peran]) o[q.peran] = { total: 0, scored: 0, sum: 0, correct: 0, part: 0, mc: 0,
+        pts: 0, essays: 0, ungraded: 0, accN: 0, accSum: 0 };
+      const b = o[q.peran];
+      b.total += 1;
+      if (!wasRun(q.injectId)) { b.total -= 1; return; }
+      people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]).forEach((p) => {
+        const a = p.answers[q.qid];
+        if (a.correct != null) { b.mc += 1; if (a.correct) b.correct += 1; if (a.acc > 0 && !a.correct) b.part += 1; }
+        if (a.quality != null) { b.scored += 1; b.sum += a.quality; }
+        /* Akurasi murni, tanpa faktor kecepatan. Esai memakai nilai 1 sampai 10
+           dibagi sepuluh, sama seperti hitungan poin di server. */
+        const raw = a.acc != null ? a.acc : a.quality != null ? a.quality / 10 : null;
+        if (raw != null) { b.accN += 1; b.accSum += raw; }
+        if (q.type === "open") { b.essays += 1; if (a.quality == null) b.ungraded += 1; }
+        b.pts += a.points || 0;
+      });
+    });
+    Object.entries(o).forEach(([role, b]) => {
+      b.possible = possibleFor(role);
+      b.pct = b.possible ? (b.pts / b.possible) * 100 : null;
+      /* Dibagi jumlah soal yang ditanyakan, bukan jumlah yang dijawab, supaya
+         unit yang melewatkan soal tidak terlihat lebih akurat daripada yang
+         menjawab semuanya. */
+      b.accPct = b.total ? (b.accSum / b.total) * 100 : null;
+    });
+    return o;
+  }, [all, people, possibleFor, wasRun]);
+
+  function exportCSV() {
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const head = ["Siklus", "Inject", "Peran", "Pertanyaan", "Tipe", "Jawaban model", "Unit kerja",
+      "Jawaban unit", "Benar", "Akurasi", "Detik", "Poin", "Poin unit", "Maks unit", "Skor unit %",
+      "Nilai esai (1-10)", "Waktu menjawab (detik)", "Catatan"];
+    const lines = [head.map((h) => esc(t(h))).join(",")];
+    model.injects.forEach((inj) => {
+      const win = inj.window ? Math.round(Number(inj.window) * 60) : "";
+      inj.questions.forEach((q) => {
+        const rs = people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
+        (rs.length ? rs : [null]).forEach((p) => {
+          const a = p?.answers[q.qid];
+          const poss = possibleFor(q.peran);
+          lines.push([inj.siklus, inj.id, q.peran, q.text, q.type, q.answerRaw,
+            p ? unitOf(p.peran) : "", a?.text || "",
+            a?.correct == null ? "" : t(a.correct ? "Ya" : a.acc > 0 ? "Sebagian" : "Tidak"),
+            a?.acc == null ? "" : Math.round(a.acc * 100) + "%",
+            a ? (a.ms / 1000).toFixed(1) : "", a?.points ?? "",
+            p ? p.total ?? "" : "", poss || "",
+            p && poss ? Math.round(((p.total || 0) / poss) * 100) + "%" : "",
+            a?.quality ?? "",
+            win, notes[inj.id] || ""].map(esc).join(","));
+        });
+      });
+    });
+    download(`ttx-${new Date().toISOString().slice(0, 10)}.csv`, lines);
+  }
+
+  /* Ringkasan tiap inject: berapa unit ditanya, berapa yang menjawab, seberapa
+     tepat jawabannya, dan berapa lama mereka memutuskan. */
+  const byInject = useMemo(() => model.injects.map((inj) => {
+    const qs = inj.questions;
+    const asked = new Set(qs.map((q) => q.peran));
+    const rows = [];
+    qs.forEach((q) => {
+      people.filter((p) => p.peran === q.peran && p.answers?.[q.qid])
+        .forEach((p) => rows.push({ q, p, a: p.answers[q.qid] }));
+    });
+    const accs = rows.filter((r) => r.a.acc != null).map((r) => r.a.acc);
+    const quals = rows.filter((r) => r.a.quality != null).map((r) => r.a.quality);
+    const times = rows.map((r) => (r.a.ms || 0) / 1000).filter((v) => v > 0);
+    const full = rows.filter((r) => r.a.correct === true).length;
+    const partial = rows.filter((r) => r.a.correct === false && (r.a.acc || 0) > 0).length;
+    const zero = rows.filter((r) => r.a.correct === false && !(r.a.acc || 0)).length;
+    const essays = qs.filter((q) => q.type === "open").length;
+    const ungraded = rows.filter((r) => r.q.type === "open" && r.a.quality == null).length;
+    const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+    return {
+      id: inj.id, siklus: inj.siklus,
+      units: asked.size, questions: qs.length, essays,
+      answered: rows.length,
+      expected: qs.length ? qs.filter((q) => people.some((p) => p.peran === q.peran)).length : 0,
+      full, partial, zero, ungraded,
+      acc: mean(accs), quality: mean(quals), secs: mean(times),
+      fastest: times.length ? Math.min(...times) : null,
+      slowest: times.length ? Math.max(...times) : null,
+      pts: rows.reduce((a, r) => a + (r.a.points || 0), 0),
+    };
+  }), [model, people]);
+
+  function download(name, lines) {
+    const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function exportStats() {
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const head = ["Siklus", "Inject", "Unit ditanya", "Jumlah soal", "Soal esai", "Jawaban masuk",
+      "Diharapkan", "Penuh", "Sebagian", "Nol", "Akurasi rata rata", "Rata nilai esai",
+      "Esai belum dinilai", "Rata detik", "Tercepat", "Terlama", "Poin"];
+    const lines = [head.map((h) => esc(t(h))).join(",")];
+    byInject.forEach((d) => lines.push([d.siklus, d.id, d.units, d.questions, d.essays,
+      d.answered, d.expected, d.full, d.partial, d.zero,
+      d.acc == null ? "" : Math.round(d.acc * 100) + "%",
+      d.quality == null ? "" : d.quality.toFixed(1), d.ungraded,
+      d.secs == null ? "" : d.secs.toFixed(1),
+      d.fastest == null ? "" : d.fastest.toFixed(1),
+      d.slowest == null ? "" : d.slowest.toFixed(1), d.pts].map(esc).join(",")));
+    download(`ttx-statistik-${new Date().toISOString().slice(0, 10)}.csv`, lines);
+  }
+
+  const totalPts = people.reduce((a, p) => a + (p.total || 0), 0);
+  const mcAll = Object.values(byRole).reduce((a, b) => a + b.mc, 0);
+  const mcRight = Object.values(byRole).reduce((a, b) => a + b.correct, 0);
+  const rated = board.filter((p) => p.pct != null);
+  const avgPct = rated.length ? rated.reduce((a, p) => a + p.pct, 0) / rated.length : null;
+  const uneven = new Set(Object.values(byRole).map((b) => b.possible)).size > 1;
+
+  return (
+    <>
+      <Bar left={<b className="wordmark">{t("Debrief")} · {fileName}</b>} onExit={onBack} exitLabel={t("Kembali")} />
+      <main className="report">
+        <div className="repinner">
+          <h1>{t("Hasil latihan")}</h1>
+          <div className="kpis">
+            <div><b className="mono">{people.length}</b><span>{t("unit ikut")}</span></div>
+            <div><b className="mono">{all.length}</b><span>{t("pertanyaan")}</span></div>
+            <div><b className="mono good">{mcAll ? `${Math.round((mcRight / mcAll) * 100)}%` : "·"}</b><span>{t("jawaban benar")}</span></div>
+            <div><b className="mono">{avgPct == null ? "·" : `${Math.round(avgPct)}%`}</b>
+              <span>{t("rata-rata skor unit")}</span>
+              <em className="kpisub mono">{tf("{0} poin total", totalPts.toLocaleString())}</em></div>
+          </div>
+
+          {settings.mode === "auto" && settings.leaderboard && board.length > 0 && (
+            <>
+              <h3>{t("Posisi tiap unit")}</h3>
+              <p className="hint boardnote">
+                {t("Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah pertanyaan per unit tidak selalu sama.")}
+                {uneven ? " " + t("Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.") : ""}
+              </p>
+              <ol className="board">
+                {board.map((p, i) => (
+                  <li key={p.pid} className={i === 0 ? "first" : ""}>
+                    <span className="rank mono">{String(i + 1).padStart(2, "0")}</span>
+                    <Crest peran={p.peran} idx={roleIdx(p.peran)} />
+                    <span className="bname">{unitOf(p.peran)}</span>
+                    <span className="bbar"><i style={{
+                      width: `${Math.max(0, Math.min(100, p.pct ?? 0))}%`,
+                      background: UNIT_VARS[(roleIdx(p.peran) < 0 ? 0 : roleIdx(p.peran)) % 6],
+                    }} /></span>
+                    <span className="bscore">
+                      <b className="mono">{p.pct == null ? "·" : `${Math.round(p.pct)}%`}</b>
+                      <em className="mono">
+                        {(p.total || 0).toLocaleString()} / {(p.possible || 0).toLocaleString()}
+                        {p.asked ? " · " + tf("{0} soal", p.asked) : ""}
+                      </em>
+                    </span>
+                    {p.asked > 0 && p.asked < 3 && (
+                      <span className="thin" title={t("Soalnya terlalu sedikit untuk dibandingkan dengan unit lain")}>
+                        {t("belum cukup data")}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+
+          <h3>{t("Statistik per Inject")}</h3>
+          <p className="hint">
+            {t("Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.")}
+          </p>
+          <div className="tblwrap">
+            <table className="tbl">
+              <thead><tr><th>{t("Inject")}</th><th>{t("Unit")}</th><th>{t("Soal")}</th><th>{t("Menjawab")}</th>
+                <th>{t("Penuh")}</th><th>{t("Sebagian")}</th><th>{t("Nol")}</th><th>{t("Akurasi")}</th>
+                <th>{t("Esai")}</th><th>{t("Rata detik")}</th><th>{t("Tercepat")}</th><th>{t("Terlama")}</th><th>{t("Poin")}</th></tr></thead>
+              <tbody>
+                {byInject.map((d) => (
+                  <tr key={d.id}>
+                    <td><b className="mono">{d.id}</b> <span className="dimcell">{d.siklus}</span></td>
+                    <td className="mono">{d.units}</td>
+                    <td className="mono">{d.questions}</td>
+                    <td className="mono">{d.expected ? `${d.answered}/${d.expected}` : "·"}</td>
+                    <td className="mono">{d.full || "·"}</td>
+                    <td className="mono">{d.partial || "·"}</td>
+                    <td className="mono">{d.zero || "·"}</td>
+                    <td className="mono strong">{d.acc == null ? "·" : `${Math.round(d.acc * 100)}%`}</td>
+                    <td className="mono">
+                      {d.essays ? (d.quality == null ? tf("{0} soal", d.essays) : `${d.quality.toFixed(1)}/10`) : "·"}
+                      {d.ungraded ? <em className="ungraded"> {tf("{0} belum dinilai", d.ungraded)}</em> : null}
+                    </td>
+                    <td className="mono">{d.secs == null ? "·" : d.secs.toFixed(1)}</td>
+                    <td className="mono dimcell">{d.fastest == null ? "·" : d.fastest.toFixed(1)}</td>
+                    <td className="mono dimcell">{d.slowest == null ? "·" : d.slowest.toFixed(1)}</td>
+                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "·"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h3>{t("Rincian per Peran")}</h3>
+          <div className="tblwrap">
+            <table className="tbl">
+              <thead><tr><th>{t("Peran")}</th><th>{t("Ditanya")}</th><th>{t("Benar")}</th><th>{t("Sebagian")}</th>
+                <th>{t("Akurasi")}</th><th>{t("Poin")}</th><th>{t("Maks")}</th><th>{t("Skor")}</th>
+<th>{t("Nilai esai")}</th></tr></thead>
+              <tbody>
+                {Object.entries(byRole).map(([role, d]) => (
+                  <tr key={role}>
+                    <td><Crest peran={role} idx={roleIdx(role)} /> {unitOf(role)}</td>
+                    <td className="mono">{d.total}</td>
+                    <td className="mono">{d.mc ? `${d.correct}/${d.mc}` : "·"}</td>
+                    <td className="mono">{d.part || "·"}</td>
+                    <td className="mono">{d.accPct == null ? "·" : `${Math.round(d.accPct)}%`}</td>
+                    <td className="mono">{d.pts ? d.pts.toLocaleString() : "·"}</td>
+                    <td className="mono dimcell">{d.possible ? d.possible.toLocaleString() : "·"}</td>
+                    <td className="mono strong">{d.pct == null ? "·" : `${Math.round(d.pct)}%`}</td>
+                    <td className="mono">
+                      {d.scored ? `${(d.sum / d.scored).toFixed(1)}/10` : "·"}
+                      {d.ungraded ? <em className="ungraded"> {tf("{0} belum dinilai", d.ungraded)}</em> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="repactions">
+            <button className="btn" onClick={exportCSV}>{t("Unduh CSV jawaban")}</button>
+            <button className="btn quiet" onClick={exportStats}>{t("Unduh statistik inject")}</button>
+            <button className="btn quiet" onClick={onBack}>{t("Kembali ke latihan")}</button>
+            <button className="btn danger" onClick={onEnd}>{t("Akhiri sesi")}</button>
+          </div>
+          <p className="hint">{t("Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.")}</p>
+        </div>
+      </main>
+    </>
+  );
+}
+
+/* ============================== CSS ============================== */
+
+const CSS = `
+/* ---------- LIGHT is the base token set ---------- */
+:root{
+  --ink:#F5F3EC; --ink2:#EAE7DB; --slab:#FFFFFF; --rise:#FFF8E0;
+  --edge:#D8D3C2; --edge2:#EAE6D9;
+  --txt:#17160F; --dim:#56534A; --faint:#85806F;
+  --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#8A6200; --signal-soft:#FFF1C2;
+  --live:#0E8A5F;  --live-soft:#E4F4EC;  --live-edge:#A9D8C2;
+  --wrong:#C8304A; --wrong-soft:#FBE8EB; --wrong-edge:#E7B3BD;
+  --warn:#A96E06;  --warn-soft:#FCF0D8;  --warn-edge:#E0C489;
+  --oA:#CE2743; --oB:#2456D2; --oC:#7136CE; --oD:#0C8760;
+  --on-opt:#FFFFFF;
+  --u1:#C93A54; --u2:#2F62D6; --u3:#A96C0C; --u4:#0E7F66; --u5:#6C45C4; --u6:#1B7A92;
+  --on-unit:#FFFFFF;
+  --shadow:0 20px 44px -26px rgba(30,26,10,.34);
+  /* Logo size lives here — raise or lower these two and every surface follows.
+     If your file has built-in whitespace around the mark it will still look
+     small; trim the artboard in the SVG, or push these up. */
+  --logo-h:30px; --logo-h-big:52px;
+  --disp:'Archivo',"Helvetica Neue",system-ui,sans-serif;
+  --body:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,"SFMono-Regular",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ink:#141310; --ink2:#0B0A08; --slab:#1E1C17; --rise:#2C2718;
+    --edge:#3F3A2B; --edge2:#2B2820;
+    --txt:#F4F2EC; --dim:#A9A597; --faint:#7C7768;
+    --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#FFC600; --signal-soft:#3B3208;
+    --live:#2BD79A;  --live-soft:rgba(43,215,154,.13);  --live-edge:rgba(43,215,154,.42);
+    --wrong:#FF5A75; --wrong-soft:rgba(255,90,117,.12); --wrong-edge:rgba(255,90,117,.42);
+    --warn:#FFB43D;  --warn-soft:rgba(255,180,61,.12);  --warn-edge:rgba(255,180,61,.40);
+    --oA:#F0435E; --oB:#5286FF; --oC:#A374F5; --oD:#1FC98D;
+    --on-opt:#141310;
+    --u1:#F0697F; --u2:#6A94FF; --u3:#E2A03F; --u4:#2FB89A; --u5:#A683F0; --u6:#4FB8D1;
+    --on-unit:#141310;
+    --shadow:0 28px 66px -30px rgba(0,0,0,.85);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ink:#141310; --ink2:#0B0A08; --slab:#1E1C17; --rise:#2C2718;
+  --edge:#3F3A2B; --edge2:#2B2820;
+  --txt:#F4F2EC; --dim:#A9A597; --faint:#7C7768;
+  --signal:#FFC600; --signal-ink:#1A1400; --signal-text:#FFC600; --signal-soft:#3B3208;
+  --live:#2BD79A;  --live-soft:rgba(43,215,154,.13);  --live-edge:rgba(43,215,154,.42);
+  --wrong:#FF5A75; --wrong-soft:rgba(255,90,117,.12); --wrong-edge:rgba(255,90,117,.42);
+  --warn:#FFB43D;  --warn-soft:rgba(255,180,61,.12);  --warn-edge:rgba(255,180,61,.40);
+  --oA:#F0435E; --oB:#5286FF; --oC:#A374F5; --oD:#1FC98D;
+  --on-opt:#141310;
+  --u1:#F0697F; --u2:#6A94FF; --u3:#E2A03F; --u4:#2FB89A; --u5:#A683F0; --u6:#4FB8D1;
+  --on-unit:#141310;
+  --shadow:0 28px 66px -30px rgba(0,0,0,.85);
+  color-scheme:dark;
+}
+html,body{background:var(--ink)}
+.ttx{
+  font-family:var(--body);color:var(--txt);background:var(--ink);
+  min-height:100vh;font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;
+}
+.ttx *{box-sizing:border-box}
+.ttx button{font:inherit;cursor:pointer;border:none;background:none;color:inherit;text-align:inherit}
+.ttx :focus-visible{outline:2px solid var(--signal);outline-offset:3px;border-radius:4px}
+.ttx h1,.ttx h2{font-family:var(--disp);margin:0;letter-spacing:-.03em}
+.ttx h1{font-size:27px;font-weight:800;margin-bottom:10px;line-height:1.12}
+.ttx h2{font-size:20px;font-weight:800}
+.ttx h3{font-size:12px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);
+  margin:30px 0 10px;font-family:var(--body)}
+.ttx p{margin:0}
+.ttx textarea,.ttx input[type=text],.ttx input[type=number],.ttx input[type=password],.ttx input:not([type]){
+  font:inherit;color:var(--txt);width:100%;background:var(--slab);
+  border:1px solid var(--edge);border-radius:11px;padding:11px 13px}
+.ttx textarea{resize:vertical;line-height:1.55}
+.ttx textarea:focus,.ttx input:focus{border-color:var(--signal);outline:none}
+.ttx code{font-family:var(--mono);font-size:12.5px;background:var(--ink2);padding:1px 5px;border-radius:4px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--dim)}
+.good{color:var(--live)}
+.centre{text-align:center}
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+.boot{padding:70px;text-align:center;color:var(--faint)}
+.hint{font-size:12.5px;color:var(--faint);margin:8px 0 0;line-height:1.55;max-width:64ch}
+.lede{color:var(--dim);margin:0 0 20px;max-width:58ch}
+.lede b{font-weight:700}
+.keys{margin-top:26px;font-size:12px;color:var(--faint)}
+.ttx kbd{font-family:var(--mono);font-size:10.5px;background:var(--slab);border:1px solid var(--edge2);
+  border-radius:4px;padding:1px 5px;color:var(--dim)}
+
+/* brand motif: a short yellow stripe tab at the left of the top bar */
+.striped{position:relative}
+.striped::after{content:"";position:absolute;left:0;bottom:-1px;width:104px;height:3px;pointer-events:none;
+  background:repeating-linear-gradient(114deg,var(--signal) 0 13px,transparent 13px 21px)}
+
+/* ---------- buttons ---------- */
+.ttx .btn{padding:9px 17px;border-radius:10px;background:var(--signal);color:var(--signal-ink);
+  font-weight:700;font-size:13.5px;width:auto;transition:transform .1s,filter .14s}
+.ttx .btn:hover:not(:disabled){filter:brightness(1.06)}
+.ttx .btn:active:not(:disabled){transform:translateY(1px)}
+.ttx .btn:disabled{opacity:.45;cursor:default}
+.ttx .btn.wide{width:100%;text-align:center;padding:15px;font-size:15.5px;border-radius:14px;margin-top:16px}
+.ttx .btn.quiet{background:var(--slab);color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge);font-weight:600}
+.ttx .btn.quiet:hover:not(:disabled){color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint);filter:none}
+.ttx .btn.quiet.off{opacity:.6}
+.ttx .btn.pill{padding:6px 12px;font-size:12px}
+.ttx .btn.danger{background:var(--wrong);color:#fff;box-shadow:none}
+.ttx .btn.warnbtn{background:var(--warn);color:var(--on-opt)}
+.ttx .link{color:var(--signal-text);text-decoration:underline;text-underline-offset:3px;font-size:13.5px;
+  font-weight:600;width:auto}
+.ttx .link.quiet{color:var(--faint);font-size:12.5px;font-weight:500}
+
+/* ---------- header ---------- */
+.bar{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:62px;background:var(--slab);
+  border-bottom:1px solid var(--edge2);position:sticky;top:0;z-index:10;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:11px;font-size:14px;min-width:0}
+.wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
+.barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
+.build{font-family:var(--mono);font-size:10px;opacity:.55}
+.brandmark{display:inline-flex;align-items:center;justify-content:center;flex:none;
+  font-family:var(--disp);font-weight:800;font-size:13px;letter-spacing:.09em;
+  height:var(--logo-h);padding:0 11px;border-radius:9px;
+  background:var(--signal);color:var(--signal-ink)}
+.brandmark.big{height:var(--logo-h-big);font-size:23px;padding:0 19px;border-radius:14px}
+.offline{color:var(--wrong);font-weight:700;font-size:12px}
+.crumb{color:var(--faint);font-size:11.5px;white-space:nowrap;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+.injno{font-family:var(--disp);font-weight:800;white-space:nowrap;font-size:16px;letter-spacing:-.03em}
+.unitblock{min-width:0}
+.unitname{font-family:var(--disp);font-size:15px;font-weight:800;letter-spacing:-.025em;display:block;line-height:1.15}
+.seatline{display:block;font-size:10.5px;color:var(--faint)}
+.ptsbadge{font-size:14px;font-weight:700;color:var(--signal-text)}
+
+/* ---------- theme switch ---------- */
+.langbtn{display:inline-flex;align-items:center;gap:2px;height:34px;padding:0 4px;border-radius:10px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);flex:none}
+.langbtn b{font-family:var(--disp);font-size:10.5px;font-weight:800;letter-spacing:.05em;
+  padding:5px 7px;border-radius:7px;color:var(--faint)}
+.langbtn b.on{background:var(--signal);color:var(--signal-ink)}
+/* Enter di dalam sel Excel ikut tampil sebagai ganti baris. Tanpa ini HTML
+   melipat semuanya jadi satu paragraf panjang, dan skenario yang ditulis
+   berparagraf kehilangan bentuknya. Spasi tetap dirapikan, jadi indentasi
+   dari Excel tidak ikut terbawa. */
+.ttx .scenario,.ttx .condition,.ttx .projcond,
+.ttx .qtext,.ttx .pqtext,.ttx .projqtext,
+.ttx .altline,.ttx .answers p{white-space:pre-line}
+/* Terjemahan di bawah teks utama. Selalu satu blok tersendiri supaya tidak pernah
+   menyambung jadi satu kalimat dengan bahasa pertama. */
+.ttx .altline{display:block;margin-top:6px;color:var(--faint);font-size:.88em;
+  font-style:italic;line-height:1.45}
+.ttx .projcond .altline,.ttx .projqtext .altline{margin-top:10px;font-size:.78em}
+.ttx .projopt .altline{margin-top:2px;font-size:.8em}
+.ttx .qtext .altline,.ttx .pqtext .altline{font-weight:400}
+.themebtn{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;
+  color:var(--dim);background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);
+  transition:color .14s,box-shadow .14s}
+.themebtn:hover{color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint)}
+.themebtn:active{transform:translateY(1px)}
+
+/* ---------- phase stepper ---------- */
+.phases{display:flex;gap:3px;flex-wrap:wrap}
+.phases button{padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;color:var(--faint);white-space:nowrap}
+.phases button:hover{color:var(--txt);background:var(--rise)}
+.phases button.past{color:var(--dim)}
+.phases button.on{background:var(--signal);color:var(--signal-ink);font-weight:700}
+
+/* ---------- crest + chip ---------- */
+.crest{width:22px;height:22px;border-radius:7px;display:inline-grid;place-items:center;flex:none;
+  font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--on-unit);vertical-align:-5px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:4px 12px 4px 5px;border-radius:20px;
+  background:var(--rise);font-size:12.5px;font-weight:600;box-shadow:inset 0 0 0 1px var(--edge2);
+  text-transform:none;letter-spacing:0;color:var(--txt)}
+
+/* ---------- door ---------- */
+.door{display:flex;justify-content:center;padding:44px 20px 80px}
+.doorinner{max-width:400px;width:100%}
+.slots{display:flex;gap:9px;justify-content:center;position:relative;margin-bottom:18px;cursor:text}
+.slot{width:58px;height:72px;border-radius:14px;background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);
+  display:grid;place-items:center;font-family:var(--mono);font-size:30px;font-weight:700}
+.slot.filled{box-shadow:inset 0 0 0 2px var(--signal)}
+.slot.caret{box-shadow:inset 0 0 0 2px var(--signal);animation:blinkslot 1.1s step-end infinite}
+@keyframes blinkslot{50%{box-shadow:inset 0 0 0 1.5px var(--edge2)}}
+.ttx .codeghost{position:absolute;inset:0;opacity:0;width:100%;height:100%;padding:0;border:none;
+  background:transparent;font-size:16px;cursor:text}
+.resolve{min-height:22px;font-size:13.5px;color:var(--faint);text-align:center;margin-bottom:18px}
+.resolved{display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:14px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);margin-bottom:6px}
+.resolved.taken{background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge)}
+.resolved small{display:block;font-size:11px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;font-weight:700}
+.resolved.taken small{color:var(--warn)}
+.resolved b{font-family:var(--disp);font-size:16px;font-weight:800;letter-spacing:-.025em}
+.doorfoot{margin-top:28px;padding-top:18px;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:12px;align-items:flex-start}
+/* deliberately quiet: present for anyone who looks, invisible to anyone who doesn't.
+   z-index sits below the seats panel scrim (30) so it doesn't float over it. */
+.aidisc{position:fixed;left:11px;bottom:8px;z-index:20;pointer-events:none;
+  font-size:9.5px;line-height:1.4;color:var(--faint);opacity:.55;letter-spacing:.02em;margin:0}
+
+/* ---------- forms ---------- */
+.load{display:flex;justify-content:center;padding:36px 20px 90px}
+.loadinner{max-width:560px;width:100%}
+.loadinner.wide{max-width:680px}
+.drop{border:1.5px dashed var(--edge);border-radius:14px;padding:34px;text-align:center;
+  background:var(--slab);display:flex;flex-direction:column;align-items:center;gap:12px}
+.or{color:var(--faint);font-size:13px}
+.err{margin-top:14px;padding:11px 14px;background:var(--wrong-soft);
+  box-shadow:inset 0 0 0 1px var(--wrong-edge);border-radius:10px;font-size:13.5px;color:var(--wrong)}
+.ttx .load .link{margin-top:18px;display:inline-block}
+.fld{display:block;margin-bottom:16px}
+.fld>span{display:block;font-size:12.5px;font-weight:600;color:var(--dim);margin-bottom:6px}
+.fld>span em{font-style:normal;color:var(--faint);font-weight:400;margin-left:6px}
+.warn{font-size:12.5px;background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:10px;padding:11px 14px;margin-bottom:20px;color:var(--warn)}
+.warn summary{cursor:pointer;font-weight:700}
+.warn ul{margin:9px 0 0;padding-left:16px;line-height:1.55}
+.warnhint{color:var(--warn)}
+.setgrid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+.span2{grid-column:1/-1}
+.seg2{display:flex;gap:4px}
+.seg2 button{flex:1;padding:10px 12px;border-radius:10px;font-size:13.5px;color:var(--dim);
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge);text-align:center;font-weight:600}
+.seg2 button.on{background:var(--signal);color:var(--signal-ink);box-shadow:none;font-weight:700}
+.chk{display:flex;gap:10px;align-items:flex-start;cursor:pointer;margin-bottom:12px}
+.chk input{width:16px;height:16px;margin-top:3px;flex:none;accent-color:var(--signal)}
+.chk b{display:block;font-size:14px;font-weight:600}
+.chk em{display:block;font-style:normal;font-size:12.5px;color:var(--faint);margin-top:2px;line-height:1.45}
+.codelist{list-style:none;margin:10px 0 0;padding:0;background:var(--slab);
+  box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;overflow:hidden}
+.codelist li{display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid var(--edge2);flex-wrap:wrap}
+.codelist li:last-child{border-bottom:none}
+.cname{flex:1;font-size:14px;font-weight:600;min-width:120px}
+.cinput{font-family:var(--mono);text-align:center;letter-spacing:.1em;text-transform:uppercase;padding:7px}
+/* Lebar ditulis dengan selector sekuat aturan dasar input, kalau tidak
+   aturan width:100% milik .ttx input menang dan kolomnya melebar. */
+.ttx input.cinput{width:112px;flex:none}
+.ttx input.cinput.narrow{width:78px;letter-spacing:0}
+.unit{color:var(--faint);font-size:12.5px}
+.bigcode{font-size:19px;font-weight:700;letter-spacing:.16em;color:var(--signal-text);
+  white-space:nowrap;flex:none;padding-inline:2px}
+
+/* ---------- run shell ---------- */
+.run{display:grid;grid-template-columns:222px minmax(0,1fr);align-items:start}
+.rail{position:sticky;top:58px;height:calc(100vh - 58px);display:flex;flex-direction:column;
+  border-right:1px solid var(--edge2);background:var(--ink2)}
+.tl{list-style:none;margin:0;padding:12px 0;overflow-y:auto;flex:1}
+.tlhead{font-size:10px;font-weight:800;color:var(--faint);padding:14px 16px 6px;letter-spacing:.13em;text-transform:uppercase}
+.tlrow button{width:100%;display:grid;grid-template-columns:14px 20px 1fr;align-items:center;
+  gap:9px;padding:8px 16px;font-size:12.5px;color:var(--faint)}
+.tlrow button:hover{background:var(--slab)}
+.tldot{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--edge);margin-left:2px}
+.tlrow.done .tldot{background:var(--faint);box-shadow:none}
+.tlrow.now button{background:var(--rise);color:var(--txt);font-weight:600}
+.tlrow.now .tldot{background:var(--signal);box-shadow:0 0 0 3px var(--signal-soft)}
+.tlno{font-family:var(--mono);font-size:11px}
+.tltext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.tlfoot{border-top:1px solid var(--edge2);padding:11px 16px;display:flex;align-items:center;gap:10px;
+  font-size:11.5px;color:var(--faint)}
+.tlprog{flex:1;height:3px;background:var(--edge2);border-radius:2px;overflow:hidden}
+.tlprog i{display:block;height:100%;background:var(--signal);transition:width .3s}
+
+/* ---------- stage ---------- */
+.stage{padding:26px 30px 90px;max-width:900px}
+/* Layar kode dibaca ramai ramai di ruangan, jadi kartunya melebar ke samping
+   sampai selebar jendela, bukan menumpuk dua kolom ke bawah. */
+.stage.wide{max-width:none;width:100%}
+.scenario{font-size:17.5px;line-height:1.62;margin:0 0 20px;padding:20px 22px;background:var(--slab);
+  box-shadow:inset 0 0 0 1px var(--edge2);border-radius:18px;max-width:62ch}
+.scenario .eyebrow,.condition .eyebrow{display:block;margin-bottom:9px}
+.empty{color:var(--faint);font-style:italic;margin-bottom:20px}
+.callon{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:18px;
+  font-size:11.5px;color:var(--faint);font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.actbar{display:flex;align-items:center;gap:16px;padding:14px 18px;background:var(--rise);
+  box-shadow:inset 0 0 0 1px var(--edge);border-radius:16px;margin-bottom:22px;flex-wrap:wrap}
+.actbar .msg{font-size:13.5px;color:var(--dim)}
+.actbar .btn{margin-left:auto}
+.inlinetime{display:flex;align-items:center;gap:6px}
+.inlinetime input{width:74px;font-family:var(--mono);text-align:center;padding:6px}
+
+/* ---------- ring ---------- */
+.ring{position:relative;flex:none;display:grid;place-items:center}
+.ring svg{transform:rotate(-90deg);display:block;overflow:visible}
+.ring .rtrack{fill:none;stroke:var(--edge2);stroke-width:9}
+.ring .rfill{fill:none;stroke:var(--live);stroke-width:9;stroke-linecap:round;transition:stroke .4s}
+.ring .rlabel{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;pointer-events:none}
+.ring .rnum{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
+  letter-spacing:-.03em;color:var(--txt);line-height:1}
+.ring .rcap{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);
+  font-weight:700;line-height:1}
+.ring.warn .rfill{stroke:var(--warn)} .ring.warn .rnum{color:var(--warn)}
+.ring.urgent .rfill{stroke:var(--wrong)} .ring.urgent .rnum{color:var(--wrong)}
+.ring.urgent{animation:tense 1s ease-in-out infinite}
+.ring.done .rnum{color:var(--wrong)}
+@keyframes tense{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
+.ring.s72 svg{width:72px;height:72px} .ring.s72 .rnum{font-size:17px}
+.ring.s150 svg{width:150px;height:150px} .ring.s150 .rnum{font-size:38px}
+.ring.s150 .rtrack,.ring.s150 .rfill{stroke-width:7}
+.ring.s220 svg{width:220px;height:220px} .ring.s220 .rnum{font-size:58px}
+.ring.s220 .rcap{font-size:12px}
+.ring.s220 .rtrack,.ring.s220 .rfill{stroke-width:6}
+.ringwrap{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-bottom:6px}
+
+/* peran fasilitator */
+.rolepill{font-size:9.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+  border-radius:20px;padding:3px 9px;white-space:nowrap;font-family:var(--body);flex:none}
+.rolepill.owner{color:var(--signal-ink);background:var(--signal)}
+.rolepill.full{color:var(--on-opt);background:var(--oB)}
+.rolepill.grader{color:var(--on-opt);background:var(--oD)}
+.rolepill.viewer{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
+.hostlist{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.hostlist li{display:flex;align-items:center;gap:9px;font-size:13.5px}
+.hostlist .hname{color:var(--dim)}
+.connpill{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  border-radius:20px;padding:5px 11px;color:var(--warn);background:var(--warn-soft);
+  box-shadow:inset 0 0 0 1px var(--warn-edge);flex:none}
+.connpill.on{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
+.ccode{font-size:16px;letter-spacing:.12em;color:var(--signal-text)}
+
+/* pintu masuk fasilitator tambahan */
+.joinhost{margin-top:34px;padding-top:20px;border-top:1px solid var(--edge2)}
+.joinrow{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.joinrow input{flex:1 1 150px;min-width:0}
+.joinrow select{font:inherit;color:var(--txt);background:var(--slab);border:1px solid var(--edge);
+  border-radius:11px;padding:11px 13px;flex:none}
+
+/* tombol tambah waktu */
+.addtime{display:flex;align-items:center;gap:6px}
+.addtime .unit{font-size:11.5px;color:var(--faint)}
+
+/* dua kolom waktu di daftar inject */
+.cohead{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:700}
+.colcap{width:78px;text-align:center;flex:none}
+.cinput.dim{opacity:.55}
+
+/* peserta yang sudah selesai sementara esai unit lain masih berjalan */
+.waitbox{display:flex;gap:12px;align-items:flex-start;background:var(--rise);
+  box-shadow:inset 0 0 0 1px var(--edge);border-radius:16px;padding:14px 16px;margin-bottom:14px}
+.waitbox b{display:block;font-family:var(--disp);font-size:14.5px;font-weight:800;margin-bottom:3px}
+.waitbox p{font-size:13px;line-height:1.5;color:var(--dim)}
+
+/* ---------- lobby ---------- */
+.lobby{max-width:1480px}
+.lobbytop{display:flex;align-items:flex-start;gap:22px;flex-wrap:wrap;margin-bottom:20px}
+.lobbytop p{max-width:70ch;font-size:13.5px;margin-top:4px}
+.dial{margin-left:auto;text-align:right;flex:none}
+.dial b{display:block;font-size:34px;font-weight:700;line-height:1;letter-spacing:-.04em}
+.dial span{font-size:11px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase;font-weight:700}
+.codegrid{list-style:none;margin:0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:11px}
+.codegrid li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  padding:16px 17px;display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
+.codegrid li::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:var(--c)}
+.codegrid li.in{background:var(--rise);box-shadow:inset 0 0 0 1px var(--edge)}
+.cghead{display:flex;align-items:center;gap:9px;min-width:0}
+.cghead b{font-size:13.5px;font-weight:700;line-height:1.3;min-width:0;overflow-wrap:anywhere}
+/* Badge kursi kosong duduk di baris status, sejajar dengan teks "sudah duduk",
+   dan lebarnya mengikuti isinya sendiri. */
+.seatopen{align-self:flex-start;max-width:100%;font-size:9.5px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--warn);background:var(--warn-soft);
+  box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px;white-space:nowrap}
+.cgcode{display:block;font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:.16em;
+  color:var(--c);line-height:1.1;white-space:nowrap;overflow:visible}
+.cgwho{display:block;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.codegrid li.in .cgwho{color:var(--live)}
+
+/* ---------- tracker ---------- */
+.tracker{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  overflow:hidden;margin-bottom:22px}
+.trow{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge2);font-size:13.5px}
+.trow:last-child{border-bottom:none}
+.trow.in{background:var(--live-soft)}
+.tname{font-weight:600;min-width:140px}
+.tbar{flex:1;height:7px;background:var(--edge2);border-radius:4px;overflow:hidden;max-width:260px}
+.tbar i{display:block;height:100%;background:var(--c);border-radius:4px;transition:width .4s}
+.tcount{font-size:12px;color:var(--faint)}
+.tmiss{color:var(--faint);font-size:12.5px}
+.tin{color:var(--live);font-size:12.5px;font-weight:600}
+.tdone{font-size:12px;color:var(--live);min-width:46px;text-align:right;font-weight:700}
+
+/* ---------- question cards ---------- */
+.rolegroup{margin-bottom:26px}
+.rolerule{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:700;color:var(--c);
+  padding-bottom:8px;border-bottom:2px solid var(--c);margin-bottom:13px}
+.qcard{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:18px;
+  padding:17px 19px;margin-bottom:10px}
+.qtext{margin:0 0 14px;font-family:var(--disp);font-size:16.5px;line-height:1.36;font-weight:800;letter-spacing:-.025em}
+.qtext.small{font-size:14.5px;font-weight:700;margin-bottom:0}
+.votes{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:9px}
+.vrow{display:grid;grid-template-columns:30px 1fr 62px;gap:12px;align-items:stretch}
+.vglyph{width:30px;height:30px;border-radius:9px;background:var(--c);display:grid;place-items:center;
+  align-self:center;
+  color:var(--on-opt);flex:none}
+/* Opsi bisa sepanjang satu paragraf. Tinggi tetap membuatnya tertimpa baris
+   berikutnya, jadi baloknya ikut tinggi teks. */
+.vtrack{position:relative;min-height:40px;border-radius:11px;background:var(--ink);
+  box-shadow:inset 0 0 0 1px var(--edge2);overflow:hidden;display:flex;align-items:center;
+  padding:8px 0}
+.vfill{position:absolute;inset:0 auto 0 0;background:var(--c);opacity:.22;transition:width .5s}
+.vlabel{position:relative;padding-inline:13px;font-size:13.5px;line-height:1.4;z-index:1;
+  overflow-wrap:anywhere;min-width:0}
+.tier{display:inline-block;margin-left:9px;font-size:9.5px;font-weight:800;letter-spacing:.08em;
+  text-transform:uppercase;border-radius:20px;padding:2px 8px;vertical-align:1px;white-space:nowrap}
+.tier.top{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
+.tier.mid{color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge)}
+.typebadge.weighted{color:var(--on-opt);background:var(--oB)}
+.vrow.correct .vtrack{box-shadow:inset 0 0 0 2px var(--live)}
+.vrow.correct .vlabel{color:var(--live);font-weight:600}
+.vrow.correct .vn{color:var(--live)}
+.vn{font-size:15px;font-weight:700;text-align:right;color:var(--dim);line-height:1.15;
+  align-self:center}
+.vn em{display:block;font-style:normal;font-family:var(--body);font-size:9px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.who-list{list-style:none;margin:0;padding:12px 0 0;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:7px}
+.who-list li{display:flex;align-items:center;gap:10px;font-size:13px}
+.who-list .wname{flex:1}
+.who-list li.ok .wname{color:var(--live);font-weight:600}
+.who-list li.no .wname{color:var(--wrong)}
+.who-list li.part .wname{color:var(--warn);font-weight:600}
+.wopt{display:flex;align-items:center;gap:4px}
+.rk{font-size:10.5px;color:var(--faint);width:16px;flex:none}
+.who-list .ms{font-size:12px;color:var(--faint)}
+.who-list .pts{font-size:12.5px;font-weight:700;min-width:56px;text-align:right}
+.who-list .none{color:var(--faint);font-style:italic}
+.answers{list-style:none;margin:0 0 13px;padding:0;display:flex;flex-direction:column;gap:8px}
+.answers li{background:var(--ink);border-radius:12px;padding:12px 14px}
+.answers .who{font-size:11px;font-weight:700;color:var(--faint);display:block;margin-bottom:4px}
+.answers p{margin:0;font-size:14.5px;line-height:1.55}
+.noanswer{margin:0 0 12px;color:var(--wrong);font-size:13.5px;font-style:italic}
+.qfoot{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.dims{display:flex;gap:22px;flex-wrap:wrap}
+.dim{display:flex;align-items:center;gap:7px}
+.dimlab{font-size:11px;color:var(--faint);font-weight:700}
+.grade{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:11px;
+  padding-top:11px;border-top:1px solid var(--edge2)}
+.gscale{display:flex;gap:3px;flex-wrap:wrap}
+.gscale button{width:30px;height:30px;border-radius:8px;font-family:var(--mono);font-size:12.5px;
+  font-weight:600;color:var(--dim);box-shadow:inset 0 0 0 1px var(--edge);transition:background .12s}
+.gscale button:hover{color:var(--txt);box-shadow:inset 0 0 0 1px var(--faint)}
+.gscale button.on{color:var(--on-opt);box-shadow:none;font-weight:700}
+.gscale button.on.ok{background:var(--live)}
+.gscale button.on.part{background:var(--warn)}
+.gscale button.on.no{background:var(--wrong)}
+.gout{font-size:12.5px;color:var(--faint)}
+.gout b{color:var(--txt)}
+.gnum{font-size:15px;font-weight:700}
+.ungraded{font-style:normal;font-size:11px;color:var(--warn);font-family:var(--body)}
+.essayback{font-size:13.5px;line-height:1.55;color:var(--dim);background:var(--ink);
+  border-radius:12px;padding:11px 13px;white-space:pre-line}
+.model{margin:13px 0 0;padding-top:13px;border-top:1px solid var(--edge2);white-space:pre-line;
+  font-size:14.5px;line-height:1.6;color:var(--dim)}
+.notes{margin-top:26px}
+.notes label{display:block;font-size:12.5px;font-weight:600;color:var(--dim);margin-bottom:7px}
+.nav{display:flex;justify-content:space-between;gap:12px;margin-top:26px;padding-top:22px;
+  border-top:1px solid var(--edge2);flex-wrap:wrap}
+.confirm{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.confirm .msg{font-size:13px;color:var(--dim)}
+
+/* ---------- seats panel ---------- */
+.scrim{position:fixed;inset:0;background:rgba(10,9,6,.44);z-index:30;display:flex;justify-content:flex-end}
+.panel{background:var(--ink);width:min(480px,100%);height:100%;overflow-y:auto;padding:22px 24px 44px;
+  position:relative;z-index:31;
+  border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
+.phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+/* ---------- panel rekap inject ---------- */
+/* ---------- konteks inject sebelumnya di layar peserta ---------- */
+.prevctx{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+  margin-bottom:14px;overflow:hidden}
+.pcbtn{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;text-align:left}
+.pcbtn .lab{flex:1;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint)}
+.pcmore{font-size:12px;font-weight:600;color:var(--signal-text);flex:none}
+.pcbody{padding:0 14px 13px;display:flex;flex-direction:column;gap:11px}
+.pccond{font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
+  border-left:2px solid var(--edge);padding-left:10px}
+.pastq{background:var(--ink);border-radius:11px;padding:10px 12px;
+  display:flex;flex-direction:column;gap:5px;border-left:3px solid var(--edge)}
+.pastq.ok{border-left-color:var(--live)}
+.pastq.part{border-left-color:var(--warn)}
+.pastq.no{border-left-color:var(--wrong)}
+.pastq.miss{border-left-color:var(--faint)}
+.pqq{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
+.pqa,.pqk,.pqn{font-size:12.5px;line-height:1.45;color:var(--dim);white-space:pre-line}
+.pqk{color:var(--live)}
+.pqa .lab,.pqk .lab,.pqn .lab{display:block;font-size:9.5px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--faint);margin-bottom:2px}
+
+.recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+  padding:10px 12px}
+.recaplist li.open{box-shadow:inset 0 0 0 1px var(--edge)}
+.rchead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rctitle{flex:1;min-width:0;display:flex;align-items:baseline;gap:9px;text-align:left}
+.rctitle b{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em}
+.rctitle small{font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recaplist .btn.on{background:var(--signal);color:var(--signal-ink)}
+.rcbody{margin-top:11px;padding-top:11px;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:14px}
+.rccond{margin:0;font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
+  border-left:2px solid var(--edge);padding-left:10px}
+.rcq{display:flex;flex-direction:column;gap:6px}
+.rcpunit{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;color:var(--faint)}
+.rcqtext{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
+.rckey{font-size:12px;color:var(--live);line-height:1.4}
+.rckey .lab{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);margin-right:7px}
+.rcans{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.rcans li{display:flex;align-items:baseline;gap:10px;font-size:12.5px;line-height:1.4;
+  background:var(--ink);border-radius:9px;padding:6px 9px}
+.rcans li.ok{color:var(--live)}
+.rcans li.part{color:var(--warn)}
+.rcans li.no{color:var(--wrong)}
+.rcans li.none{color:var(--faint);font-style:italic}
+.rcatext{flex:1;min-width:0;overflow-wrap:anywhere;white-space:pre-line}
+.rcapts{font-weight:700;flex:none}
+
+/* ---------- participant ---------- */
+.pmain{display:flex;justify-content:center;padding:20px 16px 80px}
+.pinner{max-width:560px;width:100%;display:flex;flex-direction:column;gap:16px}
+.condition{margin:0;border-radius:16px;background:var(--slab);padding:18px;
+  box-shadow:inset 0 0 0 1px var(--edge2);font-size:15.5px;line-height:1.6}
+.standby{text-align:center;padding:56px 20px}
+.standby.small{padding:26px 20px}
+.pulse{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--live);
+  margin-bottom:14px;animation:beat 2.2s ease-in-out infinite;flex:none}
+@keyframes beat{0%,100%{opacity:.3}50%{opacity:1}}
+.pq{display:flex;flex-direction:column;gap:13px}
+.pqtext{margin:0;font-family:var(--disp);font-size:21px;line-height:1.28;font-weight:800;letter-spacing:-.03em}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.ttx .opt{position:relative;display:flex;flex-direction:column;gap:11px;padding:15px 15px 14px;
+  border-radius:18px;background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);text-align:left;
+  transition:transform .12s,box-shadow .16s,opacity .2s,background .16s}
+.ttx .opt:hover:not(:disabled){transform:translateY(-2px);box-shadow:inset 0 0 0 1.5px var(--c)}
+.ttx .opt:active:not(:disabled){transform:translateY(0)}
+.ttx .opt:disabled{cursor:default}
+.oglyph{width:34px;height:34px;border-radius:10px;background:var(--c);display:grid;place-items:center;
+  flex:none;color:var(--on-opt)}
+.otxt{font-size:14.5px;font-weight:500;line-height:1.4}
+.oltr{position:absolute;top:15px;right:15px;font-size:11px;font-weight:700;color:var(--faint)}
+/* checkbox: a real tick box, so "several may be right" is legible before anyone taps */
+.otick{position:absolute;top:14px;right:14px;width:19px;height:19px;border-radius:6px;
+  display:grid;place-items:center;box-shadow:inset 0 0 0 1.5px var(--edge);color:transparent}
+.otick.on{background:var(--slab);color:var(--c);box-shadow:inset 0 0 0 1.5px var(--slab)}
+.ttx .opt.picked .otick{box-shadow:inset 0 0 0 1.5px var(--slab)}
+.qtypeline{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:14px;
+  color:var(--dim);line-height:1.5;margin:0}
+/* Di layar host keterangannya hanya badge, jadi boleh lebih kecil. */
+.qcard .qtypeline{font-size:12.5px;color:var(--faint)}
+/* Badge tipe adalah label di atas pertanyaan, jadi jaraknya diatur di sini:
+   aturan reset .ttx p{margin:0} mengalahkan margin pada .qtypeline sendiri. */
+.qcard .qtypeline{margin:0 0 10px}
+.qcard .qtext{margin:0 0 15px}
+.typebadge{font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  border-radius:20px;padding:3px 9px;flex:none;font-family:var(--body);white-space:nowrap}
+.typebadge.choice{color:var(--dim);background:var(--ink2);box-shadow:inset 0 0 0 1px var(--edge2)}
+.typebadge.checkbox{color:var(--signal-ink);background:var(--signal)}
+.typebadge.open{color:var(--on-opt);background:var(--oC)}
+.projtype{font-size:13px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--signal-text);margin-top:-8px}
+/* what is coming, so the facilitator is not surprised by an essay mid-run */
+.qplan{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:16px;
+  padding:16px 18px;margin-bottom:22px}
+.qplan h4{font-family:var(--body);font-size:11px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--faint);margin:0 0 11px}
+.qplan ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.qplan li{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;
+  padding-bottom:9px;border-bottom:1px solid var(--edge2)}
+.qplan li:last-child{padding-bottom:0;border-bottom:none}
+.qpunit{font-weight:600;min-width:150px}
+.qptext{flex:1;color:var(--dim);min-width:180px}
+.qpkeys{font-size:11px;color:var(--faint);white-space:nowrap}
+.ttx .opt.picked{background:var(--c);box-shadow:inset 0 0 0 1.5px var(--c)}
+.ttx .opt.picked .otxt{color:var(--on-opt);font-weight:600}
+.ttx .opt.picked .oglyph{background:var(--slab);color:var(--c)}
+.ttx .opt.picked .oltr{color:var(--on-opt);opacity:.65}
+.ttx .opt.faded{opacity:.42}
+.lockstamp{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px;border-radius:14px;
+  background:var(--wrong-soft);box-shadow:inset 0 0 0 1.5px var(--wrong-edge);
+  font-family:var(--disp);font-weight:800;color:var(--wrong);font-size:14.5px}
+.sentline{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--live);font-weight:700;margin:0}
+.sentline .tick{width:18px;height:18px;border-radius:50%;background:var(--live);display:grid;
+  place-items:center;flex:none;color:var(--on-opt)}
+.sentnote{text-align:center;font-size:13px;color:var(--live);font-weight:600}
+.myresult{display:flex;flex-direction:column;gap:11px}
+.rescard{background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);border-radius:18px;
+  padding:17px;display:flex;flex-direction:column;gap:11px}
+.rescard.ok{background:var(--live-soft);box-shadow:inset 0 0 0 1.5px var(--live-edge)}
+.rescard.no{background:var(--wrong-soft);box-shadow:inset 0 0 0 1.5px var(--wrong-edge)}
+.rescard.part{background:var(--warn-soft);box-shadow:inset 0 0 0 1.5px var(--warn-edge)}
+.rescard.part .badge{background:var(--warn)}
+.accpill{margin-left:auto;font-size:10.5px;font-weight:800;letter-spacing:.06em;color:var(--warn);
+  background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);border-radius:20px;padding:3px 9px}
+.rescard.ok .accpill{color:var(--live);background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge)}
+.rescard.no .accpill{color:var(--wrong);background:var(--wrong-soft);box-shadow:inset 0 0 0 1px var(--wrong-edge)}
+.kglyphs{display:flex;gap:4px;flex:none;margin-top:1px}
+.rescard.miss{opacity:.7}
+.verdict{display:flex;align-items:center;gap:11px}
+.verdict .badge{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;flex:none;
+  background:var(--dim);color:var(--on-opt)}
+.rescard.ok .badge{background:var(--live)}
+.rescard.no .badge{background:var(--wrong)}
+.verdict b{font-family:var(--disp);font-size:18px;font-weight:800;letter-spacing:-.025em}
+.ptsbig{font-size:40px;font-weight:700;letter-spacing:-.04em;line-height:1;color:var(--signal-text)}
+.metarow{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--dim)}
+.metarow b{color:var(--txt);font-weight:700}
+.keyline{display:flex;gap:9px;align-items:flex-start;font-size:13.5px;color:var(--dim);line-height:1.5}
+.keyline b{color:var(--txt);font-weight:700}
+.kglyph{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;flex:none;
+  color:var(--on-opt);background:var(--c);margin-top:1px}
+.rline{margin:0;font-size:12.5px;color:var(--faint)}
+.totalline{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0}
+.totalline b{font-size:34px;font-weight:700;color:var(--signal-text);letter-spacing:-.04em;line-height:1}
+.totalline span{font-size:12px;color:var(--faint)}
+
+/* ---------- projector ---------- */
+.screen{min-height:100vh;display:flex;flex-direction:column;background:var(--ink)}
+.projwait{text-align:center;padding:22vh 20px}
+.projtop{display:flex;align-items:center;gap:20px;padding:22px 34px;background:var(--slab);
+  border-bottom:1px solid var(--edge2)}
+.projtop h1{font-size:26px;margin:2px 0 0}
+.projlang{margin-left:auto}
+/* Penanda rekap di proyektor. Warnanya sengaja berbeda dari fase mana pun,
+   supaya ruangan tidak mengira ini inject yang sedang berjalan. */
+.projphase.recapmark{background:var(--signal);color:var(--signal-ink);
+  border-radius:20px;padding:6px 14px;letter-spacing:.1em}
+.projphase{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
+.projphase .pulse{margin:0;width:12px;height:12px}
+.projphase.revealed{color:var(--signal-text)}
+.projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 34px}
+.projlobby{text-align:center;padding:5vh 0 0}
+.projlobby h2{font-size:40px}
+/* Kartu kode di ruang tunggu proyektor. Melebar ke samping selebar layar dan
+   turun ke baris berikutnya hanya kalau sudah tidak muat, jadi ruangan dengan
+   sepuluh unit tetap terbaca tanpa menggulung. */
+.projcodes{list-style:none;margin:34px auto 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:16px;max-width:1560px}
+.projcodes li{background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);border-radius:18px;
+  padding:18px 14px 15px;display:flex;flex-direction:column;align-items:center;gap:9px;
+  position:relative;overflow:hidden}
+.projcodes li::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:var(--c)}
+.projcodes li.in{background:var(--live-soft);box-shadow:inset 0 0 0 2px var(--live-edge)}
+.pcunit{font-size:14px;font-weight:700;color:var(--dim);line-height:1.3;overflow-wrap:anywhere}
+.pccode{font-family:var(--mono);font-size:38px;font-weight:700;letter-spacing:.13em;
+  color:var(--c);line-height:1}
+.projcodes li.in .pccode{color:var(--live)}
+.pcstate{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.projcodes li.in .pcstate{color:var(--live)}
+.projmid{display:flex;gap:36px;align-items:flex-start;flex:1}
+.projleft{flex:1;display:flex;flex-direction:column;gap:22px;min-width:0}
+.projcond{font-size:19px;line-height:1.55;color:var(--dim);max-width:62ch;
+  border-left:3px solid var(--signal);padding-left:16px}
+.projq{display:flex;flex-direction:column;gap:16px}
+.projqtext{font-family:var(--disp);font-size:32px;font-weight:800;line-height:1.16;
+  letter-spacing:-.035em;max-width:28ch}
+.projopts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.projopt{display:flex;align-items:center;gap:13px;padding:14px 16px;border-radius:14px;
+  background:var(--slab);box-shadow:inset 0 0 0 1.5px var(--edge2);font-size:17px}
+.projopt.key{box-shadow:inset 0 0 0 2.5px var(--live)}
+.projopt .oglyph{width:32px;height:32px}
+.projopt .otxt{font-size:17px}
+.projopt .on{margin-left:auto;font-size:19px;font-weight:700;color:var(--dim)}
+.projopt.key .on{color:var(--live)}
+.projstrip{display:flex;gap:9px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--edge2);
+  padding-top:18px;margin-top:auto}
+.projstrip .lab{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:800}
+.projtop .brandmark{margin-right:4px}
+.jcode{display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:11px;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
+.jcode b{font-size:16px;font-weight:700;letter-spacing:.1em}
+.jcode.in{background:var(--live-soft);box-shadow:inset 0 0 0 1px var(--live-edge);color:var(--live)}
+
+/* ---------- report ---------- */
+.report{display:flex;justify-content:center;padding:30px 22px 96px}
+.repinner{max-width:820px;width:100%}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:11px;margin:18px 0 6px}
+.kpis>div{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;padding:15px 17px}
+.kpis b{display:block;font-size:26px;font-weight:700;letter-spacing:-.035em;line-height:1.1}
+.kpis span{font-size:10.5px;color:var(--faint);display:block;margin-top:6px;letter-spacing:.09em;
+  text-transform:uppercase;font-weight:700}
+.kpisub{display:block;font-style:normal;font-size:11px;color:var(--faint);margin-top:5px;opacity:.8}
+.boardnote{margin:0 0 10px;max-width:74ch}
+.board{list-style:none;margin:0;padding:0;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);
+  border-radius:14px;overflow:hidden}
+.board li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--edge2);font-size:14px}
+.board li:last-child{border-bottom:none}
+.board li.first{background:var(--rise)}
+.rank{font-size:12px;color:var(--faint);width:24px}
+.bname{flex:1;font-weight:600;min-width:100px}
+.bbar{flex:1;height:7px;background:var(--edge2);border-radius:4px;overflow:hidden;max-width:200px}
+.bbar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+.bscore{min-width:104px;text-align:right;flex:none}
+.bscore b{display:block;font-weight:700;font-size:16px;letter-spacing:-.02em}
+.bscore em{display:block;font-style:normal;font-size:10.5px;color:var(--faint);margin-top:1px}
+.tbl .dimcell{color:var(--faint)}
+.tbl .strong{font-weight:700}
+.tbl tr.skipped td{opacity:.5}
+/* penanda unit yang soalnya terlalu sedikit untuk dibandingkan */
+.thin{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--warn);background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:20px;padding:2px 8px;white-space:nowrap;margin-left:8px;flex:none}
+.tblwrap{overflow-x:auto;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px}
+.tbl{width:100%;border-collapse:collapse;font-size:14px}
+.tbl th{text-align:left;font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);padding:13px 15px 9px}
+.tbl td{padding:11px 15px;border-top:1px solid var(--edge2)}
+.repactions{display:flex;gap:12px;margin-top:30px;flex-wrap:wrap}
+.crash{max-width:500px;margin:70px auto;padding:0 24px;text-align:center}
+.crash pre{text-align:left;background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:10px;
+  padding:13px;font-size:12px;overflow:auto;margin:18px 0;color:var(--wrong)}
+
+@media (max-width:900px){
+  /* 1fr saja berarti minmax(auto,1fr), dan lebar minimum kolomnya mengikuti isi
+     terlebar di dalamnya. Daftar inject yang bisa digeser ke samping karena itu
+     melebarkan seluruh halaman, dan semua yang lain ikut terseret keluar layar. */
+  .run{grid-template-columns:minmax(0,1fr)}
+  .rail,.stage{min-width:0}
+  .rail{position:static;height:auto;border-right:none;border-bottom:1px solid var(--edge2)}
+  .tl{display:flex;overflow-x:auto;padding:10px;gap:7px}
+  .tlhead{display:none}
+  .tlrow button{grid-template-columns:auto auto;border-radius:9px;padding:8px 12px;background:var(--slab);
+    box-shadow:inset 0 0 0 1px var(--edge2);width:auto}
+  .tltext{display:none}
+  .stage{padding:22px 16px 80px}
+  .setgrid{grid-template-columns:1fr}
+  .actbar .btn{width:100%;margin-left:0}
+  .projmid{flex-direction:column}
+  .projopts{grid-template-columns:1fr}
+  .projqtext{font-size:24px}
+  .projtop,.projbody{padding-inline:18px}
+}
+/* Layar host memang dirancang untuk laptop, tetapi fasilitator sering memegangnya
+   di ponsel sambil berdiri. Di lebar ini bar dipecah jadi beberapa baris utuh,
+   bukan diperas sampai tiap tombol jatuh sendiri sendiri. */
+@media (max-width:700px){
+  .bar{gap:8px 10px;padding:8px 12px;min-height:0}
+  .brand{gap:8px;flex:1 1 100%;min-width:0;flex-wrap:wrap}
+  .crumb{font-size:10.5px}
+  .injno{font-size:14px}
+  .phases{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding-bottom:2px}
+  .phases button{white-space:nowrap;padding:6px 11px;font-size:11.5px}
+  .barright{flex:1 1 100%;margin-left:0;justify-content:flex-start;gap:6px}
+  .barright .btn{padding:7px 11px;font-size:12px}
+  .build{order:9}
+
+  .stage{padding:16px 14px 72px}
+  .scenario{font-size:15.5px;line-height:1.55;padding:15px 16px;border-radius:14px}
+  .callon{gap:6px;margin-bottom:14px}
+  .actbar{flex-direction:column;align-items:stretch;gap:10px;padding:12px 14px}
+  .actbar .addtime{justify-content:space-between}
+  .ring.s72{width:58px;height:58px}
+
+  .trow{flex-wrap:wrap;gap:8px 10px;padding:11px 13px}
+  .tname{min-width:0;flex:1 1 100%}
+  .tbar{max-width:none}
+  .qcard{padding:14px 15px}
+  .vrow{grid-template-columns:24px minmax(0,1fr) 46px;gap:9px}
+  .vglyph{width:24px;height:24px;border-radius:7px}
+  .vlabel{font-size:13px;padding-inline:11px}
+  .vn{font-size:13.5px}
+  .gscale button{min-width:26px}
+  .nav{flex-wrap:wrap;gap:9px}
+  .nav .btn{flex:1 1 auto}
+  .codegrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  .tblwrap{overflow-x:auto}
+  .panel{width:100%}
+}
+@media (max-width:420px){
+  .ttx{--logo-h:26px}
+  .opts{grid-template-columns:1fr}
+  .slot{width:52px;height:66px;font-size:26px}
+}
+@media (prefers-reduced-motion:reduce){.ttx *{animation:none!important;transition:none!important}}
+`;
+
+/* ========================= KAMUS BAHASA INGGRIS =========================
+   Kunci: kalimat bahasa Indonesia persis seperti yang ditulis di kode.
+   Kalimat yang tidak ada di sini tampil apa adanya, jadi menambah teks baru
+   tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
+   nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
+const EN = {
+  " · {0} dicentang": " · {0} ticked",
+  ", esai {0}": ", essay {0}",
+  ", tapi sedang offline": ", but is currently offline",
+  ", unit {0} yang menjawab": ", the {0} unit to answer",
+  ", yaitu {0}": ", namely {0}",
+  ", ~{0}~ salah": ", ~{0}~ wrong",
+  ". Waktu menjawab pilihan {0}": ". Answer time for choice questions {0}",
+  ". Waktu menulis esai {0}": ". Essay writing time {0}",
+  "Acak": "Shuffle",
+  "Ada yang rusak": "Something broke",
+  "Akhiri sesi": "End session",
+  "Akses Anda dicabut oleh pemilik ruangan.": "Your access was revoked by the room owner.",
+  "Akurasi": "Accuracy",
+  "Akurasi rata rata": "Average accuracy",
+  "Alamatnya tidak memuat latihan": "This address carries no exercise",
+  "Ambil alih kursi": "Take over the seat",
+  "Ambil kursi": "Take the seat",
+  "Anda boleh mulai walau belum ada yang masuk. Unit yang bergabung belakangan langsung masuk ke inject yang sedang berjalan.": "You may start before anyone has joined. Units that join later drop straight into the inject already running.",
+  "Anda masuk sebagai": "You are signed in as",
+  "Anda memantau. Perpindahan inject dipegang fasilitator utama.": "You are observing. Moving between injects is held by the lead facilitator.",
+  "Anda memilih": "You chose",
+  "Anda mencentang": "You ticked",
+  "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama.": "You grade essays and write notes. Moving between injects is held by the lead facilitator.",
+  "atau jatuhkan di sini": "or drop it here",
+  "Baca skenario": "Read the scenario",
+  "Baca skenarionya. Pertanyaan segera dibuka": "Read the scenario. The questions open shortly",
+  "Bahasa": "Language",
+  "Batal": "Cancel",
+  "Batas waktu default (detik, 0 = tanpa batas)": "Default time limit (seconds, 0 = no limit)",
+  "Batas waktu esai (detik, 0 = tanpa batas)": "Essay time limit (seconds, 0 = no limit)",
+  "Belum ada inject yang selesai dijalankan.": "No inject has been run through yet.",
+  "Belum ada kabar dari server.": "Nothing from the server yet.",
+  "Belum ada kode.": "No codes yet.",
+  "Belum ada unit yang mengambil kursi untuk inject ini": "No unit has taken a seat for this inject yet",
+  "belum cukup data": "not enough data",
+  "belum dinilai": "not yet graded",
+  "Belum dinilai": "Not yet graded",
+  "Belum optimal": "Not optimal",
+  "Benar": "Correct",
+  "Benar sebagian": "Partly correct",
+  "Bergabung sebagai fasilitator": "Join as a facilitator",
+  "Bersihkan dan mulai ulang": "Clear and restart",
+  "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.": "Stars can also be tiered when one answer is better and another is weaker. `***` for the best, `**` for acceptable, `*` for weak, no star for wrong. Points are scaled against the highest tier in that question, so `3 2 1` and `30 20 10` give the same result.",
+  "Bisa memajukan fase, membuka jawaban, menampilkan kunci, dan menilai esai.": "Can advance the phase, open answering, show the key, and grade essays.",
+  "Bisa menilai esai dan menulis catatan. Tidak bisa memajukan fase.": "Can grade essays and write notes. Cannot advance the phase.",
+  "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.": "Weights can also be set by hand with a number in square brackets, at the start or the end of the line: `[3] B. Verify the alert` or `B. Verify the alert [3]`. Zero means the option is worth nothing. A manual weight overrides stars, and the numbers are still scaled against the highest number in that question.",
+  "Boleh lebih dari satu. Centang yang salah mengurangi centang yang benar.": "More than one is allowed. A wrong tick cancels out a correct one.",
+  "Bonus kecepatan": "Speed bonus",
+  "Briefing": "Briefing",
+  "Buat kode": "Create code",
+  "Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.": "Create one code per person and decide yourself what they may do. This is not a unit code, so participants cannot use it to join.",
+  "Buka inject yang sudah dijalankan": "Open an inject that has already run",
+  "buka jawaban": "open answering",
+  "Buka jawaban": "Open answers",
+  "Buka jawaban otomatis saat waktu habis": "Open answers automatically when time runs out",
+  "Buka lagi": "Open again",
+  "Buka ruangan": "Open the room",
+  "Buka tampilan proyektor": "Open the projector view",
+  "Buka tampilan proyektor dari layar fasilitator lewat tombol *Proyektor*, supaya id latihannya ikut terbawa.": "Open the projector view from the facilitator screen with the *Projector* button, so the exercise id comes along.",
+  "Buka untuk menjawab": "Open for answering",
+  "Cabut": "Revoke",
+  "Catatan": "Notes",
+  "Catatan fasilitator": "Facilitator notes",
+  "Centang atau lepas kapan saja. Setiap perubahan langsung terkirim, dan waktu Anda mengikuti perubahan terakhir.": "Tick or untick at any time. Every change is sent immediately, and your time follows the last change.",
+  "Coba bersihkan dulu. Kalau langsung muncul lagi, ini kesalahan aplikasi, bukan perangkat Anda. Kirimkan pesan ini ke penyelenggara latihan.": "Try clearing first. If it comes straight back, this is an application fault, not your device. Send this message to the exercise organiser.",
+  "Daftar ini disegarkan server tiap delapan detik. Kalau layar Anda terasa tertinggal dari fasilitator lain, tekan sinkronkan ulang, itu memutus dan menyambungkan kembali tanpa kehilangan apa pun.": "The server refreshes this list every eight seconds. If your screen feels behind the other facilitators, press resync: it disconnects and reconnects without losing anything.",
+  "dari {0} kursi": "of {0} seats",
+  "dari {0} poin yang tersedia untuk unit Anda": "of {0} points available to your unit",
+  "Debrief": "Debrief",
+  "detik": "seconds",
+  "Detik": "Seconds",
+  "Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.": "In this exercise they are not the same, so raw points would favour whoever was asked more.",
+  "Dibuat internal dengan bantuan AI": "Built in house with AI assistance",
+  "Diharapkan": "Expected",
+  "Dijawab dalam ~{0} dtk~": "Answered in ~{0} s~",
+  "Diskusi": "Discussion",
+  "Diskusikan dulu. Buka kunci setelah ruangan selesai berdebat.": "Discuss first. Reveal the key once the room has finished arguing.",
+  "Ditanya": "Asked",
+  "Ditanyakan ke": "Asked of",
+  "Ditentukan oleh yang men-deploy aplikasi ini": "Set by whoever deployed this application",
+  "Diurutkan berdasarkan persentase dari maksimum tiap unit sendiri, karena jumlah pertanyaan per unit tidak selalu sama.": "Ranked by each unit's percentage of its own maximum, because the number of questions per unit is not always the same.",
+  "Empat karakter dari fasilitator. Kode ini menempatkan perangkat Anda di unit yang benar. Satu perangkat per unit, jadi pakai kode yang diberikan ke unit Anda.": "Four characters from the facilitator. This code places your device in the right unit. One device per unit, so use the code given to your unit.",
+  "esai": "essay",
+  "Esai": "Essay",
+  "Esai belum dinilai": "Essays not graded",
+  "Esai dinilai fasilitator setelah diskusi. Angkanya muncul di sini begitu dinilai.": "Essays are graded by the facilitator after the discussion. The number appears here once it is graded.",
+  "Fasilitator": "Facilitator",
+  "Fasilitator di ruangan ini": "Facilitators in this room",
+  "Fasilitator membacakan kodenya, atau bisa dilihat di layar proyektor.": "The facilitator reads the code out, or you can see it on the projector screen.",
+  "Fasilitator sedang memimpin diskusi.": "The facilitator is leading the discussion.",
+  "File itu tidak bisa dibaca. Simpan sebagai .xlsx atau .csv lalu coba lagi.": "That file could not be read. Save it as .xlsx or .csv and try again.",
+  "Ganti ke tema gelap": "Switch to dark theme",
+  "Ganti ke tema terang": "Switch to light theme",
+  "Hanya melihat jalannya latihan.": "Watches the exercise only.",
+  "Hapus sesi tersimpan": "Delete saved session",
+  "Hasil latihan": "Exercise results",
+  "Hubungi pemilik ruangan kalau Anda perlu hak yang lain.": "Contact the room owner if you need different rights.",
+  "Ini jawaban untuk seluruh unit.": "This is the answer for the whole unit.",
+  "Inject": "Inject",
+  "Inject berikutnya": "Next inject",
+  "Inject ini tidak melibatkan unit Anda. Simak saja.": "This inject does not involve your unit. Just follow along.",
+  "Inject ini tidak punya esai": "This inject has no essay",
+  "Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.": "This inject has no scenario text. Deliver it from your own notes.",
+  "Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.": "Injects that have already run, with every unit answer and the key. Use this to connect the current inject to earlier decisions.",
+  "Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.": "Past injects and the answers your unit sent. Read only, the answers can no longer be changed.",
+  "Inject {0}": "Inject {0}",
+  "Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.": "Inject {0} has more than one Situation. Only the first is shown.",
+  "Inject {0} sebelumnya": "Previous inject {0}",
+  "Inject {0} tidak punya teks Kondisi.": "Inject {0} has no Situation text.",
+  "Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.": "Inject {0}: marked as checkbox but the Answer cell holds no options, so it is treated as an essay.",
+  "jawaban benar": "correct answers",
+  "Jawaban benar mendapat separuh poin, ditambah hingga separuh lagi kalau menjawab lebih cepat.": "A correct answer earns half the points, plus up to half again for answering sooner.",
+  "Jawaban masuk": "Answer received",
+  "Jawaban model": "Model answer",
+  "Jawaban sudah dibuka.": "Answering is open.",
+  "Jawaban sudah ditutup.": "Answering is closed.",
+  "Jawaban sudah masuk": "Your answer is in",
+  "Jawaban teks bebas, dinilai fasilitator setelah diskusi.": "Free text answer, graded by the facilitator after the discussion.",
+  "Jawaban terbaik": "Best answer",
+  "Jawaban terkirim": "Answer sent",
+  "Jawaban unit": "Unit answer",
+  "Jawaban unit Anda": "Your unit answer",
+  "Jawaban unit Anda sudah tercatat.": "Your unit's answer has been recorded.",
+  "Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.": "The number of scored questions per unit is uneven ({0}). Raw points would favour whoever was asked more, so the ranking is computed from each unit's percentage of its own maximum. Raw points are still shown.",
+  "Jumlah soal": "Questions",
+  "Kalau dimatikan, tampil Unit A, Unit B, bukan nama Peran sebenarnya.": "When off, the screens show Unit A, Unit B instead of the real Role names.",
+  "Kalau dimatikan, tiap Peran diganti label netral di layar Anda. Berguna saat memproyeksikan dan Anda tidak ingin ruangan tahu unit mana menjawab apa.": "When off, each Role is replaced by a neutral label on your screen. Useful when projecting and you do not want the room to know which unit answered what.",
+  "Kata sandi fasilitator": "Facilitator password",
+  "Kata sandi itu tidak diterima.": "That password was not accepted.",
+  "ke-{0}": "{0}",
+  "Kelonggaran mengetik esai (detik)": "Essay typing allowance (seconds)",
+  "Keluar": "Leave",
+  "Kembali": "Back",
+  "Kembali ke latihan": "Back to the exercise",
+  "Kembali ke ruang tunggu": "Back to the waiting room",
+  "Kendali penuh": "Full control",
+  "Ketuk kotak lain untuk mengubah. Hanya pilihan terakhir yang dihitung, dan itu yang menentukan waktu Anda.": "Tap another box to change it. Only the last choice counts, and that is what sets your time.",
+  "Kirim jawaban": "Send answer",
+  "Kode": "Code",
+  "KODE": "CODE",
+  "Kode fasilitator": "Facilitator codes",
+  "Kode fasilitator itu tidak dikenali.": "That facilitator code is not recognised.",
+  "Kode unit Anda": "Your unit code",
+  "Kolom *Tipe* opsional menentukan langsung: `pg`, `checkbox` atau `esai`. Kosongkan, atau hilangkan kolomnya, dan bentuk sel Jawaban yang menentukan.": "The optional *Type* column decides outright: `choice`, `checkbox` or `essay`. Leave it blank, or leave the column out, and the shape of the Answer cell decides.",
+  "Kondisi": "Situation",
+  "kosong": "empty",
+  "Kosongkan semua, ikuti angka default": "Clear them all and follow the default",
+  "kuat": "strong",
+  "Kunci": "Key",
+  "Kunci jawaban": "Answer key",
+  "Kunci jawaban sudah tampil di semua layar.": "The answer key is showing on every screen.",
+  "Kuncinya adalah": "The key is",
+  "kurang dari semenit": "less than a minute",
+  "kursi": "seats",
+  "Kursi": "Seats",
+  "kursi kosong": "seat open",
+  "Kursi sudah terisi": "Seat already taken",
+  "Lama tiap unit boleh menjawab. Kosong berarti memakai default, {0} detik untuk pilihan dan {1} detik untuk esai. Diisi dari kolom Waktu dan Waktu Esai kalau sheet Anda punya, dan keduanya bisa diubah saat latihan berjalan.": "How long each unit may answer. Blank means the default is used, {0} seconds for choice questions and {1} seconds for essays. Filled from the Time and Essay Time columns if your sheet has them, and both can be changed while the exercise is running.",
+  "lanjut": "next",
+  "Lanjut ke inject {0}": "Continue to inject {0}",
+  "Laporan": "Report",
+  "Latihan Tabletop": "Tabletop Exercise",
+  "lemah": "weak",
+  "Lepas": "Release",
+  "Lepas dari proyektor": "Clear from projector",
+  "Lihat inject yang sudah lewat": "Look at past injects",
+  "Lihat jawaban model": "Show model answer",
+  "Lihat jawaban unit Anda": "See your unit answer",
+  "Maks": "Max",
+  "Maks unit": "Unit max",
+  "Manual (Anda yang menilai)": "Manual (you grade)",
+  "Masuk": "Sign in",
+  "Masukkan kode unit Anda": "Enter your unit code",
+  "memadai": "adequate",
+  "Memeriksa…": "Checking…",
+  "Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.": "Ranking units against each other can make participants defensive rather than open. For a first exercise it is safer left off.",
+  "Memuat": "Loading",
+  "Menambah kedua jam": "Adds to both clocks",
+  "Menambah waktu menjawab": "Adds to the answering time",
+  "Mengakhiri sesi menghapus ruangan untuk semua orang. Unduh CSV-nya dulu.": "Ending the session deletes the room for everyone. Download the CSV first.",
+  "Mengambil alih akan mengeluarkan perangkat satunya, dan jawaban serta poin unit ini tetap utuh. Pakai ini kalau unit Anda ganti perangkat atau kehilangan halaman.": "Taking over evicts the other device, and this unit's answers and points stay intact. Use this if your unit changed device or lost the page.",
+  "Mengambil kursi untuk": "Taking the seat for",
+  "Mengembalikan semua perangkat ke mode siaga. Skor dan catatan Anda tetap tersimpan.": "Returns every device to standby. Your scores and notes are kept.",
+  "Menjawab": "Answering",
+  "Menjawab dihitung dari pertanyaan yang benar benar terkirim, dibandingkan dengan pertanyaan yang unitnya hadir di ruangan. Akurasi rata rata hanya dari pertanyaan pilihan, sedangkan esai dilaporkan sebagai rata rata nilai 1 sampai 10.": "Answered counts the questions actually submitted, against the questions whose unit was present in the room. Average accuracy covers choice questions only, while essays are reported as an average grade from 1 to 10.",
+  "Menulis esai lebih lama daripada mengetuk kotak, jadi esai punya jam sendiri. Unit yang hanya mendapat pertanyaan pilihan selesai lebih dulu dan menunggu, dan inject baru tertutup setelah jam terpanjang habis. Kelonggaran mengetik ditambahkan ke jam esai dan tidak dihitung sebagai keterlambatan, jadi waktu untuk mengetik dan menekan kirim tidak memotong nilai.": "Writing an essay takes longer than tapping a box, so essays have their own clock. Units that only get choice questions finish first and wait, and an inject closes only once the longest clock has run out. The typing allowance is added to the essay clock and does not count as lateness, so the time spent typing and pressing send does not cut the score.",
+  "Menunggu": "Waiting",
+  "Menunggu fasilitator memulai.": "Waiting for the facilitator to start.",
+  "Menunggu jawaban, {0} dari {1} unit sudah duduk": "Waiting for answers, {0} of {1} units seated",
+  "Menunggu latihan": "Waiting for an exercise",
+  "Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.": "Closes answering and moves the room to discussion the moment the clock hits zero.",
+  "Menyambung ulang": "Reconnecting",
+  "Menyambung ulang…": "Reconnecting…",
+  "Mode penilaian": "Scoring mode",
+  "Muat contoh latihan saja": "Load the sample exercise instead",
+  "Muat sheet inject Anda": "Load your inject sheet",
+  "Mulai baru": "Start fresh",
+  "Mulai latihan": "Start the exercise",
+  "Muncul di daftar fasilitator, opsional": "Shows in the facilitator list, optional",
+  "Mungkin sudah kedaluwarsa, atau layanan restart tanpa volume penyimpanan.": "It may have expired, or the service restarted without a storage volume.",
+  "Nama Anda": "Your name",
+  "Nama Anda, opsional": "Your name, optional",
+  "Nama atau keterangan, opsional": "Name or description, optional",
+  "Nama unit": "Unit names",
+  "Nilai": "Grade",
+  "Nilai 1 sampai 10": "Grade 1 to 10",
+  "Nilai 1 sampai 10. Poin akhir dihitung dari nilai itu, dan kecepatan menjawab masih menambah hingga separuh. Unit melihat angkanya begitu Anda menekan * Tampilkan kunci jawaban*.": "Grade 1 to 10. The final points come from that grade, and answering early still adds up to half again. The unit sees the number as soon as you press * Show answer key*.",
+  "Nilai esai": "Essay grade",
+  "Nilai esai (1-10)": "Essay grade (1-10)",
+  "Nilai fasilitator ~{0}/10~": "Facilitator grade ~{0}/10~",
+  "Nilai {0} dari 10": "Graded {0} out of 10",
+  "Nol": "Zero",
+  "Nomor inject {0} dipakai di lebih dari satu siklus. Baris baris itu dilebur jadi satu inject. Beri nomor yang berbeda kalau seharusnya terpisah.": "Inject number {0} is used in more than one cycle. Those rows were merged into one inject. Give them different numbers if they should be separate.",
+  "offline": "offline",
+  "Otomatis (pilihan)": "Automatic (choice)",
+  "Otomatis menilai jawaban pilihan berdasarkan kebenaran dan kecepatan. Manual membiarkan jawaban tanpa skor supaya Anda nilai setelah diskusi. Pertanyaan tanpa opsi selalu jatuh ke penilaian manual.": "Automatic scores choice answers on correctness and speed. Manual leaves answers unscored so you can grade them after the discussion. Questions with no options always fall to manual grading.",
+  "Pemantau": "Observer",
+  "Pemilik ruangan": "Room owner",
+  "Penilai": "Grader",
+  "Penilaian": "Scoring",
+  "Penuh": "Full",
+  "Peran": "Role",
+  "Perangkat lain": "Another device",
+  "Perangkat lain mengambil kursi unit ini": "Another device took this unit's seat",
+  "Perbarui jawaban": "Update answer",
+  "pertanyaan": "questions",
+  "Pertanyaan": "Question",
+  "Pertanyaan di inject ini": "Questions in this inject",
+  "Pilih file": "Choose file",
+  "Pilih satu jawaban. Setiap pilihan dapat bernilai berbeda.": "Pick one answer. Each option can be worth a different amount.",
+  "Pilih semua yang sesuai": "Tick all that apply",
+  "pilihan": "choice",
+  "Pilihan": "Choice",
+  "Pilihan berbobot": "Weighted choice",
+  "pindah inject": "move inject",
+  "Pindahkan semua ke inject {0}?": "Move everyone to inject {0}?",
+  "poin": "points",
+  "Poin": "Points",
+  "Poin per pertanyaan": "Points per question",
+  "poin total": "points in total",
+  "Poin unit": "Unit points",
+  "Posisi tiap unit": "Where each unit stands",
+  "proyektor": "projector",
+  "Proyektor": "Projector",
+  "Rata detik": "Avg seconds",
+  "Rata nilai esai": "Avg essay grade",
+  "rata-rata skor unit": "average unit score",
+  "Rekap": "Recap",
+  "Rekap inject": "Inject recap",
+  "Rekap inject sebelumnya": "Recap of an earlier inject",
+  "Rincian per Peran": "Breakdown by Role",
+  "Riwayat": "History",
+  "Salah": "Wrong",
+  "sangat kuat": "very strong",
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional and sets how long that inject may be answered, in minutes.",
+  "Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.": "One answer for the whole unit. Decide together, then tap.",
+  "satu kursi": "one seat",
+  "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused.",
+  "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak. Ubah kode mana pun, atau buat yang baru.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused. Change any code, or generate new ones.",
+  "Satu perangkat per unit bisnis.": "One device per business unit.",
+  "Satu perangkat per unit. Unit yang kehilangan halamannya bisa memasukkan kodenya lagi dan mengambil kembali kursinya, jawaban tetap utuh. Lepas kursi hanya kalau sebuah unit harus mulai dari nol.": "One device per unit. A unit that loses its page can enter its code again and reclaim the seat with its answers intact. Release a seat only if a unit has to start from nothing.",
+  "sebagian": "partial",
+  "Sebagian": "Partial",
+  "Sebelum mulai": "Before you start",
+  "Sebelumnya": "Previous",
+  "sedang menjawab": "answering",
+  "Sedang menjawab": "Answering now",
+  "Sedang terhubung": "Currently connected",
+  "Selesai": "Finish",
+  "Sembunyikan jawaban model": "Hide model answer",
+  "Sembunyikan nama unit": "Hide unit names",
+  "Semua unit sudah menjawab": "Every unit has answered",
+  "Sesi Anda terputus dari ruangan. Masukkan lagi kode fasilitator Anda.": "Your session was cut off from the room. Enter your facilitator code again.",
+  "Sesi ini sudah tidak ada di server": "This session no longer exists on the server",
+  "Sheet dua bahasa ditulis dalam sel yang sama. Bahasa Indonesia di atas, satu baris berisi `---` sebagai pemisah, bahasa Inggris di bawah. Berlaku untuk sel Kondisi, Pertanyaan dan Jawaban. Pada sel Jawaban, urutan opsi di blok kedua mengikuti blok pertama, dan bintang atau bobot cukup ditulis di blok pertama saja. Sheet yang hanya satu bahasa tidak perlu diubah.": "A bilingual sheet is written in the same cell. The first language on top, one line holding `---` as the separator, the second language below. This works for the Situation, Question and Answer cells. In an Answer cell, the options in the second block follow the order of the first, and stars or weights need only be written in the first block. A single language sheet needs no change.",
+  "Sheet ini tidak berisi baris data.": "This sheet holds no data rows.",
+  "Siklus": "Cycle",
+  "Sinkronkan ulang": "Resync",
+  "sisa": "left",
+  "Skor": "Score",
+  "Skor unit %": "Unit score %",
+  "Soal": "Questions",
+  "Soal esai": "Essay questions",
+  "Soalnya terlalu sedikit untuk dibandingkan dengan unit lain": "Too few questions to compare with the other units",
+  "Spasi": "Space",
+  "Statistik per Inject": "Statistics by Inject",
+  "Sudah ada yang membuka ruangan? Masukkan kode fasilitator yang diberikan pemilik ruangan. Kode itu menentukan apa yang boleh Anda lakukan.": "Has someone already opened the room? Enter the facilitator code the room owner gave you. That code decides what you may do.",
+  "sudah duduk": "seated",
+  "sudah duduk · offline": "seated · offline",
+  "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab.": "Showing on every device. Read it out, then open the answering time.",
+  "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.": "Showing on every device. Waiting for the lead facilitator to open the answering time.",
+  "Tambah": "Add",
+  "Tampilan di layar": "What the screens show",
+  "Tampilkan di proyektor": "Show on projector",
+  "tampilkan kunci": "show key",
+  "Tampilkan kunci jawaban": "Show answer key",
+  "Tampilkan nama unit": "Show unit names",
+  "Tampilkan peringkat": "Show the leaderboard",
+  "tanpa nama": "no name",
+  "Tercepat": "Fastest",
+  "Terkirim.": "Sent.",
+  "Terkirim. Masih bisa direvisi sampai jawaban ditutup.": "Sent. You can still revise it until answering closes.",
+  "Terlama": "Slowest",
+  "Tersambung": "Connected",
+  "Tersambung.": "Connected.",
+  "Tidak": "No",
+  "Tidak ada inject yang terbaca. Pastikan baris header ada di baris pertama.": "No inject could be read. Make sure the header row is the first row.",
+  "Tidak ada jawaban terkirim": "No answer was sent",
+  "Tidak ada kolom yang cocok untuk \"{0}\". Periksa ejaan baris header.": "No column matches \"{0}\". Check the spelling in the header row.",
+  "Tidak ada latihan dengan kode itu.": "No exercise has that code.",
+  "Tidak ada opsi yang ditandai benar di sheet Anda, jadi tidak ada yang mendapat skor.": "No option is marked correct in your sheet, so nothing earns a score.",
+  "Tidak dinilai otomatis": "Not scored automatically",
+  "Tim": "Team",
+  "Tipe": "Type",
+  "Tulis jawaban unit Anda": "Write your unit's answer",
+  "Tutup": "Close",
+  "Unduh CSV jawaban": "Download answers CSV",
+  "Unduh statistik inject": "Download inject statistics",
+  "unit": "units",
+  "Unit": "Unit",
+  "Unit Anda sudah masuk": "Your unit is in",
+  "Unit ditanya": "Units asked",
+  "unit ikut": "units taking part",
+  "Unit ini tidak hadir di inject itu.": "This unit was not present for that inject.",
+  "Unit ini tidak menjawab.": "This unit did not answer.",
+  "Unit kerja": "Business unit",
+  "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi.": "Other units may still be writing essays. Wait for the facilitator to open the discussion.",
+  "Unit yang mendapat pertanyaan esai masih menulis, dan esai memang diberi waktu lebih panjang. Tunggu fasilitator membuka sesi diskusi.": "The units with essay questions are still writing, and essays are given a longer clock on purpose. Wait for the facilitator to open the discussion.",
+  "Unit {0}": "Unit {0}",
+  "unit ~{0}~ yang menjawab": "the ~{0}~ unit to answer",
+  "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.": "For a multiple choice question, write each option on its own line in the Answer cell (`A. …` / `B. …`) and put a `*` in front of the correct one. Mark *two or more options* and the question becomes tick all that apply.",
+  "Urutan inject di aplikasi berbeda dari urutan baris di sheet. Yang akan tayang: {0}.": "The inject order in the application differs from the row order in the sheet. What will run: {0}.",
+  "Waktu esai untuk inject ini": "Essay time for this inject",
+  "Waktu habis": "Time is up",
+  "Waktu habis, jawaban terkunci": "Time is up, the answer is locked",
+  "Waktu menjawab (detik)": "Answer window (seconds)",
+  "Waktu per inject": "Time per inject",
+  "Waktu untuk pertanyaan ini sudah habis.": "Time for this question has run out.",
+  "Ya": "Yes",
+  "Ya, lanjut": "Yes, continue",
+  "{0} belum dinilai": "{0} not yet graded",
+  "{0} dari 10": "{0} out of 10",
+  "{0} dtk": "{0} s",
+  "{0} hal yang perlu dicek": "{0} things to check",
+  "{0} jam": "{0} hours",
+  "{0} menit": "{0} minutes",
+  "{0} pertanyaan pilihan tidak punya kunci jawaban. Beri tanda * di depan opsi yang benar, kalau tidak pertanyaan itu bernilai nol.": "{0} choice questions have no answer key. Put a * in front of the correct option, otherwise those questions are worth nothing.",
+  "{0} poin total": "{0} points in total",
+  "{0} soal": "{0} questions",
+  "{0} sudah memegang kursi ini selama {1}{2}. Satu unit hanya punya satu kursi, jadi perangkat ini tidak bisa ikut bergabung.": "{0} has held this seat for {1}{2}. A unit has only one seat, so this device cannot join as well.",
+  "{0} tingkat": "{0} tiers",
+  "{0} unit, {1} kursi": "{0} units, {1} seats",
+  "{0}% dari kunci": "{0}% of the key",
+  "{0}/{1} kunci": "{0}/{1} keys",
+  "~{0}~ dari {1} kunci benar": "~{0}~ of {1} keys correct",
+};

@@ -120,6 +120,11 @@ function restore() {
     const now = Date.now();
     for (const r of saved) {
       if (now - r.touched > ROOM_TTL_MS) continue;
+      /* Ruangan yang disimpan sebelum rekap ada tidak punya dua medan ini.
+         Diisi di sini sekali, supaya tidak perlu dijaga di setiap pemakaian. */
+      r.ran = r.ran || {};
+      r.keys = r.keys || {};
+      r.recap = r.recap || null;
       rooms.set(r.id, r);
       for (const [code, peran] of Object.entries(r.codes || {})) {
         codeIndex.set(code, { roomId: r.id, peran });
@@ -250,10 +255,14 @@ function screenDeck(room) {
   };
 }
 
-/* Participants only learn the key once answering has closed. */
-function sendKey(room) {
-  const inj = room.deck.injects[room.state.activeIdx];
-  if (!inj) return;
+/* Participants only learn the key once answering has closed.
+
+   Kuncinya juga disimpan per inject, tidak sekadar disiarkan sekali lewat.
+   Rekap di proyektor dan riwayat di layar peserta membaca inject yang sudah
+   lewat, dan tanpa simpanan ini keduanya hanya bisa menampilkan jawaban tanpa
+   kunci. Yang disimpan tetap hanya inject yang kuncinya memang sudah dibuka
+   fasilitator, jadi tidak ada kunci yang bocor lebih awal. */
+function keyOf(inj) {
   const key = {};
   inj.questions.forEach((q) => {
     const idx = (q.choices || []).map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
@@ -262,6 +271,14 @@ function sendKey(room) {
     key[q.qid] = { i: idx[0], text: q.choices[idx[0]].text,
       is: idx, texts: idx.map((i) => q.choices[i].text) };
   });
+  return key;
+}
+function sendKey(room) {
+  const inj = room.deck.injects[room.state.activeIdx];
+  if (!inj) return;
+  const key = keyOf(inj);
+  room.keys = room.keys || {};
+  room.keys[inj.id] = key;
   toRoom(room.id, { t: "key", injectId: inj.id, key });
 }
 
@@ -404,7 +421,7 @@ wss.on("connection", (ws) => {
         const room = { id, deck: m.deck, settings, codes, people: {},
           times: m.times || {}, etimes: m.etimes || {},
           hostCodes: {}, ownerKey: newCode() + newCode(),
-          ran: {},
+          ran: {}, keys: {}, recap: null,
           state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
           touched: Date.now() };
         rooms.set(id, room);
@@ -412,7 +429,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
-          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [] });
+          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null });
         pushHosts(room);
         markSnapshot();
         break;
@@ -428,7 +445,8 @@ wss.on("connection", (ws) => {
         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
-          hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}) });
+          hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
+          recap: byId.recap || null });
         send(ws, { t: "roster", people: roster(byId) });
         pushHosts(byId);
         break;
@@ -479,7 +497,8 @@ wss.on("connection", (ws) => {
         send(ws, { t: "cohosted", roomId: room.id, role: entry.role, code,
           deck: room.deck, codes: room.codes, settings: room.settings,
           times: room.times || {}, etimes: room.etimes || {}, state: room.state,
-          ran: Object.keys(room.ran || {}) });
+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
+          recap: room.recap || null });
         send(ws, { t: "roster", people: roster(room) });
         if (room.state.keyShown) sendKey(room);
         pushHosts(room);
@@ -579,7 +598,8 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
-          me: room.people[pid] });
+          me: room.people[pid],
+          ran: Object.keys(room.ran || {}), keys: room.keys || {} });
         if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
@@ -596,7 +616,8 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid: m.pid });
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
-          settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me });
+          settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me,
+          ran: Object.keys(room.ran || {}), keys: room.keys || {} });
         if (room.state.keyShown) sendKey(room);
         markDirty(room.id);
         break;
@@ -608,7 +629,9 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: byId.id, isScreen: true });
         send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
-          state: byId.state, codes: byId.codes });
+          state: byId.state, codes: byId.codes,
+          ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
+          recap: byId.recap || null });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;
@@ -738,9 +761,24 @@ wss.on("connection", (ws) => {
       case "showkey": {
         if (!byId || !canDrive(ws)) return;
         byId.state = { ...byId.state, keyShown: true };
-        toRoom(byId.id, { t: "state", ...byId.state });
+        toRoom(byId.id, { t: "state", ...byId.state, ran: Object.keys(byId.ran || {}) });
         sendKey(byId);
         markSnapshot();
+        break;
+      }
+
+      /* ---- fasilitator melempar inject lama ke proyektor, atau melepasnya ----
+
+         Hanya nomor injectnya yang disiarkan. Proyektor sudah memegang deck dan
+         roster, dan kunci inject lama hanya ada padanya kalau kunci itu memang
+         sudah pernah dibuka, jadi rekap tidak bisa dipakai membocorkan kunci
+         inject yang belum selesai. */
+      case "recap": {
+        if (!byId || !canDrive(ws)) return;
+        const id = m.injectId == null ? null : String(m.injectId);
+        const known = id != null && byId.deck.injects.some((i) => String(i.id) === id);
+        byId.recap = known ? id : null;
+        toRoom(byId.id, { t: "recap", injectId: byId.recap });
         break;
       }
 
