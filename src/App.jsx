@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b38";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b39";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -936,6 +936,10 @@ function Host({ onExit }) {
   /* onMsg dibuat sekali, jadi ia membaca layar lewat ref, bukan lewat state. */
   const screenRef = useRef("setup");
   const [teamOpen, setTeamOpen] = useState(false);
+  const [recapOpen, setRecapOpen] = useState(false);
+  /* Inject lama yang sedang tampil di proyektor, dipegang server supaya
+     fasilitator kedua melihat keadaan yang sama. */
+  const [recapId, setRecapId] = useState(null);
   const fileRef = useRef(null);
 
   /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
@@ -953,6 +957,7 @@ function Host({ onExit }) {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
       setEtimes(m.etimes || {});
       if (m.ran) setRan(m.ran);
+      setRecapId(m.recap ?? null);
       setRole(m.role || "owner");
       if (m.ownerKey) setOwnerKey(m.ownerKey);
       setHostCodes(m.hostCodes || {});
@@ -968,10 +973,12 @@ function Host({ onExit }) {
       setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
       setRole(m.role || "viewer"); setOwnerKey("");
       if (m.ran) setRan(m.ran);
+      setRecapId(m.recap ?? null);
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
       setJoinErr(""); setScreen("run");
-    } else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
+    } else if (m.t === "recap") setRecapId(m.injectId ?? null);
+    else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
     else if (m.t === "hosts") setHosts(m.hosts || []);
     else if (m.t === "nosuchhost") {
       setJoinErr("Kode fasilitator itu tidak dikenali.");
@@ -1436,6 +1443,10 @@ function Host({ onExit }) {
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
             {t("Kursi")} · {people.length}/{model.roles.length}
           </button>
+          {ran.filter((x) => String(x) !== String(model.injects[activeIdx]?.id)).length > 0 && (
+            <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
+              title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
+          )}
           <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
           <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
         </>} />
@@ -1446,6 +1457,12 @@ function Host({ onExit }) {
           onRelease={(peran) => send({ t: "release", roomId, peran })}
           onClose={() => setRoomOpen(false)}
           onLobby={() => { echo.current = ""; setPhase("lobby"); setRoomOpen(false); }} />
+      )}
+
+      {recapOpen && (
+        <RecapPanel {...{ model, ran, activeIdx, people, unitOf, roleIdx, settings, recapId, canDrive }}
+          onShow={(id) => { setRecapId(id); send({ t: "recap", roomId, injectId: id }); }}
+          onClose={() => setRecapOpen(false)} />
       )}
 
       {teamOpen && (
@@ -1701,6 +1718,118 @@ function Host({ onExit }) {
 
 /* Beberapa fasilitator dalam satu ruangan. Pemilik membuat kode, dan tiap kode
    membawa perannya sendiri, jadi peran ditentukan saat kode dibuat. */
+/* Rekap inject yang sudah dijalankan, untuk dibahas lagi di inject berikutnya.
+   Fasilitator memegang deck lengkap beserta tanda kunci, dan roster membawa
+   seluruh jawaban tiap unit sejak awal, jadi panel ini tidak meminta apa pun
+   ke server. Yang lewat jaringan hanya satu hal: nomor inject yang dilempar ke
+   proyektor. */
+function RecapPanel({ model, ran, activeIdx, people, unitOf, roleIdx, settings,
+  recapId, canDrive, onShow, onClose }) {
+  const [openId, setOpenId] = useState(null);
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+
+  const done = new Set((ran || []).map(String));
+  const list = model.injects
+    .map((inj, idx) => ({ inj, idx }))
+    .filter((x) => x.idx !== activeIdx && done.has(String(x.inj.id)));
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
+        aria-label={t("Rekap inject")}>
+        <div className="phead">
+          <h2>{t("Rekap inject")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.")}
+        </p>
+
+        {list.length === 0 && (
+          <p className="hint">{t("Belum ada inject yang selesai dijalankan.")}</p>
+        )}
+
+        <ul className="recaplist">
+          {list.map(({ inj }) => {
+            const open = openId === inj.id;
+            const onProj = String(recapId) === String(inj.id);
+            return (
+              <li key={inj.id} className={open ? "open" : ""}>
+                <div className="rchead">
+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
+                    <b>{tf("Inject {0}", inj.id)}</b>
+                    <small>{inj.siklus}</small>
+                  </button>
+                  {canDrive && (
+                    <button className={`btn quiet pill ${onProj ? "on" : ""}`}
+                      onClick={() => onShow(onProj ? null : inj.id)}>
+                      {t(onProj ? "Lepas dari proyektor" : "Tampilkan di proyektor")}
+                    </button>
+                  )}
+                </div>
+                {open && (
+                  <div className="rcbody">
+                    {inj.condition && (
+                      <blockquote className="rccond">{inj.condition}</blockquote>
+                    )}
+                    {inj.questions.map((q) => {
+                      const keyIdx = (q.choices || [])
+                        .map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
+                      const rs = people.filter((p) => p.peran === q.peran);
+                      return (
+                        <div className="rcq" key={q.qid}>
+                          <p className="rcpunit">
+                            <Crest peran={q.peran} idx={roleIdx(q.peran)} size={18} />
+                            {unitOf(q.peran)}
+                          </p>
+                          <p className="rcqtext">{q.text}</p>
+                          {keyIdx.length > 0 && (
+                            <p className="rckey">
+                              <span className="lab">{t("Kunci")}</span>
+                              {keyIdx.map((i) => q.choices[i].text).join("; ")}
+                            </p>
+                          )}
+                          <ul className="rcans">
+                            {rs.length === 0 && (
+                              <li className="none">{t("Unit ini tidak hadir di inject itu.")}</li>
+                            )}
+                            {rs.map((p) => {
+                              const a = p.answers?.[q.qid];
+                              if (!a) return (
+                                <li key={p.pid} className="none">{t("Tidak ada jawaban terkirim")}</li>
+                              );
+                              const cls = a.correct ? "ok" : a.acc > 0 ? "part"
+                                : a.correct === false ? "no" : "";
+                              return (
+                                <li key={p.pid} className={cls}>
+                                  <span className="rcatext">{a.text || "·"}</span>
+                                  {settings?.mode === "auto" && (
+                                    <span className="rcapts mono">
+                                      {a.points ? `+${a.points.toLocaleString()}` : "0"}
+                                    </span>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
 function TeamPanel({ hosts, hostCodes, isOwner, role, status, onAdd, onRemove, onResync, onClose }) {
   const [newRole, setNewRole] = useState("grader");
   const [label, setLabel] = useState("");
@@ -2026,6 +2155,112 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
 
 /* =========================== PARTICIPANT =========================== */
 
+/* Satu pertanyaan dari inject yang sudah lewat, dengan jawaban unit ini.
+   Dipakai blok konteks maupun panel riwayat, supaya keduanya tidak pernah
+   menampilkan hal yang sama dengan cara yang berbeda. */
+function PastQ({ q, a, k, pick }) {
+  const keyIdx = k ? (k.is || [k.i]) : null;
+  const names = (list) => (list || [])
+    .map((i) => { const c = q.choices?.[i]; return c ? pick(c.text, c.alt) : ""; })
+    .filter(Boolean).join("; ");
+  const mineIdx = a ? (a.picks || (a.choice != null ? [a.choice] : [])) : [];
+  const cls = !a ? "miss"
+    : a.correct ? "ok" : a.acc > 0 ? "part" : a.correct === false ? "no" : "";
+  return (
+    <div className={`pastq ${cls}`}>
+      <p className="pqq">{pick(q.text, q.alt)}</p>
+      <p className="pqa">
+        <span className="lab">{t("Jawaban unit Anda")}</span>
+        {a ? (names(mineIdx) || a.text || "·") : t("Tidak ada jawaban terkirim")}
+      </p>
+      {a && a.quality != null && (
+        <p className="pqn"><span className="lab">{t("Nilai esai")}</span>{tf("{0} dari 10", a.quality)}</p>
+      )}
+      {keyIdx && (
+        <p className="pqk">
+          <span className="lab">{t("Kunci")}</span>
+          {names(keyIdx) || (k.texts ? k.texts.join("; ") : k.text)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* Konteks inject sebelumnya di layar peserta. */
+function PrevContext({ inject, answers, keyMap, pick }) {
+  const [open, setOpen] = useState(false);
+  const qs = inject.questions || [];
+  if (!qs.length) return null;
+  return (
+    <div className={`prevctx ${open ? "open" : ""}`}>
+      <button className="pcbtn" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="lab">{tf("Inject {0} sebelumnya", inject.id)}</span>
+        <span className="pcmore">{t(open ? "Tutup" : "Lihat jawaban unit Anda")}</span>
+      </button>
+      {open && (
+        <div className="pcbody">
+          {inject.condition && (
+            <p className="pccond">{pick(inject.condition, inject.conditionAlt)}</p>
+          )}
+          {qs.map((q) => (
+            <PastQ key={q.qid} q={q} a={answers?.[q.qid]} k={keyMap[q.qid]} pick={pick} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Riwayat inject yang sudah lewat, hanya baca. */
+function HistoryPanel({ injects, answers, keys, pick, onClose }) {
+  const [openId, setOpenId] = useState(injects.length ? injects[injects.length - 1].id : null);
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
+        aria-label={t("Riwayat")}>
+        <div className="phead">
+          <h2>{t("Riwayat")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.")}
+        </p>
+        <ul className="recaplist">
+          {injects.map((inj) => {
+            const open = openId === inj.id;
+            return (
+              <li key={inj.id} className={open ? "open" : ""}>
+                <div className="rchead">
+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
+                    <b>{tf("Inject {0}", inj.id)}</b>
+                    <small>{inj.siklus}</small>
+                  </button>
+                </div>
+                {open && (
+                  <div className="rcbody">
+                    {inj.condition && (
+                      <blockquote className="rccond">{pick(inj.condition, inj.conditionAlt)}</blockquote>
+                    )}
+                    {(inj.questions || []).map((q) => (
+                      <PastQ key={q.qid} q={q} a={answers?.[q.qid]}
+                        k={(keys[inj.id] || {})[q.qid]} pick={pick} />
+                    ))}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
 function Participant() {
   const [me, setMe] = useState(null);
   const [codeIn, setCodeIn] = useState("");
@@ -2040,7 +2275,12 @@ function Participant() {
   const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
   const [etimes, setEtimes] = useState({}); // jendela esai per inject
   const [msg, setMsg] = useState("");
-  const [key, setKey] = useState({});
+  /* Kunci disimpan per inject, bukan satu wadah yang ditimpa tiap pindah inject.
+     Riwayat dan blok konteks membaca inject yang sudah lewat, jadi kuncinya
+     harus tetap ada setelah ruangan berpindah ke inject berikutnya. */
+  const [keys, setKeys] = useState({});
+  const [ran, setRan] = useState([]);       // inject yang pernah dibuka fasilitator
+  const [histOpen, setHistOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const [evicted, setEvicted] = useState(false);
   const codeRef = useRef(null);
@@ -2063,11 +2303,16 @@ function Participant() {
       setDeck(m.deck); setState(m.state); setSettings(m.settings);
       if (m.times) setTimes(m.times);
       if (m.etimes) setEtimes(m.etimes);
+      if (m.ran) setRan(m.ran);
+      if (m.keys) setKeys(m.keys);
       setMsg(""); setTaken(null); setEvicted(false);
     } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
     else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
-    else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
-      openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+    else if (m.t === "state") {
+      setState({ activeIdx: m.activeIdx, phase: m.phase,
+        openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+      if (m.ran) setRan(m.ran);
+    }
     else if (m.t === "settings") {
       setSettings(m.settings);
       if (m.times) setTimes(m.times);
@@ -2084,7 +2329,10 @@ function Participant() {
     else if (m.t === "locked") setMsg("Jawaban sudah ditutup.");
     else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
     else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
-    else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "key") {
+      /* Digabung, bukan ditimpa: inject lama tetap memegang kuncinya. */
+      setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
+    }
     else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "evicted") {
       lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
@@ -2113,7 +2361,7 @@ function Participant() {
   const leave = () => {
     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
     nukeAll(); setMe(null); setDeck(null); setState(null);
-    setCodeIn(""); setPeek(null); setTaken(null); setKey({});
+    setCodeIn(""); setPeek(null); setTaken(null); setKeys({}); setRan([]);
   };
 
   /* Derived above every early return. useExpired sat below them, so it only
@@ -2122,6 +2370,24 @@ function Participant() {
   const phase = state?.phase || "lobby";
   const inject = deck?.injects?.[state?.activeIdx ?? 0];
   const mine = inject?.questions || [];
+  /* Kunci inject yang sedang berjalan. Nama ini dipakai situs render yang sudah
+     ada, jadi perpindahan ke simpanan per inject berhenti di satu baris. */
+  const key = (inject && keys[inject.id]) || {};
+  /* Inject yang pernah dibuka fasilitator dan memang menanyakan sesuatu ke unit
+     ini. Yang sedang berjalan tidak ikut, dan urutannya mengikuti deck. */
+  const idxNow = state?.activeIdx ?? 0;
+  const history = useMemo(() => {
+    if (!deck?.injects) return [];
+    const done = new Set((ran || []).map(String));
+    return deck.injects
+      .map((i, idx) => ({ ...i, idx }))
+      .filter((i) => i.idx !== idxNow && done.has(String(i.id)) && (i.questions || []).length > 0);
+  }, [deck, ran, idxNow]);
+  /* Untuk blok konteks, yang dipakai hanya inject terakhir sebelum yang sekarang. */
+  const prevInject = useMemo(() => {
+    const before = history.filter((i) => i.idx < idxNow);
+    return before.length ? before[before.length - 1] : null;
+  }, [history, idxNow]);
   /* Read the window the same way the server does, from the live `times` map, so
      the facilitator editing it mid-brief changes what this device shows. */
   const windowOf = (injId) => {
@@ -2250,8 +2516,18 @@ function Participant() {
             <small className="seatline">{t("satu kursi")}</small>
           </span>
         </>}
-        right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
-          ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null} />
+        right={<>
+          {history.length > 0 && (
+            <button className="btn quiet pill" onClick={() => setHistOpen(true)}
+              title={t("Lihat inject yang sudah lewat")}>{t("Riwayat")}</button>
+          )}
+          {settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
+            ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null}
+        </>} />
+      {histOpen && (
+        <HistoryPanel injects={history} answers={me.answers} keys={keys} pick={pick}
+          onClose={() => setHistOpen(false)} />
+      )}
       <main className="pmain">
         <div className="pinner">
           {phase === "lobby" && (
@@ -2269,6 +2545,15 @@ function Participant() {
                 <blockquote className="condition">
                   <span className="eyebrow">{t("Kondisi")}</span>{pick(inject.condition, inject.conditionAlt)}
                 </blockquote>
+              )}
+
+              {/* Konteks dari inject sebelumnya. Tertutup secara default supaya
+                  tidak merebut perhatian dari pertanyaan yang sedang berjalan,
+                  tapi ada di tempat yang sama tiap inject sehingga unit yang
+                  mencarinya tahu harus melihat ke mana. */}
+              {prevInject && phase !== "lobby" && (
+                <PrevContext inject={prevInject} answers={me.answers}
+                  keyMap={keys[prevInject.id] || {}} pick={pick} />
               )}
 
               {phase === "briefing" && (
@@ -2579,6 +2864,42 @@ const KeyLine = ({ idx, text, mine }) => {
 
 /* ============================= PROJECTOR ============================= */
 
+/* Daftar pertanyaan di proyektor. Dipakai dua kali, untuk inject yang sedang
+   berjalan dan untuk rekap inject lama, jadi hitungan suara dan kunci datang
+   sebagai argumen, bukan dibaca dari fase. */
+function ProjQuestions({ questions, keyMap, people, showCounts }) {
+  return (
+    <>
+      {questions.map((q) => {
+        const k = keyMap?.[q.qid];
+        return (
+          <div className="projq" key={q.qid}>
+            <Dual className="projqtext" text={q.text} alt={q.alt} />
+            <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
+            {q.choices?.length > 0 && (
+              <div className="projopts">
+                {q.choices.map((c, i) => {
+                  const o = optOf(i);
+                  const isKey = !!k && (k.is || [k.i]).includes(i);
+                  const n = showCounts
+                    ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
+                  return (
+                    <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
+                      <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
+                      <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
+                      {n != null && <span className="on mono">{n}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 /* /screen#<roomId>. Read-only: condition, question, option shapes, a clock
    you can read from the back of the room, and the join codes. Never the
    facilitator's controls, notes or unit scores. */
@@ -2589,7 +2910,10 @@ function Screen() {
   const [state, setState] = useState(null);
   const [settings, setSettings] = useState(null);
   const [people, setPeople] = useState([]);
-  const [key, setKey] = useState({});
+  /* Kunci per inject, supaya rekap inject lama tetap bisa menampilkannya. */
+  const [keys, setKeys] = useState({});
+  /* Nomor inject yang sedang dilempar fasilitator ke layar ini, atau null. */
+  const [recap, setRecap] = useState(null);
 
   /* Proyektor menampilkan kedua bahasa bertumpuk lewat Dual: satu layar untuk
      seluruh ruangan, jadi tidak ada satu bahasa yang harus dipilih. */
@@ -2597,13 +2921,15 @@ function Screen() {
   const onMsg = useCallback((m) => {
     if (m.t === "screened") {
       setDeck(m.deck); setCodes(m.codes); setState(m.state); setSettings(m.settings);
+      if (m.keys) setKeys(m.keys);
+      setRecap(m.recap ?? null);
     } else if (m.t === "state") {
       setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
         limit: m.limit, keyShown: !!m.keyShown });
-      if (!m.keyShown) setKey({});
     } else if (m.t === "roster") setPeople(m.people || []);
+    else if (m.t === "recap") setRecap(m.injectId ?? null);
     else if (m.t === "settings") setSettings(m.settings);
-    else if (m.t === "key") setKey(m.key || {});
+    else if (m.t === "key") setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
     else if (m.t === "time") noteTimeSample(m.c, m.s);
     else if (m.t === "gone" || m.t === "ended") { setDeck(null); setState(null); }
   }, []);
@@ -2636,27 +2962,52 @@ function Screen() {
   const phase = state.phase;
   const seatOf = (peran) => people.find((p) => p.peran === peran);
   const shown = phase === "lobby" ? [] : (inject?.questions || []);
+  const key = (inject && keys[inject.id]) || {};
+  /* Inject lama yang sedang dilempar fasilitator ke layar ini. Selama ada, dia
+     menggantikan seluruh badan layar, termasuk saat ruangan masih di fase
+     menunggu, supaya pembahasan tidak terpotong tampilan ruang tunggu. */
+  const recapInject = recap == null ? null
+    : deck.injects.find((i) => String(i.id) === String(recap)) || null;
 
   return (
     <div className="screen">
       <div className="projtop striped">
         <BrandLogo className="big" />
         <div>
-          <p className="eyebrow">{inject?.siklus}</p>
-          <h1>{tf("Inject {0}", inject?.id)}</h1>
+          <p className="eyebrow">{(recapInject || inject)?.siklus}</p>
+          <h1>{tf("Inject {0}", (recapInject || inject)?.id)}</h1>
         </div>
         <span className="projlang"><LangToggle /></span>
-        <span className={`projphase ${phase}`}>
-          <span className="pulse" />
-          {t(phase === "lobby" ? "Menunggu"
-            : phase === "briefing" ? "Baca skenario"
-              : phase === "open" ? "Sedang menjawab"
-                : state.keyShown ? "Kunci jawaban" : "Diskusi")}
-        </span>
+        {recapInject ? (
+          <span className="projphase recapmark">
+            {t("Rekap inject sebelumnya")}
+          </span>
+        ) : (
+          <span className={`projphase ${phase}`}>
+            <span className="pulse" />
+            {t(phase === "lobby" ? "Menunggu"
+              : phase === "briefing" ? "Baca skenario"
+                : phase === "open" ? "Sedang menjawab"
+                  : state.keyShown ? "Kunci jawaban" : "Diskusi")}
+          </span>
+        )}
       </div>
 
       <div className="projbody">
-        {phase === "lobby" ? (
+        {recapInject ? (
+          /* Rekap: kondisi dan pertanyaan inject lama, dengan hitungan suara dan
+             kunci kalau kuncinya memang sudah pernah dibuka untuk inject itu. */
+          <div className="projmid">
+            <div className="projleft">
+              {recapInject.condition && (
+                <Dual className="projcond" text={recapInject.condition}
+                  alt={recapInject.conditionAlt} />
+              )}
+              <ProjQuestions questions={recapInject.questions || []}
+                keyMap={keys[recapInject.id] || {}} people={people} showCounts />
+            </div>
+          </div>
+        ) : phase === "lobby" ? (
           <div className="projlobby">
             <h2>{t("Masukkan kode unit Anda")}</h2>
             <p className="muted">{t("Satu perangkat per unit bisnis.")}</p>
@@ -2684,32 +3035,8 @@ function Screen() {
               {inject?.condition && (
                 <Dual className="projcond" text={inject.condition} alt={inject.conditionAlt} />
               )}
-              {shown.map((q) => {
-                const k = key[q.qid];
-                return (
-                  <div className="projq" key={q.qid}>
-                    <Dual className="projqtext" text={q.text} alt={q.alt} />
-                    <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
-                    {q.choices?.length > 0 && (
-                      <div className="projopts">
-                        {q.choices.map((c, i) => {
-                          const o = optOf(i);
-                          const isKey = !!k && (k.is || [k.i]).includes(i);
-                          const n = phase === "revealed"
-                            ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
-                          return (
-                            <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
-                              <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
-                              <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
-                              {n != null && <span className="on mono">{n}</span>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+              <ProjQuestions questions={shown} keyMap={key} people={people}
+                showCounts={phase === "revealed"} />
             </div>
             {phase === "open" && state.limit > 0 && settings?.mode === "auto" && (
               <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap={t("sisa")} />
@@ -3498,6 +3825,57 @@ html,body{background:var(--ink)}
   position:relative;z-index:31;
   border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+/* ---------- panel rekap inject ---------- */
+/* ---------- konteks inject sebelumnya di layar peserta ---------- */
+.prevctx{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+  margin-bottom:14px;overflow:hidden}
+.pcbtn{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;text-align:left}
+.pcbtn .lab{flex:1;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint)}
+.pcmore{font-size:12px;font-weight:600;color:var(--signal-text);flex:none}
+.pcbody{padding:0 14px 13px;display:flex;flex-direction:column;gap:11px}
+.pccond{font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
+  border-left:2px solid var(--edge);padding-left:10px}
+.pastq{background:var(--ink);border-radius:11px;padding:10px 12px;
+  display:flex;flex-direction:column;gap:5px;border-left:3px solid var(--edge)}
+.pastq.ok{border-left-color:var(--live)}
+.pastq.part{border-left-color:var(--warn)}
+.pastq.no{border-left-color:var(--wrong)}
+.pastq.miss{border-left-color:var(--faint)}
+.pqq{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
+.pqa,.pqk,.pqn{font-size:12.5px;line-height:1.45;color:var(--dim);white-space:pre-line}
+.pqk{color:var(--live)}
+.pqa .lab,.pqk .lab,.pqn .lab{display:block;font-size:9.5px;font-weight:800;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--faint);margin-bottom:2px}
+
+.recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+  padding:10px 12px}
+.recaplist li.open{box-shadow:inset 0 0 0 1px var(--edge)}
+.rchead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rctitle{flex:1;min-width:0;display:flex;align-items:baseline;gap:9px;text-align:left}
+.rctitle b{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em}
+.rctitle small{font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recaplist .btn.on{background:var(--signal);color:var(--signal-ink)}
+.rcbody{margin-top:11px;padding-top:11px;border-top:1px solid var(--edge2);
+  display:flex;flex-direction:column;gap:14px}
+.rccond{margin:0;font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
+  border-left:2px solid var(--edge);padding-left:10px}
+.rcq{display:flex;flex-direction:column;gap:6px}
+.rcpunit{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;color:var(--faint)}
+.rcqtext{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
+.rckey{font-size:12px;color:var(--live);line-height:1.4}
+.rckey .lab{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);margin-right:7px}
+.rcans{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.rcans li{display:flex;align-items:baseline;gap:10px;font-size:12.5px;line-height:1.4;
+  background:var(--ink);border-radius:9px;padding:6px 9px}
+.rcans li.ok{color:var(--live)}
+.rcans li.part{color:var(--warn)}
+.rcans li.no{color:var(--wrong)}
+.rcans li.none{color:var(--faint);font-style:italic}
+.rcatext{flex:1;min-width:0;overflow-wrap:anywhere;white-space:pre-line}
+.rcapts{font-weight:700;flex:none}
 
 /* ---------- participant ---------- */
 .pmain{display:flex;justify-content:center;padding:20px 16px 80px}
@@ -3604,6 +3982,10 @@ html,body{background:var(--ink)}
   border-bottom:1px solid var(--edge2)}
 .projtop h1{font-size:26px;margin:2px 0 0}
 .projlang{margin-left:auto}
+/* Penanda rekap di proyektor. Warnanya sengaja berbeda dari fase mana pun,
+   supaya ruangan tidak mengira ini inject yang sedang berjalan. */
+.projphase.recapmark{background:var(--signal);color:var(--signal-ink);
+  border-radius:20px;padding:6px 14px;letter-spacing:.1em}
 .projphase{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
   letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
 .projphase .pulse{margin:0;width:12px;height:12px}
@@ -3790,6 +4172,7 @@ const EN = {
   "Batal": "Cancel",
   "Batas waktu default (detik, 0 = tanpa batas)": "Default time limit (seconds, 0 = no limit)",
   "Batas waktu esai (detik, 0 = tanpa batas)": "Essay time limit (seconds, 0 = no limit)",
+  "Belum ada inject yang selesai dijalankan.": "No inject has been run through yet.",
   "Belum ada kabar dari server.": "Nothing from the server yet.",
   "Belum ada kode.": "No codes yet.",
   "Belum ada unit yang mengambil kursi untuk inject ini": "No unit has taken a seat for this inject yet",
@@ -3810,6 +4193,7 @@ const EN = {
   "Briefing": "Briefing",
   "Buat kode": "Create code",
   "Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.": "Create one code per person and decide yourself what they may do. This is not a unit code, so participants cannot use it to join.",
+  "Buka inject yang sudah dijalankan": "Open an inject that has already run",
   "buka jawaban": "open answering",
   "Buka jawaban": "Open answers",
   "Buka jawaban otomatis saat waktu habis": "Open answers automatically when time runs out",
@@ -3861,8 +4245,11 @@ const EN = {
   "Inject ini tidak melibatkan unit Anda. Simak saja.": "This inject does not involve your unit. Just follow along.",
   "Inject ini tidak punya esai": "This inject has no essay",
   "Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.": "This inject has no scenario text. Deliver it from your own notes.",
+  "Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.": "Injects that have already run, with every unit answer and the key. Use this to connect the current inject to earlier decisions.",
+  "Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.": "Past injects and the answers your unit sent. Read only, the answers can no longer be changed.",
   "Inject {0}": "Inject {0}",
   "Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.": "Inject {0} has more than one Situation. Only the first is shown.",
+  "Inject {0} sebelumnya": "Previous inject {0}",
   "Inject {0} tidak punya teks Kondisi.": "Inject {0} has no Situation text.",
   "Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.": "Inject {0}: marked as checkbox but the Answer cell holds no options, so it is treated as an essay.",
   "jawaban benar": "correct answers",
@@ -3876,6 +4263,7 @@ const EN = {
   "Jawaban terbaik": "Best answer",
   "Jawaban terkirim": "Answer sent",
   "Jawaban unit": "Unit answer",
+  "Jawaban unit Anda": "Your unit answer",
   "Jawaban unit Anda sudah tercatat.": "Your unit's answer has been recorded.",
   "Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.": "The number of scored questions per unit is uneven ({0}). Raw points would favour whoever was asked more, so the ranking is computed from each unit's percentage of its own maximum. Raw points are still shown.",
   "Jumlah soal": "Questions",
@@ -3902,6 +4290,7 @@ const EN = {
   "kosong": "empty",
   "Kosongkan semua, ikuti angka default": "Clear them all and follow the default",
   "kuat": "strong",
+  "Kunci": "Key",
   "Kunci jawaban": "Answer key",
   "Kunci jawaban sudah tampil di semua layar.": "The answer key is showing on every screen.",
   "Kuncinya adalah": "The key is",
@@ -3917,7 +4306,10 @@ const EN = {
   "Latihan Tabletop": "Tabletop Exercise",
   "lemah": "weak",
   "Lepas": "Release",
+  "Lepas dari proyektor": "Clear from projector",
+  "Lihat inject yang sudah lewat": "Look at past injects",
   "Lihat jawaban model": "Show model answer",
+  "Lihat jawaban unit Anda": "See your unit answer",
   "Maks": "Max",
   "Maks unit": "Unit max",
   "Manual (Anda yang menilai)": "Manual (you grade)",
@@ -3997,7 +4389,11 @@ const EN = {
   "Rata detik": "Avg seconds",
   "Rata nilai esai": "Avg essay grade",
   "rata-rata skor unit": "average unit score",
+  "Rekap": "Recap",
+  "Rekap inject": "Inject recap",
+  "Rekap inject sebelumnya": "Recap of an earlier inject",
   "Rincian per Peran": "Breakdown by Role",
+  "Riwayat": "History",
   "Salah": "Wrong",
   "sangat kuat": "very strong",
   "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional and sets how long that inject may be answered, in minutes.",
@@ -4039,6 +4435,7 @@ const EN = {
   "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.": "Showing on every device. Waiting for the lead facilitator to open the answering time.",
   "Tambah": "Add",
   "Tampilan di layar": "What the screens show",
+  "Tampilkan di proyektor": "Show on projector",
   "tampilkan kunci": "show key",
   "Tampilkan kunci jawaban": "Show answer key",
   "Tampilkan nama unit": "Show unit names",
@@ -4068,6 +4465,7 @@ const EN = {
   "Unit Anda sudah masuk": "Your unit is in",
   "Unit ditanya": "Units asked",
   "unit ikut": "units taking part",
+  "Unit ini tidak hadir di inject itu.": "This unit was not present for that inject.",
   "Unit ini tidak menjawab.": "This unit did not answer.",
   "Unit kerja": "Business unit",
   "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi.": "Other units may still be writing essays. Wait for the facilitator to open the discussion.",
@@ -4085,6 +4483,7 @@ const EN = {
   "Ya": "Yes",
   "Ya, lanjut": "Yes, continue",
   "{0} belum dinilai": "{0} not yet graded",
+  "{0} dari 10": "{0} out of 10",
   "{0} dtk": "{0} s",
   "{0} hal yang perlu dicek": "{0} things to check",
   "{0} jam": "{0} hours",
