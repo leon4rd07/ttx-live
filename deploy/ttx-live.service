@@ -1,0 +1,53 @@
+# Unit systemd untuk TTX Live.
+#
+#   sudo cp deploy/ttx-live.service /etc/systemd/system/ttx-live.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ttx-live
+#
+# Node dijalankan sebagai service supaya hidup lagi setelah VM reboot atau
+# setelah proses mati. Ini yang membuat latihan tidak bergantung pada satu
+# jendela terminal yang kebetulan terbuka.
+
+[Unit]
+Description=TTX Live tabletop exercise server
+Documentation=https://github.com/leon4rd07/ttx-live
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ttx
+Group=ttx
+WorkingDirectory=/opt/ttx-live
+
+# Tiga variabel yang dibaca aplikasi datang dari sini. Kalau berkasnya hilang
+# atau salah izin, service gagal start dan alasannya terbaca di journalctl.
+EnvironmentFile=/etc/ttx-live/ttx-live.env
+
+ExecStart=/usr/bin/node server.js
+
+# Ruangan ada di memori. Kalau proses mati di tengah latihan, systemd
+# menghidupkannya lagi dalam hitungan detik dan rooms.json memulihkan isinya.
+Restart=always
+RestartSec=3
+
+# Membuat /var/lib/ttx-live, dimiliki user service. Ini tempat rooms.json.
+StateDirectory=ttx-live
+StateDirectoryMode=0750
+
+# Pengetatan secukupnya. Aplikasi ini hanya perlu membaca foldernya sendiri dan
+# menulis ke /var/lib/ttx-live.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ttx-live
+
+[Install]
+WantedBy=multi-user.target
