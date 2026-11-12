@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b39";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b40";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -1443,10 +1443,8 @@ function Host({ onExit }) {
           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
             {t("Kursi")} · {people.length}/{model.roles.length}
           </button>
-          {ran.filter((x) => String(x) !== String(model.injects[activeIdx]?.id)).length > 0 && (
-            <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
-              title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
-          )}
+          <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
+            title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
           <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
           <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
         </>} />
@@ -1750,7 +1748,9 @@ function RecapPanel({ model, ran, activeIdx, people, unitOf, roleIdx, settings,
         </p>
 
         {list.length === 0 && (
-          <p className="hint">{t("Belum ada inject yang selesai dijalankan.")}</p>
+          <p className="hint empty">
+            {t("Belum ada inject yang bisa direkap. Sebuah inject masuk ke daftar ini setelah waktu menjawabnya pernah dibuka, karena sebelum itu belum ada jawaban untuk dibahas. Membuka ruangan baru juga mengosongkan daftar ini.")}
+          </p>
         )}
 
         <ul className="recaplist">
@@ -4172,7 +4172,7 @@ const EN = {
   "Batal": "Cancel",
   "Batas waktu default (detik, 0 = tanpa batas)": "Default time limit (seconds, 0 = no limit)",
   "Batas waktu esai (detik, 0 = tanpa batas)": "Essay time limit (seconds, 0 = no limit)",
-  "Belum ada inject yang selesai dijalankan.": "No inject has been run through yet.",
+  "Belum ada inject yang bisa direkap. Sebuah inject masuk ke daftar ini setelah waktu menjawabnya pernah dibuka, karena sebelum itu belum ada jawaban untuk dibahas. Membuka ruangan baru juga mengosongkan daftar ini.": "No inject can be recapped yet. An inject joins this list once its answering time has been opened, because before that there are no answers to discuss. Opening a new room also clears this list.",
   "Belum ada kabar dari server.": "Nothing from the server yet.",
   "Belum ada kode.": "No codes yet.",
   "Belum ada unit yang mengambil kursi untuk inject ini": "No unit has taken a seat for this inject yet",
