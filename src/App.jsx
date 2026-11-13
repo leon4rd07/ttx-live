@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b40";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b41";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -940,6 +940,17 @@ function Host({ onExit }) {
   /* Inject lama yang sedang tampil di proyektor, dipegang server supaya
      fasilitator kedua melihat keadaan yang sama. */
   const [recapId, setRecapId] = useState(null);
+  /* Inject yang ditinggalkan sementara masih ada unit yang berutang jawaban.
+     `carry` memegang jam aslinya, `spent` memegang waktu yang sudah terpakai,
+     dan keduanya datang dari server supaya fasilitator kedua melihat hal yang
+     sama. `catchup` menandai bahwa yang sedang berjalan adalah susulan. */
+  const [carry, setCarry] = useState({});
+  const [spent, setSpent] = useState({});
+  const [catchup, setCatchup] = useState(false);
+  const [keyed, setKeyed] = useState([]);          // inject yang kuncinya sudah dibacakan
+  const [susulOpen, setSusulOpen] = useState(false);
+  const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
+  const [susulErr, setSusulErr] = useState("");
   const fileRef = useRef(null);
 
   /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
@@ -962,7 +973,8 @@ function Host({ onExit }) {
       if (m.ownerKey) setOwnerKey(m.ownerKey);
       setHostCodes(m.hostCodes || {});
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
-      setKeyShown(!!m.state.keyShown);
+      setKeyShown(!!m.state.keyShown); setCatchup(!!m.state.catchup);
+      setCarry(m.carry || {}); setSpent(m.spent || {}); setKeyed(m.keyed || []);
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "cohosted") {
       /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
@@ -976,6 +988,8 @@ function Host({ onExit }) {
       setRecapId(m.recap ?? null);
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
+      setCatchup(!!m.state.catchup); setCarry(m.carry || {}); setSpent(m.spent || {});
+      setKeyed(m.keyed || Object.keys(m.keys || {}));
       setJoinErr(""); setScreen("run");
     } else if (m.t === "recap") setRecapId(m.injectId ?? null);
     else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
@@ -994,8 +1008,22 @@ function Host({ onExit }) {
       setActiveIdx(m.activeIdx);
       setPhase(m.phase);
       setKeyShown(!!m.keyShown);
+      setCatchup(!!m.catchup);
+      if (m.carry) setCarry(m.carry);
+      if (m.spent) setSpent(m.spent);
+      if (m.keyed) setKeyed(m.keyed);
       if (m.openedAt) setOpenedAt(m.openedAt);
-    } else if (m.t === "roster") setPeople(m.people || []);
+    } else if (m.t === "carry") {
+      setCarry(m.carry || {}); setSpent(m.spent || {});
+      if (m.keyed) setKeyed(m.keyed);
+    }
+    else if (m.t === "nocatchup") {
+      setSusulAsk(null);
+      setSusulErr(m.why === "key" ? "Kunci inject itu sudah dibuka, jadi susulan tidak bisa dijalankan lagi."
+        : m.why === "done" ? "Semua unit sudah menjawab inject itu."
+        : "Waktu inject itu sudah habis terpakai.");
+    }
+    else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") {
       setSettings(m.settings);
       if (m.times) setTimes(m.times);
@@ -1415,6 +1443,56 @@ function Host({ onExit }) {
   }
 
   const answeredBy = (q) => people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
+  /* ---- siapa yang masih berutang, dan berapa sisa waktu sebuah inject ----
+
+     Dihitung dengan urutan yang sama seperti server, dan hanya untuk unit yang
+     kursinya memang terisi, supaya peringatan di sini tidak menyebut unit yang
+     belum pernah masuk sementara server menganggapnya tidak berutang. */
+  const owedOn = (inj) => (!inj ? [] : people
+    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
+    .map((p) => p.peran));
+  const winOf = (injId) => {
+    const v = times?.[injId];
+    return v === "" || v == null ? Number(settings?.timeLimit ?? 0) : Number(v);
+  };
+  const ewinOf = (injId) => {
+    const v = etimes?.[injId];
+    const base = v !== "" && v != null ? Number(v)
+      : settings?.essayLimit === "" || settings?.essayLimit == null
+        ? winOf(injId) : Number(settings.essayLimit);
+    return base ? base + (Number(settings?.essayGrace) || 0) : base;
+  };
+  const longOf = (inj) => {
+    const a = winOf(inj.id);
+    if (!(inj.questions || []).some((q) => q.type === "open")) return a;
+    const b = ewinOf(inj.id);
+    if (!a || !b) return 0;
+    return Math.max(a, b);
+  };
+  /* Sisa detik inject ini. null berarti jendelanya tidak menutup sendiri. */
+  const leftSec = (inj) => {
+    const lim = longOf(inj) * 1000;
+    if (!lim) return null;
+    return Math.max(0, Math.round((lim - (Number(spent[inj.id]) || 0)) / 1000));
+  };
+  /* Sisa detik inject yang sedang berjalan, dihitung dari jamnya sendiri karena
+     waktu terpakai baru dicatat saat inject itu ditinggalkan. Angkanya tidak
+     berdetak, dan tidak perlu: ia hanya dibaca sekali saat peringatan muncul. */
+  const leftNowSec = () => {
+    const lim = longOf(inject) * 1000;
+    if (!lim) return null;
+    const run = Math.max(0, serverNow() - (openedAt || serverNow()));
+    return Math.max(0, Math.round((lim - run) / 1000));
+  };
+  const owedNow = phase === "open" ? owedOn(inject) : [];
+  /* Inject yang masih bisa disusulkan: ada unit yang berutang, kuncinya belum
+     dibuka, dan waktunya belum habis. Yang sedang berjalan tidak ikut. */
+  const susulList = (model?.injects || [])
+    .map((inj, idx) => ({ inj, idx, owed: owedOn(inj), left: leftSec(inj) }))
+    .filter((x) => x.idx !== activeIdx && x.owed.length > 0
+      && !keyed.includes(String(x.inj.id))
+      && (Number(spent[x.inj.id]) || 0) > 0 && (x.left === null || x.left > 1));
+
   const seatsHere = inject.roles.map(seatOf).filter(Boolean);
   const allIn = seatsHere.length === inject.roles.length && seatsHere.length > 0 &&
     inject.questions.every((q) => seatOf(q.peran)?.answers?.[q.qid]);
@@ -1445,6 +1523,11 @@ function Host({ onExit }) {
           </button>
           <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
             title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
+          <button className={`btn quiet ${susulList.length ? "on" : ""}`}
+            onClick={() => { setSusulErr(""); setSusulAsk(null); setSusulOpen(true); }}
+            title={t("Inject yang ditinggalkan dan masih bisa diselesaikan")}>
+            {t("Susulan")} · {susulList.length}
+          </button>
           <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
           <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
         </>} />
@@ -1461,6 +1544,18 @@ function Host({ onExit }) {
         <RecapPanel {...{ model, ran, activeIdx, people, unitOf, roleIdx, settings, recapId, canDrive }}
           onShow={(id) => { setRecapId(id); send({ t: "recap", roomId, injectId: id }); }}
           onClose={() => setRecapOpen(false)} />
+      )}
+
+      {susulOpen && (
+        <SusulPanel {...{ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr, catchup, inject }}
+          onAsk={(id) => { setSusulErr(""); setSusulAsk(id); }}
+          onCancel={() => setSusulAsk(null)}
+          onRun={(id) => {
+            setSusulAsk(null); setSusulOpen(false); setConfirmNext(false);
+            echo.current = "";
+            send({ t: "catchup", roomId, injectId: id });
+          }}
+          onClose={() => { setSusulOpen(false); setSusulAsk(null); }} />
       )}
 
       {teamOpen && (
@@ -1689,6 +1784,16 @@ function Host({ onExit }) {
                   confirmNext ? (
                     <span className="confirm">
                       <span className="msg">{tf("Pindahkan semua ke inject {0}?", model.injects[activeIdx + 1].id)}</span>
+                      {owedNow.length > 0 && (
+                        <span className="owedwarn">
+                          <b>{tf("Belum selesai di inject ini: {0}.",
+                            owedNow.map(unitOf).join(", "))}</b>{" "}
+                          {leftNowSec() === null
+                            ? t("Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.")
+                            : tf("Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.", fmt(leftNowSec()))}{" "}
+                          {t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
+                        </span>
+                      )}
                       <button className="btn quiet" onClick={() => setConfirmNext(false)}>{t("Batal")}</button>
                       <button className="btn" onClick={goNext}>{t("Ya, lanjut")}</button>
                     </span>
@@ -1721,6 +1826,92 @@ function Host({ onExit }) {
    seluruh jawaban tiap unit sejak awal, jadi panel ini tidak meminta apa pun
    ke server. Yang lewat jaringan hanya satu hal: nomor inject yang dilempar ke
    proyektor. */
+/* Inject yang ditinggalkan sementara masih ada unit yang berutang jawaban.
+
+   Membuka susulan membawa seluruh ruangan kembali ke inject itu dengan sisa
+   waktunya, dan unit yang sudah menjawab terkunci. Keduanya disebutkan di
+   peringatan sebelum tombolnya bekerja, karena yang satu menghentikan jalannya
+   latihan sebentar dan yang satu tidak bisa dibatalkan. */
+function SusulPanel({ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr,
+  catchup, inject, onAsk, onCancel, onRun, onClose }) {
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
+        aria-label={t("Susulan")}>
+        <div className="phead">
+          <h2>{t("Susulan")}</h2>
+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
+        </div>
+        <p className="hint">
+          {t("Unit tidak selesai pada waktu yang sama. Kalau sebagian unit sudah mengirim jawabannya, Anda boleh lanjut ke inject berikutnya tanpa menunggu yang lain, lalu kembali ke sini untuk menyelesaikan inject yang tertinggal. Sisa waktu unit itu disimpan, jadi mereka tidak mendapat waktu baru dan nilainya tetap sebanding dengan unit yang mengerjakan tepat waktu.")}
+        </p>
+
+        {catchup && (
+          <p className="hint on">
+            {tf("Inject {0} sedang berjalan sebagai susulan.", inject?.id)}
+          </p>
+        )}
+        {susulErr && <p className="hint bad">{t(susulErr)}</p>}
+
+        {susulList.length === 0 && (
+          <p className="hint empty">
+            {t("Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, dan kuncinya belum dibacakan. Setelah kunci dibacakan, susulan tidak bisa lagi dijalankan untuk inject itu.")}
+          </p>
+        )}
+
+        <ul className="susullist">
+          {susulList.map(({ inj, owed, left }) => {
+            const asking = String(susulAsk) === String(inj.id);
+            return (
+              <li key={inj.id}>
+                <div className="suhead">
+                  <b>{tf("Inject {0}", inj.id)}</b>
+                  <small>{inj.siklus}</small>
+                  <span className="suleft mono">
+                    {left === null ? t("tanpa batas waktu") : tf("sisa {0}", fmt(left))}
+                  </span>
+                </div>
+                <div className="suunits">
+                  {owed.map((r) => (
+                    <span key={r} className="chip">
+                      <Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}
+                    </span>
+                  ))}
+                </div>
+                {!canDrive ? (
+                  <p className="hint">{t("Susulan dijalankan fasilitator utama.")}</p>
+                ) : asking ? (
+                  <div className="suask">
+                    <p>
+                      {tf("Seluruh ruangan akan kembali ke inject {0} dengan sisa waktu {1}.",
+                        inj.id, left === null ? t("tanpa batas") : fmt(left))}{" "}
+                      {t("Unit yang sudah menjawab hanya melihat: jawabannya terkunci dan tidak bisa diubah. Kuncinya belum boleh dibacakan sebelum susulan ini ditutup, karena jawaban yang benar akan terdengar seluruh ruangan.")}
+                    </p>
+                    <div className="surow">
+                      <button className="btn quiet" onClick={onCancel}>{t("Batal")}</button>
+                      <button className="btn" onClick={() => onRun(inj.id)}>{t("Ya, buka susulan")}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="btn quiet pill" onClick={() => onAsk(inj.id)}>
+                    {t("Buka susulan")}
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
 function RecapPanel({ model, ran, activeIdx, people, unitOf, roleIdx, settings,
   recapId, canDrive, onShow, onClose }) {
   const [openId, setOpenId] = useState(null);
@@ -2280,6 +2471,10 @@ function Participant() {
      harus tetap ada setelah ruangan berpindah ke inject berikutnya. */
   const [keys, setKeys] = useState({});
   const [ran, setRan] = useState([]);       // inject yang pernah dibuka fasilitator
+  /* Jendela inject lama yang dibiarkan hidup untuk unit yang belum selesai, dan
+     nomor inject yang perangkat ini pilih untuk diselesaikan dulu. */
+  const [carry, setCarry] = useState({});
+  const [stay, setStay] = useState(null);
   const [histOpen, setHistOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const [evicted, setEvicted] = useState(false);
@@ -2305,14 +2500,17 @@ function Participant() {
       if (m.etimes) setEtimes(m.etimes);
       if (m.ran) setRan(m.ran);
       if (m.keys) setKeys(m.keys);
+      setCarry(m.carry || {});
       setMsg(""); setTaken(null); setEvicted(false);
     } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
     else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
     else if (m.t === "state") {
-      setState({ activeIdx: m.activeIdx, phase: m.phase,
+      setState({ activeIdx: m.activeIdx, phase: m.phase, catchup: !!m.catchup,
         openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
       if (m.ran) setRan(m.ran);
+      if (m.carry) setCarry(m.carry);
     }
+    else if (m.t === "carry") setCarry(m.carry || {});
     else if (m.t === "settings") {
       setSettings(m.settings);
       if (m.times) setTimes(m.times);
@@ -2362,20 +2560,68 @@ function Participant() {
     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
     nukeAll(); setMe(null); setDeck(null); setState(null);
     setCodeIn(""); setPeek(null); setTaken(null); setKeys({}); setRan([]);
+    setCarry({}); setStay(null);
   };
 
   /* Derived above every early return. useExpired sat below them, so it only
      ran once a device had joined — the hook count changed between renders,
      which is React error #310. */
-  const phase = state?.phase || "lobby";
-  const inject = deck?.injects?.[state?.activeIdx ?? 0];
+  /* ---- inject yang dilihat perangkat ini -------------------------------
+
+     Biasanya sama dengan inject yang sedang dibuka fasilitator. Bedanya hanya
+     muncul kalau fasilitator sudah lanjut sementara unit ini masih berutang
+     jawaban: jendela inject lama dibiarkan hidup dengan jam aslinya, dan unit
+     ini memilih sendiri mau menyelesaikannya dulu atau ikut pindah. Layarnya
+     bertahan di inject lama secara bawaan, supaya jawaban yang sedang diketik
+     tidak hilang dari layar tanpa diminta. */
+  const roomIdx = state?.activeIdx ?? 0;
+  const carryMine = useMemo(() => {
+    if (!deck?.injects) return [];
+    return Object.keys(carry || {})
+      .map((id) => {
+        const idx = deck.injects.findIndex((i) => String(i.id) === String(id));
+        return { id, idx, inj: deck.injects[idx], at: Number(carry[id]) };
+      })
+      /* Deck peserta hanya memuat pertanyaan unitnya sendiri, jadi pemeriksaan
+         ini sudah berarti "unit saya belum selesai". */
+      .filter((x) => x.inj && x.idx !== roomIdx
+        && (x.inj.questions || []).length > 0
+        && (x.inj.questions || []).some((q) => !me?.answers?.[q.qid]));
+  }, [carry, deck, roomIdx, me]);
+  const stayOn = carryMine.find((x) => String(x.id) === String(stay)) || null;
+  const stayRef = useRef(null);
+  useEffect(() => { stayRef.current = stay; }, [stay]);
+  const seenIdx = useRef(roomIdx);
+  const onCatchup = !!state?.catchup;
+  useEffect(() => {
+    const was = seenIdx.current;
+    seenIdx.current = roomIdx;
+    if (was === roomIdx) return;
+    /* Susulan adalah keputusan fasilitator untuk seluruh ruangan, jadi layar ini
+       mengikutinya tanpa menawar. */
+    if (onCatchup) return setStay(null);
+    /* Sudah bertahan di sebuah jendela yang masih hidup: perpindahan ruangan
+       berikutnya tidak boleh menarik layar ini ke inject lain. */
+    const held = stayRef.current;
+    if (held && carryMine.some((x) => String(x.id) === String(held))) return;
+    const left = carryMine.find((x) => x.idx === was);
+    setStay(left ? left.id : null);
+  }, [roomIdx, carryMine, onCatchup]);
+
+  const viewIdx = stayOn ? stayOn.idx : roomIdx;
+  const phase = stayOn ? "open" : (state?.phase || "lobby");
+  const inject = deck?.injects?.[viewIdx];
+  const openedNow = stayOn ? stayOn.at : state?.openedAt;
+  /* Susulan menerima jawaban pertama saja, jadi jawaban yang sudah masuk
+     ditampilkan terkunci, bukan seolah masih bisa diperbaiki. */
+  const frozenAll = !stayOn && !!state?.catchup;
   const mine = inject?.questions || [];
   /* Kunci inject yang sedang berjalan. Nama ini dipakai situs render yang sudah
      ada, jadi perpindahan ke simpanan per inject berhenti di satu baris. */
   const key = (inject && keys[inject.id]) || {};
   /* Inject yang pernah dibuka fasilitator dan memang menanyakan sesuatu ke unit
      ini. Yang sedang berjalan tidak ikut, dan urutannya mengikuti deck. */
-  const idxNow = state?.activeIdx ?? 0;
+  const idxNow = viewIdx;
   const history = useMemo(() => {
     if (!deck?.injects) return [];
     const done = new Set((ran || []).map(String));
@@ -2408,8 +2654,8 @@ function Participant() {
   const elimit = inject ? ewindowOf(inject.id) : (state?.elimit ?? 0);
   const autoMode = settings?.mode === "auto";
   const runningNow = phase === "open" && !!me && !!deck;
-  const timeUp = useExpired(state?.openedAt, autoMode ? limit : 0, runningNow);
-  const essayUp = useExpired(state?.openedAt, autoMode ? elimit : 0, runningNow);
+  const timeUp = useExpired(openedNow, autoMode ? limit : 0, runningNow);
+  const essayUp = useExpired(openedNow, autoMode ? elimit : 0, runningNow);
   const iHaveEssay = mine.some((q) => q.type === "open");
   const iHaveChoice = mine.some((q) => q.type !== "open");
   /* Semua pertanyaan unit ini sudah terkunci padahal inject belum ditutup:
@@ -2538,6 +2784,41 @@ function Participant() {
             </div>
           )}
 
+          {/* ---- fasilitator sudah lanjut, unit ini belum selesai ----
+
+              Layar bertahan di inject lama supaya yang sedang diketik tidak
+              lenyap, dan kartu ini yang menawarkan pindah. Sisa waktunya nyata:
+              jamnya berjalan sejak inject itu dibuka, jadi tidak ada unit yang
+              memperoleh waktu tambahan dengan bertahan di sini. */}
+          {stayOn && (
+            <div className="staycard">
+              <b>{tf("Ruangan sudah lanjut ke inject {0}.",
+                deck?.injects?.[roomIdx]?.id ?? "?")}</b>
+              <p>
+                {tf("Anda masih mengerjakan inject {0}, dan sisa waktunya tetap berjalan.", stayOn.inj.id)}{" "}
+                {t("Selesaikan dulu di sini, atau ikut pindah sekarang. Kalau pindah, jawaban inject ini yang belum terkirim tidak akan tercatat.")}
+              </p>
+              <button className="btn wide" onClick={() => setStay(null)}>
+                {tf("Ikut ke inject {0} sekarang", deck?.injects?.[roomIdx]?.id ?? "?")}
+              </button>
+            </div>
+          )}
+          {!stayOn && carryMine.length > 0 && (
+            <div className="staycard back">
+              <b>{tf("Inject {0} masih terbuka untuk unit Anda.", carryMine[0].inj.id)}</b>
+              <p>{t("Waktunya masih berjalan. Kembali ke sana kalau ingin menyelesaikannya.")}</p>
+              <button className="btn quiet wide" onClick={() => setStay(carryMine[0].id)}>
+                {tf("Kembali ke inject {0}", carryMine[0].inj.id)}
+              </button>
+            </div>
+          )}
+          {!stayOn && state?.catchup && (
+            <div className="staycard back">
+              <b>{tf("Inject {0} dibuka kembali sebagai susulan.", inject?.id ?? "?")}</b>
+              <p>{t("Unit yang belum menjawab bisa mengisi sekarang dengan sisa waktunya. Jawaban yang sudah masuk terkunci dan tidak bisa diubah.")}</p>
+            </div>
+          )}
+
           {phase !== "lobby" && inject && (
             <>
               <div className="eyebrow">{inject.siklus} · {tf("Inject {0}", inject.id)}</div>
@@ -2580,11 +2861,11 @@ function Participant() {
                   {autoMode && (limit > 0 || elimit > 0) && (
                     <div className="ringwrap">
                       {iHaveChoice && limit > 0 && (
-                        <Ring openedAt={state.openedAt} limit={limit} size="s150"
+                        <Ring openedAt={openedNow} limit={limit} size="s150"
                           cap={t(iHaveEssay ? "pilihan" : "sisa")} />
                       )}
                       {iHaveEssay && elimit > 0 && (
-                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap={t("esai")} />
+                        <Ring openedAt={openedNow} limit={elimit} size="s150" cap={t("esai")} />
                       )}
                     </div>
                   )}
@@ -2615,12 +2896,18 @@ function Participant() {
                     const cur = ticks[q.qid] ?? sent?.picks ?? [];
                     /* Esai terkunci pada jam esai, sisanya pada jam pilihan. */
                     const qUp = q.type === "open" ? essayUp : timeUp;
+                    /* Susulan: jawaban yang sudah masuk terkunci, karena sejak
+                       inject ini ditinggalkan sudah ada yang terdengar di
+                       ruangan. Yang belum menjawab tetap bisa mengisi. */
+                    const frozen = frozenAll && !!sent;
+                    const shut = qUp || frozen;
                     const toggle = (i) => {
                       const next = cur.includes(i)
                         ? cur.filter((x) => x !== i)
                         : [...cur, i].sort((a, b) => a - b);
                       setTicks((m) => ({ ...m, [q.qid]: next }));
-                      send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: next } });
+                      send({ t: "answer", roomId: me.roomId, pid: me.pid,
+                        injectId: inject.id, answers: { [q.qid]: next } });
                     };
                     return (
                       <div className="pq" key={q.qid}>
@@ -2636,16 +2923,17 @@ function Participant() {
                                 const o = optOf(i);
                                 const picked = isCheck ? cur.includes(i) : sent && sent.choice === i;
                                 const dim = isCheck
-                                  ? (qUp && !picked)
-                                  : ((sent || qUp) && !picked);
+                                  ? (shut && !picked)
+                                  : ((sent || shut) && !picked);
                                 return (
-                                  <button key={i} disabled={qUp}
+                                  <button key={i} disabled={shut}
                                     className={`opt ${picked ? "picked" : ""} ${dim ? "faded" : ""}`}
                                     style={{ "--c": o.c }}
                                     aria-pressed={isCheck ? picked : undefined}
                                     onClick={() => isCheck
                                       ? toggle(i)
-                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
+                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid,
+                                        injectId: inject.id, answers: { [q.qid]: i } })}>
                                     <span className="oglyph"><Glyph shape={o.shape} /></span>
                                     <span className="otxt">{pick(c.text, c.alt)}</span>
                                     {isCheck
@@ -2662,14 +2950,15 @@ function Participant() {
                                 );
                               })}
                             </div>
-                            {qUp ? (
+                            {shut ? (
                               <div className="lockstamp">
                                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
                                   stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
                                   <path d="M7 11V8a5 5 0 0110 0v3" />
                                   <rect x="4" y="11" width="16" height="9" rx="2.4" />
                                 </svg>
-                                {t("Waktu habis, jawaban terkunci")}
+                                {t(frozen ? "Jawaban unit Anda sudah masuk dan terkunci selama susulan"
+                                  : "Waktu habis, jawaban terkunci")}
                               </div>
                             ) : sent ? (
                               <>
@@ -2697,15 +2986,18 @@ function Participant() {
                           </>
                         ) : (
                           <>
-                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={qUp}
+                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={shut}
                               value={drafts[q.qid] ?? sent?.text ?? ""}
                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
-                            <button className="btn wide" disabled={qUp}
-                              onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
+                            <button className="btn wide" disabled={shut}
+                              onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid,
+                                injectId: inject.id, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
                               {t(sent ? "Perbarui jawaban" : "Kirim jawaban")}
                             </button>
-                            {qUp
-                              ? <div className="lockstamp">{t("Waktu habis")}</div>
+                            {shut
+                              ? <div className="lockstamp">
+                                {t(frozen ? "Sudah masuk dan terkunci selama susulan" : "Waktu habis")}
+                              </div>
                               : sent && <p className="hint centre">{t("Terkirim. Masih bisa direvisi sampai jawaban ditutup.")}</p>}
                           </>
                         )}
@@ -2925,7 +3217,7 @@ function Screen() {
       setRecap(m.recap ?? null);
     } else if (m.t === "state") {
       setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
-        limit: m.limit, keyShown: !!m.keyShown });
+        limit: m.limit, keyShown: !!m.keyShown, catchup: !!m.catchup });
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "recap") setRecap(m.injectId ?? null);
     else if (m.t === "settings") setSettings(m.settings);
@@ -2985,10 +3277,11 @@ function Screen() {
         ) : (
           <span className={`projphase ${phase}`}>
             <span className="pulse" />
-            {t(phase === "lobby" ? "Menunggu"
-              : phase === "briefing" ? "Baca skenario"
-                : phase === "open" ? "Sedang menjawab"
-                  : state.keyShown ? "Kunci jawaban" : "Diskusi")}
+            {state.catchup && phase === "open" ? t("Susulan, sisa waktu")
+              : t(phase === "lobby" ? "Menunggu"
+                : phase === "briefing" ? "Baca skenario"
+                  : phase === "open" ? "Sedang menjawab"
+                    : state.keyShown ? "Kunci jawaban" : "Diskusi")}
           </span>
         )}
       </div>
@@ -3848,6 +4141,37 @@ html,body{background:var(--ink)}
 .pqa .lab,.pqk .lab,.pqn .lab{display:block;font-size:9.5px;font-weight:800;letter-spacing:.11em;
   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
 
+/* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+.owedwarn{flex:1 1 100%;order:-1;font-size:12.5px;line-height:1.55;color:var(--warn);
+  background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:12px;padding:10px 12px}
+.owedwarn b{font-weight:800}
+.hint.bad{color:var(--warn);background:var(--warn-soft);border-radius:10px;padding:8px 10px}
+.hint.on{color:var(--signal-text);background:var(--signal-soft);border-radius:10px;padding:8px 10px}
+.susullist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.susullist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+  padding:11px 12px;display:flex;flex-direction:column;gap:9px;align-items:flex-start}
+.suhead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;width:100%}
+.suhead b{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em}
+.suhead small{font-size:11px;color:var(--faint);flex:1;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.suleft{font-size:11.5px;color:var(--warn);font-weight:700}
+.suunits{display:flex;gap:6px;flex-wrap:wrap}
+.suask{width:100%;background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:12px;padding:10px 12px}
+.suask p{margin:0;font-size:12.5px;line-height:1.55;color:var(--warn)}
+.surow{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
+
+/* ---- peserta: inject lama yang masih terbuka untuk unit ini ---- */
+.staycard{background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
+  border-radius:16px;padding:14px 15px;margin:0 0 18px}
+.staycard b{display:block;font-family:var(--disp);font-size:15px;font-weight:800;
+  letter-spacing:-.02em;color:var(--warn)}
+.staycard p{margin:7px 0 12px;font-size:13px;line-height:1.55;color:var(--dim)}
+.staycard.back{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
+.staycard.back b{color:var(--ink)}
+.staycard.back p{margin-bottom:10px}
+
 .recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
   padding:10px 12px}
@@ -4142,6 +4466,39 @@ html,body{background:var(--ink)}
    tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
+  /* ---- susulan ---- */
+  "Inject yang ditinggalkan dan masih bisa diselesaikan": "Injects left unfinished that can still be completed",
+  "Susulan": "Catch-up",
+  "Belum selesai di inject ini: {0}.": "Not finished on this inject: {0}.",
+  "Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.": "This inject has no time limit, so their window stays open.",
+  "Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.": "They have {0} left and it is not forfeited. Their device will offer two choices: finish this inject first, or move on now.",
+  "Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.": "This inject can also be reopened through Catch-up, as long as its key has not been read out.",
+  "Unit tidak selesai pada waktu yang sama. Kalau sebagian unit sudah mengirim jawabannya, Anda boleh lanjut ke inject berikutnya tanpa menunggu yang lain, lalu kembali ke sini untuk menyelesaikan inject yang tertinggal. Sisa waktu unit itu disimpan, jadi mereka tidak mendapat waktu baru dan nilainya tetap sebanding dengan unit yang mengerjakan tepat waktu.": "Units do not finish at the same moment. Once some units have sent their answers, you may move to the next inject without waiting for the rest, then come back here to finish the inject that was left behind. That unit's remaining time is preserved, so they get no fresh clock and their score stays comparable with the units that answered on time.",
+  "Inject {0} sedang berjalan sebagai susulan.": "Inject {0} is running as a catch-up.",
+  "Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, dan kuncinya belum dibacakan. Setelah kunci dibacakan, susulan tidak bisa lagi dijalankan untuk inject itu.": "Nothing is waiting. An inject enters this list if its answer window was opened, then left behind while some unit had not sent an answer, and its key has not been read out. Once the key has been read out, catch-up can no longer be run for that inject.",
+  "tanpa batas waktu": "no time limit",
+  "sisa {0}": "{0} left",
+  "Susulan dijalankan fasilitator utama.": "Catch-up is run by the lead facilitator.",
+  "Seluruh ruangan akan kembali ke inject {0} dengan sisa waktu {1}.": "The whole room returns to inject {0} with {1} remaining.",
+  "tanpa batas": "no limit",
+  "Unit yang sudah menjawab hanya melihat: jawabannya terkunci dan tidak bisa diubah. Kuncinya belum boleh dibacakan sebelum susulan ini ditutup, karena jawaban yang benar akan terdengar seluruh ruangan.": "Units that already answered can only watch: their answers are locked and cannot be changed. Do not read out the key before this catch-up closes, because the correct answer would be heard by the whole room.",
+  "Ya, buka susulan": "Yes, open catch-up",
+  "Buka susulan": "Open catch-up",
+  "Ruangan sudah lanjut ke inject {0}.": "The room has moved on to inject {0}.",
+  "Anda masih mengerjakan inject {0}, dan sisa waktunya tetap berjalan.": "You are still working on inject {0}, and its clock is still running.",
+  "Selesaikan dulu di sini, atau ikut pindah sekarang. Kalau pindah, jawaban inject ini yang belum terkirim tidak akan tercatat.": "Finish here first, or move on now. If you move on, any answer for this inject you have not sent will not be recorded.",
+  "Ikut ke inject {0} sekarang": "Move to inject {0} now",
+  "Inject {0} masih terbuka untuk unit Anda.": "Inject {0} is still open for your unit.",
+  "Waktunya masih berjalan. Kembali ke sana kalau ingin menyelesaikannya.": "Its clock is still running. Go back if you want to finish it.",
+  "Kembali ke inject {0}": "Back to inject {0}",
+  "Inject {0} dibuka kembali sebagai susulan.": "Inject {0} has been reopened as a catch-up.",
+  "Unit yang belum menjawab bisa mengisi sekarang dengan sisa waktunya. Jawaban yang sudah masuk terkunci dan tidak bisa diubah.": "Units that have not answered can answer now with their remaining time. Answers already in are locked and cannot be changed.",
+  "Susulan, sisa waktu": "Catch-up, time remaining",
+  "Jawaban unit Anda sudah masuk dan terkunci selama susulan": "Your unit's answer is in and locked for this catch-up",
+  "Sudah masuk dan terkunci selama susulan": "Sent and locked for this catch-up",
+  "Kunci inject itu sudah dibuka, jadi susulan tidak bisa dijalankan lagi.": "That inject's key has already been read out, so catch-up can no longer be run.",
+  "Semua unit sudah menjawab inject itu.": "Every unit has already answered that inject.",
+  "Waktu inject itu sudah habis terpakai.": "That inject's time is fully used up.",
   " · {0} dicentang": " · {0} ticked",
   ", esai {0}": ", essay {0}",
   ", tapi sedang offline": ", but is currently offline",

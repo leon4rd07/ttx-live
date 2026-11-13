@@ -90,6 +90,71 @@ function longestLimit(room, inj) {
   return Math.max(a, b);
 }
 
+/* ---- jendela yang dibawa, dan susulan ------------------------------------
+
+   Satu ruangan hanya punya satu jam, dan dulu jam itu ikut berpindah bersama
+   inject. Akibatnya unit yang masih mengerjakan inject lama kehilangan sisa
+   waktunya begitu fasilitator menekan lanjut, padahal unit lain sudah selesai
+   dan tidak ada gunanya menahan mereka menunggu.
+
+   Sekarang waktu yang sudah terpakai dicatat per inject di `spent`, dan inject
+   yang ditinggalkan dalam keadaan masih berutang jawaban dipindah ke `carry`
+   dengan jam aslinya, bukan jam baru. Dua akibatnya yang penting: unit yang
+   tertinggal melanjutkan sisa waktunya, dan susulan yang dibuka nanti juga
+   memakai sisa itu. Tidak ada unit yang bisa memperoleh waktu lebih banyak
+   daripada yang dijadwalkan untuk injectnya, jadi nilai antar unit tetap
+   sebanding. */
+
+const injById = (room, injId) =>
+  room.deck.injects.find((i) => String(i.id) === String(injId));
+
+/* Siapa yang masih berutang jawaban di inject ini. */
+function owedBy(room, inj) {
+  if (!inj) return [];
+  return Object.values(room.people || {})
+    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
+    .map((p) => p.pid);
+}
+
+/* Waktu yang sudah dipakai inject ini, dibatasi jendelanya sendiri supaya
+   jendela yang sudah lewat tidak tercatat lebih panjang daripada izinnya. */
+function usedOf(room, injId, openedAt) {
+  const limit = longestLimit(room, injById(room, injId)) * 1000;
+  const run = Math.max(0, Date.now() - (openedAt || Date.now()));
+  return limit ? Math.min(run, limit) : run;
+}
+
+/* Sisa waktu inject ini. Nol berarti jendelanya tidak pernah menutup sendiri. */
+function leftOf(room, injId) {
+  const limit = longestLimit(room, injById(room, injId)) * 1000;
+  if (!limit) return Infinity;
+  return Math.max(0, limit - ((room.spent || {})[injId] || 0));
+}
+
+/* Jendela bawaan yang sudah tidak berlaku dibereskan saat dibaca, jadi tidak
+   ada timer kedua yang perlu dijaga. Sebuah jendela mati kalau waktunya habis,
+   kuncinya sudah dibuka, atau semua unit sudah menjawab. */
+function sweepCarry(room) {
+  room.carry = room.carry || {};
+  room.spent = room.spent || {};
+  for (const [injId, at] of Object.entries(room.carry)) {
+    const inj = injById(room, injId);
+    const limit = longestLimit(room, inj) * 1000;
+    const dead = !inj || (limit && Date.now() - at > limit + 800)
+      || !!(room.keys || {})[injId] || !owedBy(room, inj).length;
+    if (dead) {
+      room.spent[injId] = usedOf(room, injId, at);
+      delete room.carry[injId];
+    }
+  }
+  return room.carry;
+}
+
+/* Satu bentuk pesan keadaan, supaya setiap jalur mengirim medan yang sama. */
+const stateMsg = (room) => ({ ...room.state, ran: Object.keys(room.ran || {}),
+  carry: sweepCarry(room), spent: room.spent || {},
+  keyed: Object.keys(room.keys || {}) });
+
 /* Who may do what. The facilitator who opened the room owns it and hands out
    co-host codes, each carrying the role that code grants. */
 const ROLE_RANK = { owner: 3, full: 2, grader: 1, viewer: 0 };
@@ -125,6 +190,8 @@ function restore() {
       r.ran = r.ran || {};
       r.keys = r.keys || {};
       r.recap = r.recap || null;
+      r.spent = r.spent || {};
+      r.carry = r.carry || {};
       rooms.set(r.id, r);
       for (const [code, peran] of Object.entries(r.codes || {})) {
         codeIndex.set(code, { roomId: r.id, peran });
@@ -176,7 +243,10 @@ function armReveal(room) {
   const inj = room.deck.injects[room.state.activeIdx];
   const limit = longestLimit(room, inj);
   if (!room.settings.autoReveal || !limit) return;
-  const fireIn = limit * 1000 + 1200; // small grace for in-flight answers
+  /* Susulan berjalan dengan sisa waktu, jadi hitungannya dari jam yang sedang
+     berjalan, bukan dari sekarang. Untuk inject biasa keduanya sama. */
+  const run = Math.max(0, Date.now() - (room.state.openedAt || Date.now()));
+  const fireIn = Math.max(0, limit * 1000 - run) + 1200; // grace for in-flight answers
   revealTimers.set(room.id, setTimeout(() => {
     const r = rooms.get(room.id);
     if (!r || r.state.phase !== "open") return;
@@ -421,7 +491,7 @@ wss.on("connection", (ws) => {
         const room = { id, deck: m.deck, settings, codes, people: {},
           times: m.times || {}, etimes: m.etimes || {},
           hostCodes: {}, ownerKey: newCode() + newCode(),
-          ran: {}, keys: {}, recap: null,
+          ran: {}, keys: {}, recap: null, spent: {}, carry: {},
           state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
           touched: Date.now() };
         rooms.set(id, room);
@@ -429,7 +499,8 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
-          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null });
+          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
+          carry: {}, spent: {}, keyed: [] });
         pushHosts(room);
         markSnapshot();
         break;
@@ -446,7 +517,8 @@ wss.on("connection", (ws) => {
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
           hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
-          recap: byId.recap || null });
+          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+          keyed: Object.keys(byId.keys || {}) });
         send(ws, { t: "roster", people: roster(byId) });
         pushHosts(byId);
         break;
@@ -498,7 +570,7 @@ wss.on("connection", (ws) => {
           deck: room.deck, codes: room.codes, settings: room.settings,
           times: room.times || {}, etimes: room.etimes || {}, state: room.state,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
-          recap: room.recap || null });
+          recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {} });
         send(ws, { t: "roster", people: roster(room) });
         if (room.state.keyShown) sendKey(room);
         pushHosts(room);
@@ -599,7 +671,8 @@ wss.on("connection", (ws) => {
           deck: deckFor(room, hit.peran), state: room.state,
           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
           me: room.people[pid],
-          ran: Object.keys(room.ran || {}), keys: room.keys || {} });
+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
+          carry: sweepCarry(room), spent: room.spent || {} });
         if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
@@ -617,7 +690,8 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
           settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me,
-          ran: Object.keys(room.ran || {}), keys: room.keys || {} });
+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
+          carry: sweepCarry(room), spent: room.spent || {} });
         if (room.state.keyShown) sendKey(room);
         markDirty(room.id);
         break;
@@ -631,7 +705,7 @@ wss.on("connection", (ws) => {
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
           state: byId.state, codes: byId.codes,
           ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
-          recap: byId.recap || null });
+          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {} });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;
@@ -675,9 +749,30 @@ wss.on("connection", (ws) => {
       /* ---- phase changes; the answer clock starts here ---- */
       case "state": {
         if (!byId || !canDrive(ws)) return;
+        byId.spent = byId.spent || {};
+        byId.carry = byId.carry || {};
+        /* Inject yang ditinggalkan dalam keadaan masih dibuka: waktunya dicatat,
+           dan kalau ruangan benar benar berpindah sementara masih ada unit yang
+           berutang jawaban, jendelanya dibiarkan hidup dengan jam aslinya.
+           Berhenti di inject yang sama untuk membuka kunci bukan perpindahan,
+           jadi itu menutup jendelanya seperti biasa. */
+        const leaving = byId.deck.injects[byId.state.activeIdx];
+        if (leaving && byId.state.phase === "open") {
+          byId.spent[leaving.id] = usedOf(byId, leaving.id, byId.state.openedAt);
+          const switching = m.activeIdx !== byId.state.activeIdx;
+          const owed = owedBy(byId, leaving);
+          if (switching && owed.length && leftOf(byId, leaving.id) > 1500
+              && !(byId.keys || {})[leaving.id]) {
+            byId.carry[leaving.id] = byId.state.openedAt;
+          }
+        }
+        /* Membuka sebuah inject lewat jalur biasa berarti memberi jendela penuh
+           lagi, bukan menyambung. Yang menyambung sisa waktu hanya susulan. */
         const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
         const inj0 = byId.deck.injects[m.activeIdx];
         if (m.phase === "open" && inj0) {
+          delete byId.spent[inj0.id];
+          delete byId.carry[inj0.id];
           byId.ran = byId.ran || {};
           if (!byId.ran[inj0.id]) {
             byId.ran[inj0.id] = true;
@@ -698,7 +793,7 @@ wss.on("connection", (ws) => {
           keyShown: false,
           limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit,
           elimit: inj0 ? essayLimitFor(byId, inj0.id) : byId.settings.essayLimit };
-        toRoom(byId.id, { t: "state", ...byId.state, ran: Object.keys(byId.ran || {}) });
+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
         markDirty(byId.id);
         markSnapshot();
@@ -710,16 +805,32 @@ wss.on("connection", (ws) => {
         if (!room) return;
         const p = room.people[m.pid];
         if (!p) return;
-        if (room.state.phase !== "open") return send(ws, { t: "locked" });
 
-        const inj = room.deck.injects[room.state.activeIdx];
-        const elapsed = room.state.openedAt ? Date.now() - room.state.openedAt : 0;
+        /* Jawaban membawa nomor injectnya sendiri, jadi unit yang tertinggal
+           tetap bisa mengirim inject lama setelah ruangan pindah. Tanpa nomor
+           itu, yang dimaksud adalah inject yang sedang berjalan, seperti dulu. */
+        const act = room.deck.injects[room.state.activeIdx];
+        const want = m.injectId == null ? act?.id : String(m.injectId);
+        const onActive = act != null && String(act.id) === String(want);
+        const carriedAt = sweepCarry(room)[want];
+        if (onActive ? room.state.phase !== "open" : carriedAt == null) {
+          return send(ws, { t: "locked" });
+        }
+
+        const inj = onActive ? act : injById(room, want);
+        const openedAt = onActive ? room.state.openedAt : carriedAt;
+        const elapsed = openedAt ? Date.now() - openedAt : 0;
+        /* Jendela bawaan dan susulan hanya menerima jawaban pertama. Tanpa batas
+           ini, unit yang sudah selesai bisa memperbaiki jawabannya dengan apa
+           yang sudah terdengar di ruangan sejak inject itu ditinggalkan. */
+        const firstOnly = !onActive || !!room.state.catchup;
         /* Each question closes on its own clock, so an essay can still be
            arriving after the tiles have locked. */
         let applied = 0, expired = 0;
         for (const [qid, val] of Object.entries(m.answers || {})) {
           const q = inj?.questions.find((x) => x.qid === qid);
           if (!q || q.peran !== p.peran) continue;
+          if (firstOnly && p.answers[qid]) continue;
           const limit = limitForQ(room, inj?.id, q);
           if (limit && elapsed > limit * 1000 + 800) { expired += 1; continue; }
           applied += 1;
@@ -753,6 +864,12 @@ wss.on("connection", (ws) => {
         }
         retally(room, p);
         send(ws, { t: "ack", me: p });
+        /* Jawaban yang masuk lewat jendela bawaan bisa menutup jendela itu, dan
+           panel susulan fasilitator membaca daftar ini. */
+        if (!onActive) {
+          toRoom(room.id, { t: "carry", carry: sweepCarry(room), spent: room.spent || {},
+            keyed: Object.keys(room.keys || {}) });
+        }
         markDirty(room.id);
         markSnapshot();
         break;
@@ -761,8 +878,11 @@ wss.on("connection", (ws) => {
       case "showkey": {
         if (!byId || !canDrive(ws)) return;
         byId.state = { ...byId.state, keyShown: true };
-        toRoom(byId.id, { t: "state", ...byId.state, ran: Object.keys(byId.ran || {}) });
+        /* Kunci yang sudah terdengar menutup jendela bawaan inject itu: tidak ada
+           susulan setelah jawabannya dibacakan. sendKey yang mencatat kuncinya,
+           jadi sweepCarry di bawahnya sudah melihat catatan itu. */
         sendKey(byId);
+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
         markSnapshot();
         break;
       }
@@ -779,6 +899,40 @@ wss.on("connection", (ws) => {
         const known = id != null && byId.deck.injects.some((i) => String(i.id) === id);
         byId.recap = known ? id : null;
         toRoom(byId.id, { t: "recap", injectId: byId.recap });
+        break;
+      }
+
+      /* ---- fasilitator membuka susulan untuk inject yang ditinggalkan ----
+
+         Seluruh ruangan kembali ke inject itu dengan sisa waktunya, dan unit yang
+         sudah menjawab terkunci lewat `catchup`: jawabannya tidak bisa diubah
+         lagi. Kalau kuncinya sudah pernah dibuka, susulan ditolak, karena
+         jawaban yang benar sudah terdengar di ruangan. */
+      case "catchup": {
+        if (!byId || !canDrive(ws)) return;
+        const id = String(m.injectId);
+        const idx = byId.deck.injects.findIndex((i) => String(i.id) === id);
+        const inj = byId.deck.injects[idx];
+        if (!inj) return;
+        if ((byId.keys || {})[id]) return send(ws, { t: "nocatchup", injectId: id, why: "key" });
+        if (leftOf(byId, id) <= 1500) return send(ws, { t: "nocatchup", injectId: id, why: "time" });
+        if (!owedBy(byId, inj).length) return send(ws, { t: "nocatchup", injectId: id, why: "done" });
+
+        byId.spent = byId.spent || {};
+        byId.carry = byId.carry || {};
+        delete byId.carry[id];
+        byId.ran = byId.ran || {};
+        byId.ran[id] = true;
+        /* Jam dimundurkan sebanyak waktu yang sudah terpakai, jadi hitungan di
+           semua perangkat langsung menunjukkan sisanya dan penilaian memakai
+           total waktu berpikir, bukan hanya bagian terakhirnya. */
+        byId.state = { activeIdx: idx, phase: "open", keyShown: false, catchup: true,
+          openedAt: Date.now() - (byId.spent[id] || 0),
+          limit: limitFor(byId, inj.id), elimit: essayLimitFor(byId, inj.id) };
+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
+        armReveal(byId);
+        markDirty(byId.id);
+        markSnapshot();
         break;
       }
 
