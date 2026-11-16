@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b41";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b42";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -917,7 +917,9 @@ function Host({ onExit }) {
   const [notes, setNotes] = useState({});
   const [revealKey, setRevealKey] = useState({});
   const [roomOpen, setRoomOpen] = useState(false);
-  const [confirmNext, setConfirmNext] = useState(false);
+  /* Satu pertanyaan untuk semua jalan keluar dari fase menjawab: pindah inject,
+     menutup waktu menjawab, atau melompat lewat daftar di kiri. */
+  const [ask, setAsk] = useState(null);
   const echo = useRef("");
   const [booted, setBooted] = useState(false);
   const [keyRequired, setKeyRequired] = useState(false);
@@ -1173,6 +1175,46 @@ function Host({ onExit }) {
     return tf("Unit {0}", i < 0 ? "?" : String.fromCharCode(65 + i));
   };
   const seatOf = (peran) => people.find((p) => p.peran === peran);
+
+  /* ---- siapa yang masih berutang jawaban ----------------------------------
+
+     Dihitung dengan urutan yang sama seperti server, dan hanya untuk unit yang
+     kursinya memang terisi, supaya peringatan di sini tidak menyebut unit yang
+     belum pernah masuk sementara server menganggapnya tidak berutang.
+
+     Letaknya sengaja di atas tombol dan pintasan papan ketik, karena keduanya
+     membacanya sebelum menutup jendela menjawab. */
+  const owedOn = (inj) => (!inj ? [] : people
+    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
+    .map((p) => p.peran));
+  /* Sisa detik sebuah inject yang sudah ditinggalkan. null berarti jendelanya
+     tidak pernah menutup sendiri. */
+  const leftSec = (inj) => {
+    const lim = longestOf(inj) * 1000;
+    if (!lim) return null;
+    return Math.max(0, Math.round((lim - (Number(spent[inj?.id]) || 0)) / 1000));
+  };
+  /* Sisa detik inject yang sedang berjalan, dihitung dari jamnya sendiri karena
+     waktu terpakai baru dicatat saat inject itu ditinggalkan. */
+  const leftNowSec = () => {
+    const lim = longestOf(inject) * 1000;
+    if (!lim) return null;
+    const run = Math.max(0, serverNow() - (openedAt || serverNow()));
+    return Math.max(0, Math.round((lim - run) / 1000));
+  };
+  const owedNow = phase === "open" ? owedOn(inject) : [];
+  /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
+     dibaca lewat ref, bukan lewat tangkapan render. */
+  const owedRef = useRef([]);
+  owedRef.current = owedNow;
+  /* Inject yang masih bisa disusulkan: ada unit yang berutang, kuncinya belum
+     dibuka, dan waktunya belum habis. Yang sedang berjalan tidak ikut. */
+  const susulList = (model?.injects || [])
+    .map((inj, idx) => ({ inj, idx, owed: owedOn(inj), left: leftSec(inj) }))
+    .filter((x) => x.idx !== activeIdx && x.owed.length > 0
+      && !keyed.includes(String(x.inj.id))
+      && (Number(spent[x.inj.id]) || 0) > 0 && (x.left === null || x.left > 1));
+
   const openProjector = useCallback(() => {
     if (roomId) window.open(`/screen#${roomId}`, "_blank", "noopener");
   }, [roomId]);
@@ -1180,21 +1222,32 @@ function Host({ onExit }) {
   /* ---- keyboard: the room is watching, don't hunt for buttons ---- */
   const goNext = useCallback(() => {
     if (!model) return;
-    setConfirmNext(false); echo.current = "";
+    setAsk(null); echo.current = "";
     setActiveIdx((i) => Math.min(model.injects.length - 1, i + 1));
     setPhase("briefing");
   }, [model]);
   const goPrev = useCallback(() => {
-    setConfirmNext(false); echo.current = "";
+    setAsk(null); echo.current = "";
     setActiveIdx((i) => Math.max(0, i - 1));
     setPhase("briefing");
   }, []);
+  const doReveal = () => { echo.current = ""; setPhase("revealed"); };
+  const doJump = (i) => { echo.current = ""; setAsk(null); setActiveIdx(i); setPhase("briefing"); };
+  /* Satu pintu. Semua jalan yang menutup jendela menjawab atau berpindah inject
+     lewat sini, jadi peringatannya tidak bisa terlewat hanya karena fasilitator
+     memakai papan ketik atau daftar inject di kiri, bukan tombolnya. */
+  const guard = (what, run) => {
+    if (phase === "open" && owedRef.current.length > 0) setAsk(what);
+    else run();
+  };
   const advance = useCallback(() => {
     echo.current = "";
     if (phase === "lobby") setPhase("briefing");
     else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
-    else if (phase === "open") setPhase("revealed");
-    else goNext();
+    else if (phase === "open") {
+      if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
+      else setPhase("revealed");
+    } else goNext();
   }, [phase, goNext]);
 
   useEffect(() => {
@@ -1204,11 +1257,18 @@ function Host({ onExit }) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = String(e.key).toLowerCase();
       if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
-      else if (k === "r" && phase === "open" && canDrive) { echo.current = ""; setPhase("revealed"); }
+      else if (k === "r" && phase === "open" && canDrive) {
+        if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
+        else { echo.current = ""; setPhase("revealed"); }
+      }
       else if (k === "k" && phase === "revealed" && !keyShown && canDrive) send({ t: "showkey", roomId });
       else if (k === "c") setRoomOpen((v) => !v);
       else if (k === "p") openProjector();
-      else if (e.key === "ArrowRight") { if (canDrive) goNext(); }
+      else if (e.key === "ArrowRight") {
+        if (!canDrive) return;
+        if (phase === "open" && owedRef.current.length > 0) setAsk({ kind: "next" });
+        else goNext();
+      }
       else if (e.key === "ArrowLeft") { if (canDrive) goPrev(); }
       else if (e.key === "Escape") setRoomOpen(false);
     };
@@ -1448,51 +1508,6 @@ function Host({ onExit }) {
      Dihitung dengan urutan yang sama seperti server, dan hanya untuk unit yang
      kursinya memang terisi, supaya peringatan di sini tidak menyebut unit yang
      belum pernah masuk sementara server menganggapnya tidak berutang. */
-  const owedOn = (inj) => (!inj ? [] : people
-    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
-    .map((p) => p.peran));
-  const winOf = (injId) => {
-    const v = times?.[injId];
-    return v === "" || v == null ? Number(settings?.timeLimit ?? 0) : Number(v);
-  };
-  const ewinOf = (injId) => {
-    const v = etimes?.[injId];
-    const base = v !== "" && v != null ? Number(v)
-      : settings?.essayLimit === "" || settings?.essayLimit == null
-        ? winOf(injId) : Number(settings.essayLimit);
-    return base ? base + (Number(settings?.essayGrace) || 0) : base;
-  };
-  const longOf = (inj) => {
-    const a = winOf(inj.id);
-    if (!(inj.questions || []).some((q) => q.type === "open")) return a;
-    const b = ewinOf(inj.id);
-    if (!a || !b) return 0;
-    return Math.max(a, b);
-  };
-  /* Sisa detik inject ini. null berarti jendelanya tidak menutup sendiri. */
-  const leftSec = (inj) => {
-    const lim = longOf(inj) * 1000;
-    if (!lim) return null;
-    return Math.max(0, Math.round((lim - (Number(spent[inj.id]) || 0)) / 1000));
-  };
-  /* Sisa detik inject yang sedang berjalan, dihitung dari jamnya sendiri karena
-     waktu terpakai baru dicatat saat inject itu ditinggalkan. Angkanya tidak
-     berdetak, dan tidak perlu: ia hanya dibaca sekali saat peringatan muncul. */
-  const leftNowSec = () => {
-    const lim = longOf(inject) * 1000;
-    if (!lim) return null;
-    const run = Math.max(0, serverNow() - (openedAt || serverNow()));
-    return Math.max(0, Math.round((lim - run) / 1000));
-  };
-  const owedNow = phase === "open" ? owedOn(inject) : [];
-  /* Inject yang masih bisa disusulkan: ada unit yang berutang, kuncinya belum
-     dibuka, dan waktunya belum habis. Yang sedang berjalan tidak ikut. */
-  const susulList = (model?.injects || [])
-    .map((inj, idx) => ({ inj, idx, owed: owedOn(inj), left: leftSec(inj) }))
-    .filter((x) => x.idx !== activeIdx && x.owed.length > 0
-      && !keyed.includes(String(x.inj.id))
-      && (Number(spent[x.inj.id]) || 0) > 0 && (x.left === null || x.left > 1));
-
   const seatsHere = inject.roles.map(seatOf).filter(Boolean);
   const allIn = seatsHere.length === inject.roles.length && seatsHere.length > 0 &&
     inject.questions.every((q) => seatOf(q.peran)?.answers?.[q.qid]);
@@ -1504,6 +1519,10 @@ function Host({ onExit }) {
           <span className="crumb">{inject.siklus}</span>
           <b className="injno">{tf("Inject {0}", inject.id)}</b>
           <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
+            /* Menutup waktu menjawab dari sini pun harus lewat pintu yang sama. */
+            if (k !== "open" && phase === "open" && owedRef.current.length > 0) {
+              return setAsk({ kind: "phase", to: k });
+            }
             echo.current = "";
             if (k === "open" && phase !== "open") setOpenedAt(serverNow());
             setPhase(k);
@@ -1551,7 +1570,7 @@ function Host({ onExit }) {
           onAsk={(id) => { setSusulErr(""); setSusulAsk(id); }}
           onCancel={() => setSusulAsk(null)}
           onRun={(id) => {
-            setSusulAsk(null); setSusulOpen(false); setConfirmNext(false);
+            setSusulAsk(null); setSusulOpen(false); setAsk(null);
             echo.current = "";
             send({ t: "catchup", roomId, injectId: id });
           }}
@@ -1578,7 +1597,7 @@ function Host({ onExit }) {
                   {head && <li className="tlhead">{inj.siklus}</li>}
                   <li className={`tlrow ${state}`}>
                     <button disabled={!canDrive}
-                      onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
+                      onClick={() => guard({ kind: "jump", idx: i }, () => doJump(i))}>
                       <span className="tldot" aria-hidden="true" />
                       <span className="tlno">{inj.id}</span>
                       <span className="tltext">{words}{words ? "…" : "·"}</span>
@@ -1772,6 +1791,16 @@ function Host({ onExit }) {
                 </div>
               )}
 
+              {/* Siapa yang belum mengirim, terbaca terus menerus. Fasilitator perlu
+                  tahu ini untuk memutuskan kapan lanjut, tanpa membuka panel. */}
+              {canDrive && phase === "open" && (
+                <p className={`owednow ${owedNow.length ? "wait" : "done"}`}>
+                  {owedNow.length === 0
+                    ? t("Semua unit sudah mengirim jawaban.")
+                    : tf("Belum menjawab: {0}", owedNow.map(unitOf).join(", "))}
+                </p>
+              )}
+
               <div className="nav">
                 <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>{t("Sebelumnya")}</button>
                 {!canDrive ? (
@@ -1780,26 +1809,41 @@ function Host({ onExit }) {
                       ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
                       : "Anda memantau. Perpindahan inject dipegang fasilitator utama.")}
                   </span>
-                ) : activeIdx < model.injects.length - 1 ? (
-                  confirmNext ? (
-                    <span className="confirm">
-                      <span className="msg">{tf("Pindahkan semua ke inject {0}?", model.injects[activeIdx + 1].id)}</span>
-                      {owedNow.length > 0 && (
-                        <span className="owedwarn">
-                          <b>{tf("Belum selesai di inject ini: {0}.",
-                            owedNow.map(unitOf).join(", "))}</b>{" "}
-                          {leftNowSec() === null
+                ) : ask ? (
+                  <span className="confirm">
+                    <span className="msg">
+                      {ask.kind === "reveal" || ask.kind === "phase"
+                        ? t("Tutup waktu menjawab sekarang?")
+                        : tf("Pindahkan semua ke inject {0}?",
+                          model.injects[ask.kind === "jump" ? ask.idx : activeIdx + 1]?.id)}
+                    </span>
+                    {owedNow.length > 0 && (
+                      <span className="owedwarn">
+                        <b>{tf("Belum selesai di inject ini: {0}.",
+                          owedNow.map(unitOf).join(", "))}</b>{" "}
+                        {ask.kind === "reveal" || ask.kind === "phase"
+                          ? t("Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.")
+                          : leftNowSec() === null
                             ? t("Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.")
                             : tf("Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.", fmt(leftNowSec()))}{" "}
-                          {t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
-                        </span>
-                      )}
-                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>{t("Batal")}</button>
-                      <button className="btn" onClick={goNext}>{t("Ya, lanjut")}</button>
-                    </span>
-                  ) : (
-                    <button className="btn" onClick={() => setConfirmNext(true)}>{t("Inject berikutnya")}</button>
-                  )
+                        {ask.kind === "reveal" || ask.kind === "phase" ? "" :
+                          t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
+                      </span>
+                    )}
+                    <button className="btn quiet" onClick={() => setAsk(null)}>{t("Batal")}</button>
+                    <button className="btn" onClick={() => {
+                      const a = ask; setAsk(null);
+                      if (!a) return;
+                      if (a.kind === "jump") doJump(a.idx);
+                      else if (a.kind === "next") goNext();
+                      else if (a.kind === "phase") { echo.current = ""; setPhase(a.to); }
+                      else doReveal();
+                    }}>
+                      {t(ask.kind === "reveal" || ask.kind === "phase" ? "Ya, tutup" : "Ya, lanjut")}
+                    </button>
+                  </span>
+                ) : activeIdx < model.injects.length - 1 ? (
+                  <button className="btn" onClick={() => setAsk({ kind: "next" })}>{t("Inject berikutnya")}</button>
                 ) : (
                   <button className="btn" onClick={() => setScreen("report")}>{t("Selesai")}</button>
                 )}
@@ -4142,6 +4186,9 @@ html,body{background:var(--ink)}
   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
 
 /* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+.owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
+.owednow.wait{color:var(--warn)}
+.owednow.done{color:var(--faint)}
 .owedwarn{flex:1 1 100%;order:-1;font-size:12.5px;line-height:1.55;color:var(--warn);
   background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
   border-radius:12px;padding:10px 12px}
@@ -4467,6 +4514,11 @@ html,body{background:var(--ink)}
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
   /* ---- susulan ---- */
+  "Semua unit sudah mengirim jawaban.": "Every unit has sent an answer.",
+  "Belum menjawab: {0}": "Not yet answered: {0}",
+  "Tutup waktu menjawab sekarang?": "Close the answer window now?",
+  "Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.": "Closing the answer window stops them too. Their remaining time is kept and this inject can still be completed through Catch-up, but they cannot keep working while the room discusses this inject, because the discussion would be overheard.",
+  "Ya, tutup": "Yes, close it",
   "Inject yang ditinggalkan dan masih bisa diselesaikan": "Injects left unfinished that can still be completed",
   "Susulan": "Catch-up",
   "Belum selesai di inject ini: {0}.": "Not finished on this inject: {0}.",
