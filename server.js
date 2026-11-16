@@ -21,6 +21,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
 const SNAPSHOT = process.env.SNAPSHOT_PATH || join(__dirname, "rooms.json");
 const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
+/* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
+   Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
+   melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
+const SBUILD = "b43";
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
 
 /* Optional facilitator passcode. Unset means anyone reaching /host can run an
@@ -500,7 +504,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
           ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
-          carry: {}, spent: {}, keyed: [] });
+          carry: {}, spent: {}, keyed: [], sbuild: SBUILD });
         pushHosts(room);
         markSnapshot();
         break;
@@ -518,7 +522,7 @@ wss.on("connection", (ws) => {
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
           hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
-          keyed: Object.keys(byId.keys || {}) });
+          keyed: Object.keys(byId.keys || {}), sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(byId) });
         pushHosts(byId);
         break;
@@ -570,7 +574,8 @@ wss.on("connection", (ws) => {
           deck: room.deck, codes: room.codes, settings: room.settings,
           times: room.times || {}, etimes: room.etimes || {}, state: room.state,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
-          recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {} });
+          recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {},
+          sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(room) });
         if (room.state.keyShown) sendKey(room);
         pushHosts(room);
@@ -705,7 +710,8 @@ wss.on("connection", (ws) => {
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
           state: byId.state, codes: byId.codes,
           ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
-          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {} });
+          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+          sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;

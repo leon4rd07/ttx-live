@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b42";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b43";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -835,7 +835,7 @@ const Crest = ({ peran, idx, size }) => (
   }}>{monogram(peran)}</span>
 );
 
-function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
+function Bar({ left, right, onExit, exitLabel, conn, theme = true, srv }) {
   return (
     <header className="bar striped">
       <div className="brand"><BrandLogo />{left}</div>
@@ -846,7 +846,12 @@ function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
             antarmukanya sendiri bisa diganti ke Inggris walau soalnya tidak. */}
         <LangToggle />
         {theme && <ThemeToggle />}
-        <span className="build">{BUILD}</span>
+        {/* Kalau versi server berbeda dari versi tampilan, itu disebut di sini.
+            Separuh fitur susulan ada di server, jadi perbedaan ini harus terlihat. */}
+        <span className={`build ${srv && srv !== BUILD ? "mismatch" : ""}`}
+          title={srv && srv !== BUILD ? t("Versi server berbeda dari versi tampilan") : ""}>
+          {BUILD}{srv && srv !== BUILD ? tf(" · server {0}", srv) : ""}
+        </span>
         {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel || t("Keluar")}</button>}
       </div>
     </header>
@@ -950,6 +955,8 @@ function Host({ onExit }) {
   const [spent, setSpent] = useState({});
   const [catchup, setCatchup] = useState(false);
   const [keyed, setKeyed] = useState([]);          // inject yang kuncinya sudah dibacakan
+  /* Versi server. "lama" berarti server belum mengirimkannya sama sekali. */
+  const [sbuild, setSbuild] = useState("");
   const [susulOpen, setSusulOpen] = useState(false);
   const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
   const [susulErr, setSusulErr] = useState("");
@@ -977,6 +984,7 @@ function Host({ onExit }) {
       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
       setKeyShown(!!m.state.keyShown); setCatchup(!!m.state.catchup);
       setCarry(m.carry || {}); setSpent(m.spent || {}); setKeyed(m.keyed || []);
+      setSbuild(m.sbuild || "lama");
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "cohosted") {
       /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
@@ -992,6 +1000,7 @@ function Host({ onExit }) {
       setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
       setCatchup(!!m.state.catchup); setCarry(m.carry || {}); setSpent(m.spent || {});
       setKeyed(m.keyed || Object.keys(m.keys || {}));
+      setSbuild(m.sbuild || "lama");
       setJoinErr(""); setScreen("run");
     } else if (m.t === "recap") setRecapId(m.injectId ?? null);
     else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
@@ -1514,7 +1523,7 @@ function Host({ onExit }) {
 
   return (
     <>
-      <Bar conn={status} onExit={onExit}
+      <Bar conn={status} onExit={onExit} srv={roomId ? sbuild : ""}
         left={<>
           <span className="crumb">{inject.siklus}</span>
           <b className="injno">{tf("Inject {0}", inject.id)}</b>
@@ -1905,7 +1914,7 @@ function SusulPanel({ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr,
 
         {susulList.length === 0 && (
           <p className="hint empty">
-            {t("Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, dan kuncinya belum dibacakan. Setelah kunci dibacakan, susulan tidak bisa lagi dijalankan untuk inject itu.")}
+            {t("Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, jendelanya masih menyisakan waktu, dan kuncinya belum dibacakan. Jendela yang sudah habis terpakai tidak muncul di sini, karena tidak ada sisa waktu untuk disusulkan.")}
           </p>
         )}
 
@@ -4186,6 +4195,7 @@ html,body{background:var(--ink)}
   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
 
 /* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+.build.mismatch{color:var(--warn);font-weight:700}
 .owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
 .owednow.wait{color:var(--warn)}
 .owednow.done{color:var(--faint)}
@@ -4514,6 +4524,9 @@ html,body{background:var(--ink)}
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
   /* ---- susulan ---- */
+  " · server {0}": " · server {0}",
+  "Versi server berbeda dari versi tampilan": "The server version differs from the interface version",
+  "Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, jendelanya masih menyisakan waktu, dan kuncinya belum dibacakan. Jendela yang sudah habis terpakai tidak muncul di sini, karena tidak ada sisa waktu untuk disusulkan.": "Nothing is waiting. An inject enters this list if its answer window was opened, then left behind while some unit had not sent an answer, its window still has time left, and its key has not been read out. A window that has been fully used up does not appear here, because there is no remaining time to catch up with.",
   "Semua unit sudah mengirim jawaban.": "Every unit has sent an answer.",
   "Belum menjawab: {0}": "Not yet answered: {0}",
   "Tutup waktu menjawab sekarang?": "Close the answer window now?",
@@ -4527,7 +4540,6 @@ const EN = {
   "Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.": "This inject can also be reopened through Catch-up, as long as its key has not been read out.",
   "Unit tidak selesai pada waktu yang sama. Kalau sebagian unit sudah mengirim jawabannya, Anda boleh lanjut ke inject berikutnya tanpa menunggu yang lain, lalu kembali ke sini untuk menyelesaikan inject yang tertinggal. Sisa waktu unit itu disimpan, jadi mereka tidak mendapat waktu baru dan nilainya tetap sebanding dengan unit yang mengerjakan tepat waktu.": "Units do not finish at the same moment. Once some units have sent their answers, you may move to the next inject without waiting for the rest, then come back here to finish the inject that was left behind. That unit's remaining time is preserved, so they get no fresh clock and their score stays comparable with the units that answered on time.",
   "Inject {0} sedang berjalan sebagai susulan.": "Inject {0} is running as a catch-up.",
-  "Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, dan kuncinya belum dibacakan. Setelah kunci dibacakan, susulan tidak bisa lagi dijalankan untuk inject itu.": "Nothing is waiting. An inject enters this list if its answer window was opened, then left behind while some unit had not sent an answer, and its key has not been read out. Once the key has been read out, catch-up can no longer be run for that inject.",
   "tanpa batas waktu": "no time limit",
   "sisa {0}": "{0} left",
   "Susulan dijalankan fasilitator utama.": "Catch-up is run by the lead facilitator.",
