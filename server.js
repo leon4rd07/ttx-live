@@ -24,7 +24,7 @@ const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
 /* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
    Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
    melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
-const SBUILD = "b43";
+const SBUILD = "b44";
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
 
 /* Optional facilitator passcode. Unset means anyone reaching /host can run an
@@ -58,40 +58,70 @@ const DEFAULTS = {
   leaderboard: true,
 };
 
-/* Answer time for an inject: its own override, else the global default. */
-const limitFor = (room, injId) => {
-  const v = room.times?.[injId];
-  return v === "" || v == null ? room.settings.timeLimit : Number(v);
+/* ---- jendela waktu: empat tingkat, dari yang paling khusus ----------------
+
+   Unit tidak selesai pada waktu yang sama, dan kadang perbedaannya memang
+   disengaja: pertanyaan satu unit lebih berat daripada unit lain di inject yang
+   sama. Karena itu jendela waktu dapat disetel per unit, bukan hanya per inject.
+
+   Urutannya: unit pada inject itu, lalu inject itu, lalu default global. Esai
+   punya rangkaian yang sama, dengan satu tingkat tambahan di belakang: kalau
+   tidak ada yang menyebut jendela esai, ia mengikuti jendela biasa.
+
+   Akibat sampingannya baik untuk penilaian. Bonus kecepatan dihitung terhadap
+   jendela milik unit itu sendiri, jadi unit yang memang diberi waktu lebih
+   panjang tidak otomatis kalah oleh unit yang pertanyaannya ringan. */
+
+const uKey = (injId, peran) => `${injId}::${peran}`;
+const pick = (v) => (v === "" || v == null ? null : Number(v));
+
+/* Jendela menjawab untuk satu unit pada satu inject. */
+const limitFor = (room, injId, peran) => {
+  const u = peran == null ? null : pick(room.utimes?.[uKey(injId, peran)]);
+  if (u != null) return u;
+  const i = pick(room.times?.[injId]);
+  if (i != null) return i;
+  return room.settings.timeLimit;
 };
 
-/* An essay takes longer to write than a tile takes to tap, so essays carry a
-   window of their own: the inject's essay override, else the global essay
-   default, else the ordinary window. */
-const essayBaseFor = (room, injId) => {
-  const v = room.etimes?.[injId];
-  if (v !== "" && v != null) return Number(v);
+/* Esai butuh waktu menulis, bukan hanya waktu memutuskan, jadi ia punya
+   rangkaiannya sendiri sebelum jatuh ke jendela biasa. */
+const essayBaseFor = (room, injId, peran) => {
+  const u = peran == null ? null : pick(room.uetimes?.[uKey(injId, peran)]);
+  if (u != null) return u;
+  const i = pick(room.etimes?.[injId]);
+  if (i != null) return i;
   const g = room.settings?.essayLimit;
-  return g === "" || g == null ? limitFor(room, injId) : Number(g);
+  return g === "" || g == null ? limitFor(room, injId, peran) : Number(g);
 };
 /* Mengetik dan menekan kirim butuh waktu yang bukan kelambatan berpikir, jadi
    kelonggaran ini ditambahkan ke jendela esai dan dipotong dari waktu yang
    dinilai. Esai yang masuk dalam kelonggaran dihitung secepat mungkin. */
 const graceOf = (room) => Math.max(0, Number(room.settings?.essayGrace) || 0);
-const essayLimitFor = (room, injId) => {
-  const base = essayBaseFor(room, injId);
+const essayLimitFor = (room, injId, peran) => {
+  const base = essayBaseFor(room, injId, peran);
   return base ? base + graceOf(room) : base;
 };
-const limitForQ = (room, injId, q) =>
-  (q?.type === "open" ? essayLimitFor(room, injId) : limitFor(room, injId));
+const limitForQ = (room, injId, q) => (q?.type === "open"
+  ? essayLimitFor(room, injId, q?.peran)
+  : limitFor(room, injId, q?.peran));
 
 /* The inject is done when its slowest question is done. Zero anywhere means
-   somebody has no limit at all, so nothing closes on its own. */
+   somebody has no limit at all, so nothing closes on its own.
+
+   Dengan jendela per unit, "paling lambat" harus dihitung dari tiap pertanyaan,
+   bukan dari satu angka milik inject, karena unit yang berbeda bisa punya jam
+   yang berbeda di inject yang sama. */
 function longestLimit(room, inj) {
-  const a = limitFor(room, inj?.id);
-  if (!(inj?.questions || []).some((q) => q.type === "open")) return a;
-  const b = essayLimitFor(room, inj?.id);
-  if (!a || !b) return 0;
-  return Math.max(a, b);
+  const qs = inj?.questions || [];
+  if (!qs.length) return limitFor(room, inj?.id, null);
+  let max = 0;
+  for (const q of qs) {
+    const v = limitForQ(room, inj.id, q);
+    if (!v) return 0;                    // satu saja tanpa batas, inject tak menutup sendiri
+    if (v > max) max = v;
+  }
+  return max;
 }
 
 /* ---- jendela yang dibawa, dan susulan ------------------------------------
@@ -196,6 +226,8 @@ function restore() {
       r.recap = r.recap || null;
       r.spent = r.spent || {};
       r.carry = r.carry || {};
+      r.utimes = r.utimes || {};
+      r.uetimes = r.uetimes || {};
       rooms.set(r.id, r);
       for (const [code, peran] of Object.entries(r.codes || {})) {
         codeIndex.set(code, { roomId: r.id, peran });
@@ -298,7 +330,9 @@ function deckFor(room, peran) {
     injects: room.deck.injects.map((i) => ({
       id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
       window: i.window,
-      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
+      /* Jendela unit ini sendiri, bukan jendela inject, karena unit lain pada
+         inject yang sama bisa punya jam yang berbeda. */
+      limit: limitFor(room, i.id, peran), elimit: essayLimitFor(room, i.id, peran),
       questions: i.questions
         .filter((q) => q.peran === peran)
         .map((q) => ({
@@ -319,7 +353,9 @@ function screenDeck(room) {
     injects: room.deck.injects.map((i) => ({
       id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
       roles: i.roles,
-      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
+      /* Proyektor menampilkan semua unit sekaligus, jadi yang berarti baginya
+         adalah jendela yang paling lambat menutup. */
+      limit: longestLimit(room, i), elimit: essayLimitFor(room, i.id, null),
       questions: i.questions.map((q) => ({
         qid: q.qid, peran: q.peran, text: q.text, alt: q.alt || "", type: q.type,
         weighted: !!q.weighted,
@@ -496,6 +532,7 @@ wss.on("connection", (ws) => {
           times: m.times || {}, etimes: m.etimes || {},
           hostCodes: {}, ownerKey: newCode() + newCode(),
           ran: {}, keys: {}, recap: null, spent: {}, carry: {},
+          utimes: m.utimes || {}, uetimes: m.uetimes || {},
           state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
           touched: Date.now() };
         rooms.set(id, room);
@@ -504,7 +541,8 @@ wss.on("connection", (ws) => {
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
           ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
-          carry: {}, spent: {}, keyed: [], sbuild: SBUILD });
+          carry: {}, spent: {}, keyed: [], sbuild: SBUILD,
+          utimes: room.utimes || {}, uetimes: room.uetimes || {} });
         pushHosts(room);
         markSnapshot();
         break;
@@ -519,6 +557,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: byId.id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
+          utimes: byId.utimes || {}, uetimes: byId.uetimes || {},
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
           hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
@@ -572,7 +611,8 @@ wss.on("connection", (ws) => {
           hostCode: code, hostName: (m.name || entry.label || "").trim() });
         send(ws, { t: "cohosted", roomId: room.id, role: entry.role, code,
           deck: room.deck, codes: room.codes, settings: room.settings,
-          times: room.times || {}, etimes: room.etimes || {}, state: room.state,
+          times: room.times || {}, etimes: room.etimes || {},
+          utimes: room.utimes || {}, uetimes: room.uetimes || {}, state: room.state,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
           recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {},
           sbuild: SBUILD });
@@ -587,6 +627,8 @@ wss.on("connection", (ws) => {
         if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
         if (m.times) byId.times = { ...byId.times, ...m.times };
         if (m.etimes) byId.etimes = { ...byId.etimes, ...m.etimes };
+        if (m.utimes) byId.utimes = { ...byId.utimes, ...m.utimes };
+        if (m.uetimes) byId.uetimes = { ...byId.uetimes, ...m.uetimes };
         /* points-per-question or the mode may have moved — ceilings shift and every
            grade already given has to be recomputed against the new numbers, then
            pushed, or the host and the phones keep showing the old arithmetic */
@@ -598,14 +640,15 @@ wss.on("connection", (ws) => {
           if (pp) send(sk, { t: "ack", me: pp });
         }
         toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times,
-          etimes: byId.etimes || {} });
+          etimes: byId.etimes || {}, utimes: byId.utimes || {},
+          uetimes: byId.uetimes || {} });
         /* The window for the inject on screen may have just moved. Push the new
            limit to every device and re-arm the auto-reveal against it, otherwise
            the phones keep counting to the old number. */
         const cur = byId.deck.injects[byId.state.activeIdx];
         if (cur) {
-          byId.state = { ...byId.state, limit: limitFor(byId, cur.id),
-            elimit: essayLimitFor(byId, cur.id) };
+          byId.state = { ...byId.state, limit: longestLimit(byId, cur),
+            elimit: essayLimitFor(byId, cur.id, null) };
           toRoom(byId.id, { t: "state", ...byId.state });
           if (byId.state.phase === "open") armReveal(byId);
         }
@@ -675,6 +718,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
           deck: deckFor(room, hit.peran), state: room.state,
           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
+          utimes: room.utimes || {}, uetimes: room.uetimes || {},
           me: room.people[pid],
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
           carry: sweepCarry(room), spent: room.spent || {} });
@@ -694,7 +738,8 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: room.id, pid: m.pid });
         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
           deck: deckFor(room, me.peran), state: room.state,
-          settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me,
+          settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
+          utimes: room.utimes || {}, uetimes: room.uetimes || {}, me,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
           carry: sweepCarry(room), spent: room.spent || {} });
         if (room.state.keyShown) sendKey(room);
@@ -708,6 +753,7 @@ wss.on("connection", (ws) => {
         sockets.set(ws, { roomId: byId.id, isScreen: true });
         send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
+          utimes: byId.utimes || {}, uetimes: byId.uetimes || {},
           state: byId.state, codes: byId.codes,
           ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
@@ -797,8 +843,11 @@ wss.on("connection", (ws) => {
         }
         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
           keyShown: false,
-          limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit,
-          elimit: inj0 ? essayLimitFor(byId, inj0.id) : byId.settings.essayLimit };
+          /* Angka ini dipakai proyektor, yang menampilkan semua unit sekaligus,
+             jadi yang berarti baginya adalah jendela yang paling lambat menutup.
+             Tiap peserta menghitung jendelanya sendiri dari decknya. */
+          limit: inj0 ? longestLimit(byId, inj0) : byId.settings.timeLimit,
+          elimit: inj0 ? essayLimitFor(byId, inj0.id, null) : byId.settings.essayLimit };
         toRoom(byId.id, { t: "state", ...stateMsg(byId) });
         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
         markDirty(byId.id);
@@ -934,7 +983,7 @@ wss.on("connection", (ws) => {
            total waktu berpikir, bukan hanya bagian terakhirnya. */
         byId.state = { activeIdx: idx, phase: "open", keyShown: false, catchup: true,
           openedAt: Date.now() - (byId.spent[id] || 0),
-          limit: limitFor(byId, inj.id), elimit: essayLimitFor(byId, inj.id) };
+          limit: longestLimit(byId, inj), elimit: essayLimitFor(byId, inj.id, null) };
         toRoom(byId.id, { t: "state", ...stateMsg(byId) });
         armReveal(byId);
         markDirty(byId.id);

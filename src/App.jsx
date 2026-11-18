@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b43";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b44";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -173,7 +173,7 @@ function useLang() {
 /* Panduan menulis sheet. Tiap baris satu paragraf penuh, jadi terjemahannya
    boleh menyusun ulang kalimatnya sendiri. */
 const HELP_SHEET = [
-  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.",
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, dalam menit. Angka pada baris pertama sebuah inject mengatur waktu inject itu; angka berbeda pada baris unit lain memberi unit tersebut jam sendiri.",
   "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.",
   "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.",
   "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.",
@@ -584,6 +584,11 @@ function buildModel(rows) {
       siklus: get(row, "siklus") || lastSiklus || "(no siklus)",
       window: get(row, "window") || lastWindow,
       ewindow: get(row, "ewindow") || lastEWindow,
+      /* Nilai yang benar benar tertulis di baris ini, tanpa warisan dari baris
+         sebelumnya. Inilah yang membedakan "unit ini punya jam sendiri" dari
+         "baris ini hanya meneruskan jam injectnya". */
+      windowOwn: get(row, "window"),
+      ewindowOwn: get(row, "ewindow"),
       question, answer: get(row, "answer"), roles: splitPeran(peranRaw),
       qtype: TYPE_ALIASES[normKey(get(row, "qtype"))] || "",
     });
@@ -645,6 +650,8 @@ function buildModel(rows) {
       inj.questions.push({
         qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
         peran, text: qq.text, alt: qq.alt, answerRaw: r.answer, type, choices, weighted,
+        /* Dipakai sekali saat deck dimuat, untuk menurunkan jam per unit. */
+        windowOwn: r.windowOwn, ewindowOwn: r.ewindowOwn,
       });
     });
   });
@@ -909,6 +916,10 @@ function Host({ onExit }) {
   });
   const [times, setTimes] = useState({});
   const [etimes, setEtimes] = useState({});     // jendela esai per inject
+  /* Jendela per unit pada satu inject, berkunci "injectId::peran". Hanya berisi
+     unit yang memang sengaja dibedakan dari jam injectnya. */
+  const [utimes, setUtimes] = useState({});
+  const [uetimes, setUetimes] = useState({});
   const [ran, setRan] = useState([]);           // inject yang pernah dibuka
   const [model, setModel] = useState(null);
   const [warnings, setWarnings] = useState([]);
@@ -960,6 +971,7 @@ function Host({ onExit }) {
   const [susulOpen, setSusulOpen] = useState(false);
   const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
   const [susulErr, setSusulErr] = useState("");
+  const [unitTimeOpen, setUnitTimeOpen] = useState(false);
   const fileRef = useRef(null);
 
   /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
@@ -976,6 +988,7 @@ function Host({ onExit }) {
     if (m.t === "hosted") {
       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
       setEtimes(m.etimes || {});
+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
       if (m.ran) setRan(m.ran);
       setRecapId(m.recap ?? null);
       setRole(m.role || "owner");
@@ -993,6 +1006,7 @@ function Host({ onExit }) {
       /* Fasilitator tambahan tidak memuat sheet apa pun: decknya datang dari server. */
       setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
       setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
       setRole(m.role || "viewer"); setOwnerKey("");
       if (m.ran) setRan(m.ran);
       setRecapId(m.recap ?? null);
@@ -1037,6 +1051,8 @@ function Host({ onExit }) {
     else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "settings") {
       setSettings(m.settings);
+      if (m.utimes) setUtimes(m.utimes);
+      if (m.uetimes) setUetimes(m.uetimes);
       if (m.times) setTimes(m.times);
       if (m.etimes) setEtimes(m.etimes);
     }
@@ -1107,6 +1123,23 @@ function Host({ onExit }) {
     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
     setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
     setEtimes(Object.fromEntries(built.injects.map((i) => [i.id, i.ewindow ? String(Math.round(Number(i.ewindow) * 60)) : ""])));
+    /* Jam per unit diturunkan dari kolom Waktu yang ditulis pada baris unit itu
+       sendiri. Baris yang kosong mewarisi jam injectnya dan tidak menghasilkan
+       apa apa di sini, begitu pula baris yang angkanya sama dengan injectnya.
+       Jadi yang tercatat hanya unit yang memang sengaja dibedakan. */
+    const mins = (v) => String(Math.round(Number(v) * 60));
+    const u = {}, ue = {};
+    built.injects.forEach((i) => {
+      (i.questions || []).forEach((q) => {
+        if (q.windowOwn && (!i.window || Number(q.windowOwn) !== Number(i.window))) {
+          u[`${i.id}::${q.peran}`] = mins(q.windowOwn);
+        }
+        if (q.ewindowOwn && (!i.ewindow || Number(q.ewindowOwn) !== Number(i.ewindow))) {
+          ue[`${i.id}::${q.peran}`] = mins(q.ewindowOwn);
+        }
+      });
+    });
+    setUtimes(u); setUetimes(ue);
     setNotes({}); setActiveIdx(0); setPhase("lobby");
     setScreen("config");
   }
@@ -1127,43 +1160,92 @@ function Host({ onExit }) {
     if (keyIn) lsSet(K_KEY, keyIn);
     if (hostName) lsSet(K_NAME, hostName);
     send({ t: "host", deck: model, settings, codes: draftCodes, times, etimes,
-      key: keyIn, hostName });
+      utimes, uetimes, key: keyIn, hostName });
   };
 
   const setInjectTime = (id, v) => {
     setTimes((m) => ({ ...m, [id]: v }));
     if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
   };
+  /* Jam satu unit pada satu inject. Nilai kosong berarti unit itu kembali
+     mengikuti jam injectnya, bukan berarti tanpa batas. */
+  const setUnitTime = (id, peran, v) => {
+    const k = `${id}::${peran}`;
+    setUtimes((m) => ({ ...m, [k]: v }));
+    if (roomId) send({ t: "settings", roomId, utimes: { [k]: v } });
+  };
+  const setUnitETime = (id, peran, v) => {
+    const k = `${id}::${peran}`;
+    setUetimes((m) => ({ ...m, [k]: v }));
+    if (roomId) send({ t: "settings", roomId, uetimes: { [k]: v } });
+  };
   const setInjectETime = (id, v) => {
     setEtimes((m) => ({ ...m, [id]: v }));
     if (roomId) send({ t: "settings", roomId, etimes: { [id]: v } });
   };
-  const limitOf = (id) => {
-    const v = times[id];
-    return v === "" || v == null ? settings.timeLimit : Number(v);
+  const num = (v) => (v === "" || v == null ? null : Number(v));
+  const limitOf = (id, peran) => {
+    const u = peran == null ? null : num(utimes[`${id}::${peran}`]);
+    if (u != null) return u;
+    const i = num(times[id]);
+    return i == null ? settings.timeLimit : i;
   };
   /* Esai memakai jendelanya sendiri: override inject, lalu default esai, lalu
      jendela biasa. Dibaca sama persis seperti di server. */
-  const elimitOf = (id) => {
-    const v = etimes[id];
-    const base = v !== "" && v != null ? Number(v)
+  const elimitOf = (id, peran) => {
+    const u = peran == null ? null : num(uetimes[`${id}::${peran}`]);
+    const i = u != null ? u : num(etimes[id]);
+    const base = i != null ? i
       : settings.essayLimit === "" || settings.essayLimit == null
-        ? limitOf(id) : Number(settings.essayLimit);
+        ? limitOf(id, peran) : Number(settings.essayLimit);
     return base ? base + (Number(settings.essayGrace) || 0) : base;
   };
   const hasEssay = (inj) => (inj?.questions || []).some((q) => q.type === "open");
   /* Inject selesai ketika pertanyaan paling lambat selesai. */
+  /* Dengan jam per unit, "paling lambat" dihitung dari tiap pertanyaan, bukan
+     dari satu angka milik inject. Dibaca sama persis seperti di server. */
   const longestOf = (inj) => {
-    const a = limitOf(inj?.id);
-    if (!hasEssay(inj)) return a;
-    const b = elimitOf(inj?.id);
-    return !a || !b ? 0 : Math.max(a, b);
+    const qs = inj?.questions || [];
+    if (!qs.length) return limitOf(inj?.id, null);
+    let max = 0;
+    for (const q of qs) {
+      const v = q.type === "open" ? elimitOf(inj.id, q.peran) : limitOf(inj.id, q.peran);
+      if (!v) return 0;
+      if (v > max) max = v;
+    }
+    return max;
   };
-  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan. */
+  /* Jendela terpanjang untuk tiap jenis pertanyaan pada satu inject. Dua
+     cincin di layar fasilitator memakainya, supaya cincin tidak habis lebih
+     dulu daripada unit yang memang diberi waktu lebih panjang. */
+  const maxOf = (inj, essay) => {
+    const qs = (inj?.questions || []).filter((q) => (q.type === "open") === !!essay);
+    if (!qs.length) return essay ? elimitOf(inj?.id, null) : limitOf(inj?.id, null);
+    let max = 0;
+    for (const q of qs) {
+      const v = essay ? elimitOf(inj.id, q.peran) : limitOf(inj.id, q.peran);
+      if (!v) return 0;
+      if (v > max) max = v;
+    }
+    return max;
+  };
+
+  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan.
+
+     Jam inject dan setiap jam per unit pada inject itu ikut bertambah, karena
+     yang dimaksud fasilitator saat menekannya adalah "semua dapat tambahan
+     sekian menit", bukan "unit tanpa pengecualian saja". */
   const addTime = (id, secs, essay) => {
-    const cur = essay ? elimitOf(id) : limitOf(id);
-    const next = String(Math.max(0, Math.round(cur + secs)));
-    if (essay) setInjectETime(id, next); else setInjectTime(id, next);
+    const bump = (v) => String(Math.max(0, Math.round(Number(v) + secs)));
+    if (essay) setInjectETime(id, bump(elimitOf(id, null) - (Number(settings.essayGrace) || 0)));
+    else setInjectTime(id, bump(limitOf(id, null)));
+    const map = essay ? uetimes : utimes;
+    const pre = `${id}::`;
+    for (const [k, v] of Object.entries(map)) {
+      if (!k.startsWith(pre) || v === "" || v == null) continue;
+      const peran = k.slice(pre.length);
+      if (essay) setUnitETime(id, peran, bump(v)); else setUnitTime(id, peran, bump(v));
+    }
   };
 
   const patchSettings = (patch) => {
@@ -1212,6 +1294,12 @@ function Host({ onExit }) {
     return Math.max(0, Math.round((lim - run) / 1000));
   };
   const owedNow = phase === "open" ? owedOn(inject) : [];
+  /* Berapa unit yang jamnya sengaja dibedakan pada inject yang sedang tampil. */
+  const unitSetCount = !inject ? 0 : (inject.roles || []).filter((r) => {
+    const k = `${inject.id}::${r}`;
+    const a = utimes[k], b = uetimes[k];
+    return (a !== "" && a != null) || (b !== "" && b != null);
+  }).length;
   /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
      dibaca lewat ref, bukan lewat tangkapan render. */
   const owedRef = useRef([]);
@@ -1666,6 +1754,51 @@ function Host({ onExit }) {
                       </>)}
                     </span>
                   )}
+                  {/* Jam per unit untuk inject ini. Ditutup secara bawaan, karena
+                      sebagian besar inject tidak memerlukannya, tapi hitungannya
+                      disebut di tombol supaya pengecualian tidak terlupakan. */}
+                  {settings.mode === "auto" && canDrive && (
+                    <span className="unittimes">
+                      <button className="link" onClick={() => setUnitTimeOpen((v) => !v)}>
+                        {t(unitTimeOpen ? "Sembunyikan waktu per unit" : "Waktu per unit")}
+                        {unitSetCount > 0 ? tf(" · {0} disetel", unitSetCount) : ""}
+                      </button>
+                      {unitTimeOpen && (
+                        <span className="utbox">
+                          <span className="hint">
+                            {t("Kosongkan berarti unit itu mengikuti waktu inject. Angka di sini hanya berlaku untuk inject ini, dan skor tiap unit dihitung terhadap jendelanya sendiri.")}
+                          </span>
+                          {inject.roles.map((r) => {
+                            const qs = (inject.questions || []).filter((q) => q.peran === r);
+                            const anyEssay = qs.some((q) => q.type === "open");
+                            const anyTile = qs.some((q) => q.type !== "open");
+                            return (
+                              <span key={r} className="utrow">
+                                <span className="utname">
+                                  <Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}
+                                </span>
+                                {anyTile && (<>
+                                  <input type="number" min="0" step="5"
+                                    placeholder={String(limitOf(inject.id, null))}
+                                    value={utimes[`${inject.id}::${r}`] ?? ""}
+                                    onChange={(e) => setUnitTime(inject.id, r, e.target.value)} />
+                                  <span className="unit">{t("pilihan")}</span>
+                                </>)}
+                                {anyEssay && (<>
+                                  <input type="number" min="0" step="30"
+                                    placeholder={String(Math.max(0,
+                                      elimitOf(inject.id, null) - (Number(settings.essayGrace) || 0)))}
+                                    value={uetimes[`${inject.id}::${r}`] ?? ""}
+                                    onChange={(e) => setUnitETime(inject.id, r, e.target.value)} />
+                                  <span className="unit">{t("esai")}</span>
+                                </>)}
+                              </span>
+                            );
+                          })}
+                        </span>
+                      )}
+                    </span>
+                  )}
                   {canDrive && (
                     <button className="btn" onClick={() => {
                       echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
@@ -1674,12 +1807,12 @@ function Host({ onExit }) {
                 </>)}
 
                 {phase === "open" && (<>
-                  {settings.mode === "auto" && limitOf(inject.id) > 0
-                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)}
+                  {settings.mode === "auto" && maxOf(inject, false) > 0
+                    ? <Ring openedAt={openedAt} limit={maxOf(inject, false)}
                         cap={hasEssay(inject) ? t("pilihan") : ""} />
                     : <span className="msg">{t("Jawaban sudah dibuka.")}</span>}
-                  {settings.mode === "auto" && hasEssay(inject) && elimitOf(inject.id) > 0 && (
-                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap={t("esai")} />
+                  {settings.mode === "auto" && hasEssay(inject) && maxOf(inject, true) > 0 && (
+                    <Ring openedAt={openedAt} limit={maxOf(inject, true)} cap={t("esai")} />
                   )}
                   <span className="msg">
                     {seatsHere.length === 0 ? t("Belum ada unit yang mengambil kursi untuk inject ini")
@@ -2518,6 +2651,9 @@ function Participant() {
   const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
   const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
   const [etimes, setEtimes] = useState({}); // jendela esai per inject
+  /* Jendela milik unit tertentu pada inject tertentu, berkunci "injectId::peran". */
+  const [utimes, setUtimes] = useState({});
+  const [uetimes, setUetimes] = useState({});
   const [msg, setMsg] = useState("");
   /* Kunci disimpan per inject, bukan satu wadah yang ditimpa tiap pindah inject.
      Riwayat dan blok konteks membaca inject yang sudah lewat, jadi kuncinya
@@ -2549,6 +2685,7 @@ function Participant() {
         possible: m.me.possible || 0, pct: m.me.pct ?? null };
       setMe(rec); lsSet(K_ME, rec);
       setDeck(m.deck); setState(m.state); setSettings(m.settings);
+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
       if (m.times) setTimes(m.times);
       if (m.etimes) setEtimes(m.etimes);
       if (m.ran) setRan(m.ran);
@@ -2566,6 +2703,8 @@ function Participant() {
     else if (m.t === "carry") setCarry(m.carry || {});
     else if (m.t === "settings") {
       setSettings(m.settings);
+      if (m.utimes) setUtimes(m.utimes);
+      if (m.uetimes) setUetimes(m.uetimes);
       if (m.times) setTimes(m.times);
       if (m.etimes) setEtimes(m.etimes);
     }
@@ -2613,7 +2752,7 @@ function Participant() {
     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
     nukeAll(); setMe(null); setDeck(null); setState(null);
     setCodeIn(""); setPeek(null); setTaken(null); setKeys({}); setRan([]);
-    setCarry({}); setStay(null);
+    setCarry({}); setStay(null); setUtimes({}); setUetimes({});
   };
 
   /* Derived above every early return. useExpired sat below them, so it only
@@ -2689,17 +2828,23 @@ function Participant() {
   }, [history, idxNow]);
   /* Read the window the same way the server does, from the live `times` map, so
      the facilitator editing it mid-brief changes what this device shows. */
+  /* Jendela unit ini, dengan urutan yang sama seperti server: jam unit pada
+     inject ini, lalu jam inject, lalu default global. */
+  const myNum = (v) => (v === "" || v == null ? null : Number(v));
   const windowOf = (injId) => {
-    const v = times?.[injId];
-    if (v === "" || v == null) return Number(settings?.timeLimit ?? state?.limit ?? 0);
-    return Number(v);
+    const u = myNum(utimes?.[`${injId}::${me?.peran}`]);
+    if (u != null) return u;
+    const i = myNum(times?.[injId]);
+    if (i != null) return i;
+    return Number(settings?.timeLimit ?? state?.limit ?? 0);
   };
   const limit = inject ? windowOf(inject.id) : (state?.limit ?? 0);
   /* Esai punya jamnya sendiri, dibaca dengan urutan yang sama seperti server:
      override inject, lalu default esai, lalu jendela biasa. */
   const ewindowOf = (injId) => {
-    const v = etimes?.[injId];
-    const base = v !== "" && v != null ? Number(v)
+    const u = myNum(uetimes?.[`${injId}::${me?.peran}`]);
+    const i = u != null ? u : myNum(etimes?.[injId]);
+    const base = i != null ? i
       : settings?.essayLimit === "" || settings?.essayLimit == null
         ? windowOf(injId) : Number(settings.essayLimit);
     return base ? base + (Number(settings?.essayGrace) || 0) : base;
@@ -4195,6 +4340,16 @@ html,body{background:var(--ink)}
   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
 
 /* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+.unittimes{order:1;flex:1 1 100%;display:flex;flex-direction:column;gap:9px;
+  border-top:1px solid var(--edge2);padding-top:12px;margin-top:2px}
+.unittimes .link{align-self:flex-start;font-size:12.5px}
+.utbox{display:flex;flex-direction:column;gap:8px}
+.utbox .hint{margin:0}
+.utrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.utname{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;
+  min-width:190px}
+.utrow input{width:74px;font-family:var(--mono);text-align:center;padding:6px}
+.utrow .unit{font-size:11.5px;color:var(--faint)}
 .build.mismatch{color:var(--warn);font-weight:700}
 .owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
 .owednow.wait{color:var(--warn)}
@@ -4523,6 +4678,11 @@ html,body{background:var(--ink)}
    tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
+  /* ---- waktu per unit ---- */
+  "Waktu per unit": "Per unit time",
+  "Sembunyikan waktu per unit": "Hide per unit time",
+  " · {0} disetel": " · {0} set",
+  "Kosongkan berarti unit itu mengikuti waktu inject. Angka di sini hanya berlaku untuk inject ini, dan skor tiap unit dihitung terhadap jendelanya sendiri.": "Left empty, that unit follows the inject's time. Numbers here apply to this inject only, and each unit is scored against its own window.",
   /* ---- susulan ---- */
   " · server {0}": " · server {0}",
   "Versi server berbeda dari versi tampilan": "The server version differs from the interface version",
@@ -4817,7 +4977,7 @@ const EN = {
   "Riwayat": "History",
   "Salah": "Wrong",
   "sangat kuat": "very strong",
-  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional and sets how long that inject may be answered, in minutes.",
+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, dalam menit. Angka pada baris pertama sebuah inject mengatur waktu inject itu; angka berbeda pada baris unit lain memberi unit tersebut jam sendiri.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional, in minutes. A number on an inject's first row sets that inject's window; a different number on another unit's row gives that unit a clock of its own.",
   "Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.": "One answer for the whole unit. Decide together, then tap.",
   "satu kursi": "one seat",
   "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused.",
