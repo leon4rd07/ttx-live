@@ -24,7 +24,7 @@ const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
 /* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
    Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
    melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
-const SBUILD = "b44";
+const SBUILD = "b45";
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
 
 /* Optional facilitator passcode. Unset means anyone reaching /host can run an

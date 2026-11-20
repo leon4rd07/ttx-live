@@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b44";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b45";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
@@ -835,6 +835,26 @@ function Ring({ openedAt, limit, size = "s72", cap }) {
   );
 }
 
+/* Hitung mundur kecil di baris tiap unit. Jamnya sendiri, supaya perubahan
+   tiap detik hanya merender ulang angka itu, bukan seluruh layar fasilitator. */
+function UnitClock({ openedAt, limit }) {
+  const [left, setLeft] = useState(limit);
+  useEffect(() => {
+    if (!limit) return undefined;
+    const tick = () => setLeft(Math.max(0, limit - (serverNow() - (openedAt || serverNow())) / 1000));
+    tick();
+    const iv = setInterval(tick, 500);
+    return () => clearInterval(iv);
+  }, [openedAt, limit]);
+  if (!limit) return <span className="tclock mono none">{t("tanpa batas")}</span>;
+  const sisa = Math.ceil(left);
+  return (
+    <span className={`tclock mono ${sisa <= 0 ? "done" : sisa <= 10 ? "urgent" : ""}`}>
+      {fmt(sisa)}
+    </span>
+  );
+}
+
 const Crest = ({ peran, idx, size }) => (
   <span className="crest" style={{
     background: UNIT_VARS[(idx < 0 ? 0 : idx) % 6],
@@ -971,7 +991,6 @@ function Host({ onExit }) {
   const [susulOpen, setSusulOpen] = useState(false);
   const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
   const [susulErr, setSusulErr] = useState("");
-  const [unitTimeOpen, setUnitTimeOpen] = useState(false);
   const fileRef = useRef(null);
 
   /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
@@ -1230,6 +1249,23 @@ function Host({ onExit }) {
     return max;
   };
 
+  /* Menambah waktu untuk satu unit saja, dari baris unit itu sendiri. Unit yang
+     belum punya jam sendiri mendapatkannya di sini, jadi tambahan ini tidak
+     merembet ke unit lain yang sudah selesai. */
+  const addUnitTime = (peran, secs) => {
+    const inj = model?.injects[activeIdx];
+    if (!inj) return;
+    const qs = (inj.questions || []).filter((q) => q.peran === peran);
+    const grace = Number(settings.essayGrace) || 0;
+    if (qs.some((q) => q.type !== "open")) {
+      setUnitTime(inj.id, peran, String(Math.max(0, limitOf(inj.id, peran) + secs)));
+    }
+    if (qs.some((q) => q.type === "open")) {
+      setUnitETime(inj.id, peran,
+        String(Math.max(0, elimitOf(inj.id, peran) - grace + secs)));
+    }
+  };
+
   /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan.
 
      Jam inject dan setiap jam per unit pada inject itu ikut bertambah, karena
@@ -1294,12 +1330,6 @@ function Host({ onExit }) {
     return Math.max(0, Math.round((lim - run) / 1000));
   };
   const owedNow = phase === "open" ? owedOn(inject) : [];
-  /* Berapa unit yang jamnya sengaja dibedakan pada inject yang sedang tampil. */
-  const unitSetCount = !inject ? 0 : (inject.roles || []).filter((r) => {
-    const k = `${inject.id}::${r}`;
-    const a = utimes[k], b = uetimes[k];
-    return (a !== "" && a != null) || (b !== "" && b != null);
-  }).length;
   /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
      dibaca lewat ref, bukan lewat tangkapan render. */
   const owedRef = useRef([]);
@@ -1754,51 +1784,6 @@ function Host({ onExit }) {
                       </>)}
                     </span>
                   )}
-                  {/* Jam per unit untuk inject ini. Ditutup secara bawaan, karena
-                      sebagian besar inject tidak memerlukannya, tapi hitungannya
-                      disebut di tombol supaya pengecualian tidak terlupakan. */}
-                  {settings.mode === "auto" && canDrive && (
-                    <span className="unittimes">
-                      <button className="link" onClick={() => setUnitTimeOpen((v) => !v)}>
-                        {t(unitTimeOpen ? "Sembunyikan waktu per unit" : "Waktu per unit")}
-                        {unitSetCount > 0 ? tf(" · {0} disetel", unitSetCount) : ""}
-                      </button>
-                      {unitTimeOpen && (
-                        <span className="utbox">
-                          <span className="hint">
-                            {t("Kosongkan berarti unit itu mengikuti waktu inject. Angka di sini hanya berlaku untuk inject ini, dan skor tiap unit dihitung terhadap jendelanya sendiri.")}
-                          </span>
-                          {inject.roles.map((r) => {
-                            const qs = (inject.questions || []).filter((q) => q.peran === r);
-                            const anyEssay = qs.some((q) => q.type === "open");
-                            const anyTile = qs.some((q) => q.type !== "open");
-                            return (
-                              <span key={r} className="utrow">
-                                <span className="utname">
-                                  <Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}
-                                </span>
-                                {anyTile && (<>
-                                  <input type="number" min="0" step="5"
-                                    placeholder={String(limitOf(inject.id, null))}
-                                    value={utimes[`${inject.id}::${r}`] ?? ""}
-                                    onChange={(e) => setUnitTime(inject.id, r, e.target.value)} />
-                                  <span className="unit">{t("pilihan")}</span>
-                                </>)}
-                                {anyEssay && (<>
-                                  <input type="number" min="0" step="30"
-                                    placeholder={String(Math.max(0,
-                                      elimitOf(inject.id, null) - (Number(settings.essayGrace) || 0)))}
-                                    value={uetimes[`${inject.id}::${r}`] ?? ""}
-                                    onChange={(e) => setUnitETime(inject.id, r, e.target.value)} />
-                                  <span className="unit">{t("esai")}</span>
-                                </>)}
-                              </span>
-                            );
-                          })}
-                        </span>
-                      )}
-                    </span>
-                  )}
                   {canDrive && (
                     <button className="btn" onClick={() => {
                       echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
@@ -1881,8 +1866,12 @@ function Host({ onExit }) {
                 </div>
               )}
 
-              {phase === "open" && (
-                <div className="tracker">
+              {/* Satu tempat untuk melihat tiap unit: kursinya, kemajuannya, dan
+                  jamnya. Waktu disetel dan ditambah di baris unit yang
+                  bersangkutan, bukan di panel terpisah, supaya fasilitator tidak
+                  perlu mencocokkan nama unit dengan kotak isian di tempat lain. */}
+              {(phase === "briefing" || phase === "open") && (
+                <div className={`tracker ${phase}`}>
                   {inject.roles.map((r) => {
                     const seat = seatOf(r);
                     const qs = inject.questions.filter((q) => q.peran === r);
@@ -1890,17 +1879,76 @@ function Host({ onExit }) {
                     const pct = qs.length ? Math.round((done / qs.length) * 100) : 0;
                     const finishedMs = seat && qs.length && done === qs.length
                       ? Math.max(...qs.map((q) => seat.answers[q.qid]?.ms || 0)) : null;
+                    const anyEssay = qs.some((q) => q.type === "open");
+                    const anyTile = qs.some((q) => q.type !== "open");
+                    /* Jendela unit ini adalah yang paling lambat menutup di antara
+                       pertanyaannya. Nol di salah satunya berarti tanpa batas. */
+                    const lims = [];
+                    if (anyTile) lims.push(limitOf(inject.id, r));
+                    if (anyEssay) lims.push(elimitOf(inject.id, r));
+                    const win = !lims.length || lims.some((v) => !v) ? 0 : Math.max(...lims);
+                    const own = utimes[`${inject.id}::${r}`] ?? "";
+                    const eown = uetimes[`${inject.id}::${r}`] ?? "";
+                    const timed = settings.mode === "auto";
                     return (
                       <div key={r} className={`trow ${seat && done === qs.length ? "in" : ""}`}
                         style={{ "--c": UNIT_VARS[(roleIdx(r) < 0 ? 0 : roleIdx(r)) % 6] }}>
                         <Crest peran={r} idx={roleIdx(r)} />
                         <span className="tname">{unitOf(r)}</span>
-                        <span className="tbar"><i style={{ width: `${pct}%` }} /></span>
-                        <span className="tcount mono">{done}/{qs.length}</span>
-                        {finishedMs != null
-                          ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
-                          : !seat ? <span className="tmiss">{t("kursi kosong")}</span>
-                            : <span className="tmiss">{t("sedang menjawab")}</span>}
+
+                        {phase === "open" && (<>
+                          <span className="tbar"><i style={{ width: `${pct}%` }} /></span>
+                          <span className="tcount mono">{done}/{qs.length}</span>
+                        </>)}
+
+                        {/* Jam unit ini. Saat briefing bisa diubah, saat menjawab
+                            berjalan mundur dan bisa ditambah. Tiap bagian selalu
+                            menempati slotnya, juga saat kosong, supaya kolomnya
+                            sejajar antar baris dan mudah dibaca sekilas. */}
+                        {timed && phase === "briefing" && (canDrive ? (
+                          <span className="tset">
+                            {anyTile ? (<>
+                              <input type="number" min="0" step="5" aria-label={tf("Waktu pilihan {0}", unitOf(r))}
+                                placeholder={String(limitOf(inject.id, null))} value={own}
+                                onChange={(e) => setUnitTime(inject.id, r, e.target.value)} />
+                              <span className="unit">{t("pilihan")}</span>
+                            </>) : <><span className="tslot" aria-hidden="true" />
+                              <span className="tslot" aria-hidden="true" /></>}
+                            {anyEssay ? (<>
+                              <input type="number" min="0" step="30" aria-label={tf("Waktu esai {0}", unitOf(r))}
+                                placeholder={String(Math.max(0,
+                                  elimitOf(inject.id, null) - (Number(settings.essayGrace) || 0)))}
+                                value={eown}
+                                onChange={(e) => setUnitETime(inject.id, r, e.target.value)} />
+                              <span className="unit">{t("esai")}</span>
+                            </>) : <><span className="tslot" aria-hidden="true" />
+                              <span className="tslot" aria-hidden="true" /></>}
+                          </span>
+                        ) : (
+                          <span className={`tclock ${win ? "mono" : "none"}`}>
+                            {win ? fmt(win) : t("tanpa batas")}
+                          </span>
+                        ))}
+
+                        {timed && phase === "open" && (<>
+                          <UnitClock openedAt={openedAt} limit={win} />
+                          <span className="taddslot">
+                            {canDrive && finishedMs == null && (
+                              <button className="btn quiet pill tadd"
+                                title={tf("Tambah satu menit untuk {0} saja", unitOf(r))}
+                                onClick={() => addUnitTime(r, 60)}>+1m</button>
+                            )}
+                          </span>
+                        </>)}
+
+                        <span className="tstate">
+                          {phase === "open" && finishedMs != null
+                            ? <span className="tdone mono">{(finishedMs / 1000).toFixed(1)}s</span>
+                            : !seat ? <span className="tmiss">{t("kursi kosong")}</span>
+                              : phase === "open"
+                                ? <span className="tmiss">{t("sedang menjawab")}</span>
+                                : <span className="tmiss">{t("sudah duduk")}</span>}
+                        </span>
                       </div>
                     );
                   })}
@@ -4340,16 +4388,35 @@ html,body{background:var(--ink)}
   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
 
 /* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
-.unittimes{order:1;flex:1 1 100%;display:flex;flex-direction:column;gap:9px;
-  border-top:1px solid var(--edge2);padding-top:12px;margin-top:2px}
-.unittimes .link{align-self:flex-start;font-size:12.5px}
-.utbox{display:flex;flex-direction:column;gap:8px}
-.utbox .hint{margin:0}
-.utrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.utname{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;
-  min-width:190px}
-.utrow input{width:74px;font-family:var(--mono);text-align:center;padding:6px}
-.utrow .unit{font-size:11.5px;color:var(--faint)}
+/* Empat kolom tetap: kotak pilihan, labelnya, kotak esai, labelnya. Unit yang
+   tidak punya salah satu jenis mengisi dua kolomnya dengan slot kosong, supaya
+   kotak isian tetap sejajar antar baris dan mudah dibandingkan sekilas. */
+.tset{display:grid;grid-template-columns:72px 52px 72px 52px;gap:6px;
+  align-items:center;margin-left:auto}
+.tset input{width:100%;font-family:var(--mono);text-align:center;padding:5px 6px}
+/* Panah naik turun bawaan peramban memakan ruang yang dibutuhkan tiga angka di
+   kotak sesempit ini, dan angkanya diketik, bukan dinaikkan satu satu. */
+.tset input::-webkit-outer-spin-button,
+.tset input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.tset input{appearance:textfield;-moz-appearance:textfield}
+.tset .unit{font-size:11px;color:var(--faint)}
+.tslot{display:block}
+.tclock{font-size:13px;font-weight:700;min-width:54px;text-align:right;
+  font-variant-numeric:tabular-nums}
+.tclock.urgent{color:var(--warn)}
+.tclock.done{color:var(--faint)}
+.tclock.none{font-size:11.5px;font-weight:600;color:var(--faint);min-width:54px}
+.taddslot{min-width:44px;display:flex;justify-content:flex-end}
+.tadd{padding:3px 9px;font-size:11.5px}
+.tstate{min-width:112px;text-align:right}
+.tracker.briefing .tname{flex:1}
+.tracker.briefing .tclock{margin-left:auto}
+@media (max-width:720px){
+  .trow{flex-wrap:wrap;gap:8px}
+  .tstate{min-width:0;margin-left:auto}
+  .tset{width:100%;margin-left:0;grid-template-columns:68px 50px 68px 50px}
+  .tname{flex:1 1 100%}
+}
 .build.mismatch{color:var(--warn);font-weight:700}
 .owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
 .owednow.wait{color:var(--warn)}
@@ -4679,6 +4746,10 @@ html,body{background:var(--ink)}
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
   /* ---- waktu per unit ---- */
+  "detik": "seconds",
+  "Waktu pilihan {0}": "Choice time for {0}",
+  "Waktu esai {0}": "Essay time for {0}",
+  "Tambah satu menit untuk {0} saja": "Add one minute for {0} only",
   "Waktu per unit": "Per unit time",
   "Sembunyikan waktu per unit": "Hide per unit time",
   " · {0} disetel": " · {0} set",
