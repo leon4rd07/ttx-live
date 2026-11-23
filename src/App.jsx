@@ -2022,17 +2022,12 @@ function Host({ onExit }) {
                         {timed && phase === "open" && (<>
                           <UnitClock openedAt={openedAt} limit={win} />
                           <span className="taddslot">
-                            {canDrive && finishedMs == null && (<>
-                              <SetLeft now={win ? leftOfUnit(r) : null}
-                                title={tf("Sisa waktu {0}, dalam detik", unitOf(r))}
-                                onSet={(s) => setUnitLeft(r, s)} />
-                              <button className="btn quiet pill tadd"
-                                title={tf("Kurangi satu menit untuk {0} saja", unitOf(r))}
-                                onClick={() => addUnitTime(r, -60)}>&minus;1m</button>
-                              <button className="btn quiet pill tadd"
-                                title={tf("Tambah satu menit untuk {0} saja", unitOf(r))}
-                                onClick={() => addUnitTime(r, 60)}>+1m</button>
-                            </>)}
+                            {canDrive && (
+                              <SetLeft now={win ? leftOfUnit(r) : null} unit={unitOf(r)}
+                                done={finishedMs != null}
+                                onSet={(v) => setUnitLeft(r, v)}
+                                onBump={(v) => addUnitTime(r, v)} />
+                            )}
                           </span>
                         </>)}
 
@@ -2135,26 +2130,62 @@ function Host({ onExit }) {
    yang sedang diketik fasilitator akan tertimpa di tengah ketikan. Nilainya
    dipakai saat Enter atau saat kotaknya ditinggalkan, lalu kotaknya kosong
    lagi supaya bayangan sisa waktu yang baru terbaca. */
-function SetLeft({ now, title, onSet }) {
+function SetLeft({ now, unit, done, onSet, onBump }) {
   const ref = useRef(null);
+  const clear = () => { if (ref.current) ref.current.value = ""; };
   const apply = () => {
     const el = ref.current;
     if (!el) return;
-    const v = el.value.trim();
+    const raw = el.value.trim();
     el.value = "";
-    if (v === "") return;
-    const n = Number(v);
-    if (Number.isFinite(n) && n >= 0) onSet(Math.round(n));
+    if (!raw) return;
+    /* Tanda di depan angka yang menentukan artinya. "90" berarti sisanya jadi
+       sembilan puluh detik, "-30" berarti dikurangi tiga puluh detik. Dua duanya
+       dibutuhkan: menyetel saat memberi jatah baru, menambah atau mengurangi
+       saat sekadar menggeser sedikit. */
+    const m = /^([+\u2212-]?)\s*(\d+)$/.exec(raw);
+    if (!m) return;
+    const n = Number(m[2]);
+    if (!Number.isFinite(n)) return;
+    if (m[1] === "+") onBump(n);
+    else if (m[1]) onBump(-n);
+    else onSet(n);
   };
+  /* Unit yang sudah mengirim jawabannya tetap memegang kotak dan tombolnya,
+     hanya dimatikan dan diberi warna hijau. Dulu ketiganya dilepas begitu unit
+     selesai, dan barisnya langsung kehilangan tiga kolom sehingga kolom di
+     kanannya melompat dan tabelnya sulit dibaca sekilas. Dimatikan, bukan
+     sekadar diabaikan, karena mengubah jendela setelah jawabannya masuk akan
+     menggeser perhitungan poin yang sudah terlanjur dibukukan. */
   return (
-    <input ref={ref} className="tlive" type="number" min="0" step="30"
-      title={title} aria-label={title}
-      placeholder={now == null ? "∞" : String(now)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") { e.preventDefault(); apply(); ref.current?.blur(); }
-        if (e.key === "Escape") { e.preventDefault(); ref.current.value = ""; ref.current.blur(); }
-      }}
-      onBlur={apply} />
+    <>
+      <span className={`tlivebox ${done ? "done" : ""}`}>
+        <input ref={ref} className="tlive" type="text" inputMode="numeric"
+          disabled={done}
+          title={done ? tf("{0} sudah mengirim jawabannya, jendelanya tidak diubah lagi.", unit)
+            : tf("Sisa waktu {0}. Ketik angka untuk menyetel sisanya, atau -30 dan +30 untuk menggeser. Enter untuk menerapkan.", unit)}
+          aria-label={tf("Sisa waktu {0} dalam detik", unit)}
+          placeholder={now == null ? "∞" : String(now)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); apply(); ref.current?.blur(); }
+            if (e.key === "Escape") { e.preventDefault(); clear(); ref.current.blur(); }
+          }}
+          onBlur={apply} />
+        <span className="tlivesuf">{t("dtk")}</span>
+      </span>
+      {/* Menekan tombol ini tidak boleh membuat kotak di sebelahnya kehilangan
+          fokus lebih dulu, karena angka yang belum jadi akan ikut diterapkan
+          dan tombolnya menambah di atas angka itu. preventDefault menahan
+          perpindahan fokus, lalu isinya dibuang. */}
+      <button className={`btn quiet pill tadd ${done ? "done" : ""}`} disabled={done}
+        title={tf("Kurangi satu menit untuk {0} saja", unit)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { clear(); onBump(-60); }}>&minus;1m</button>
+      <button className={`btn quiet pill tadd ${done ? "done" : ""}`} disabled={done}
+        title={tf("Tambah satu menit untuk {0} saja", unit)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { clear(); onBump(60); }}>+1m</button>
+    </>
   );
 }
 
@@ -4622,13 +4653,24 @@ html,body{background:var(--ink)}
 .tclock.urgent{color:var(--warn)}
 .tclock.done{color:var(--faint)}
 .tclock.none{font-size:11.5px;font-weight:600;color:var(--faint);min-width:54px}
-.taddslot{min-width:168px;display:flex;justify-content:flex-end;align-items:center;gap:5px}
+.taddslot{min-width:184px;display:flex;justify-content:flex-end;align-items:center;gap:5px}
 .tadd{padding:3px 9px;font-size:11.5px}
 /* Kotak sisa waktu saat berjalan. Bayangan angkanya adalah sisa saat ini, jadi
    fasilitator bisa membacanya tanpa mengetik apa pun. */
-.tlive{width:62px;padding:3px 6px;font-size:12px;text-align:right;
+.tlivebox{position:relative;display:inline-flex;align-items:center}
+.tlive{width:74px;padding:3px 26px 3px 6px;font-size:12px;text-align:right;
   font-variant-numeric:tabular-nums}
 .tlive::placeholder{color:var(--faint);opacity:1}
+.tlivesuf{position:absolute;right:7px;font-size:10px;font-weight:700;color:var(--faint);
+  pointer-events:none}
+/* Unit yang sudah selesai: kotak dan tombolnya tetap di tempatnya, hijau dan
+   mati, jadi lebar barisnya tidak berubah saat sebuah unit mengirim jawaban. */
+.tlivebox.done .tlive{color:var(--live);border-color:var(--live-edge);
+  background:var(--live-soft);opacity:1;cursor:default}
+.tlivebox.done .tlive::placeholder{color:var(--live);opacity:.85}
+.tlivebox.done .tlivesuf{color:var(--live);opacity:.8}
+.tadd.done{color:var(--live);border-color:var(--live-edge);background:var(--live-soft);
+  opacity:1;cursor:default}
 .tstate{min-width:112px;text-align:right}
 .tracker.briefing .tname{flex:1}
 .tracker.briefing .tclock{margin-left:auto}
@@ -5001,7 +5043,10 @@ const EN = {
   "Tutup waktu menjawab": "Close the answering window",
   "Pindah inject": "Move to another inject",
   "Sisa waktu mereka {0} dan tidak hangus. Inject ini tetap terbuka di perangkat mereka, berdampingan dengan inject yang baru.": "They have {0} left and it is not forfeited. This inject stays open on their device, alongside the new one.",
-  "Sisa waktu {0}, dalam detik": "Time left for {0}, in seconds",
+  "Sisa waktu {0} dalam detik": "Time left for {0}, in seconds",
+  "Sisa waktu {0}. Ketik angka untuk menyetel sisanya, atau -30 dan +30 untuk menggeser. Enter untuk menerapkan.": "Time left for {0}. Type a number to set the time left, or -30 and +30 to shift it. Enter applies it.",
+  "dtk": "sec",
+  "{0} sudah mengirim jawabannya, jendelanya tidak diubah lagi.": "{0} has sent its answer, so its window is no longer changed.",
   "Kurangi satu menit untuk {0} saja": "Take one minute off {0} alone",
   "Ruangan berpindah inject": "The room moved to another inject",
   "Inject {0} Anda masih terbuka.": "Your inject {0} is still open.",
