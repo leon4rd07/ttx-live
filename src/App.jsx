@@ -753,14 +753,78 @@ function buildModel(rows) {
 }
 
 const SAMPLE = [
-  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?", Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati" },
-  { "Inject No.": "2", Siklus: "Siklus 1 - Deteksi", Waktu: "1.5", Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.", Peran: "Risk Management", Tipe: "pg", Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?", Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox", Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.", Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "", Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?", Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
-  { "Inject No.": "3", Siklus: "Siklus 2 - Respons", Waktu: "2", Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.", Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg", Pertanyaan: "Apa yang masuk dalam respons pertama?", Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai", Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.", Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "", Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?", Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
+  /* Deck latihan. Isinya sengaja dibuat melewati setiap keadaan yang bisa
+     muncul saat latihan sungguhan, jadi fasilitator bisa mencobanya sendiri
+     tanpa menyiapkan sheet: jam per unit yang berbeda, unit yang jendelanya
+     habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot
+     bertingkat lewat bintang maupun lewat kurung siku, inject yang memakai jam
+     bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit,
+     dan satu inject dua bahasa untuk menguji tombol ID/EN. */
+
+  /* Inject 1. Dua unit berbagi satu pertanyaan berbobot, dan satu unit diberi
+     jam jauh lebih pendek lewat kolom Waktu di barisnya sendiri. Unit itulah
+     yang akan selesai atau kehabisan waktu lebih dulu, jadi di sinilah jendela
+     tertinggal dan baris tab dua inject di layar peserta ikut teruji. */
+  { "Inject No.": "1", Siklus: "Siklus 1 Deteksi", Waktu: "2",
+    Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.\n===\nAt 02:14 local time, SOC monitoring shows a spike of failed logins against the core banking admin portal. The source is an internal subnet assigned to a third party maintenance vendor. The on-call analyst has not escalated yet.",
+    Peran: "SOC, IT Operations", Tipe: "pg",
+    Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?\n===\nWhat is your first action in the next 15 minutes?",
+    Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift\n===\nA. Wait for a second alert before acting\nB. Verify the alert, disable the vendor account, tell the IR lead\nC. Call the vendor and ask about their activity\nD. Raise a ticket and hand it over at shift change" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Waktu: "0.5",
+    Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?\n===\nDo you have an out of hours vendor contact and a contractual notification deadline?",
+    Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati\n===\nA. No, we must wait for office hours\nB. Yes, both sit in the contract register and can be reached now\nC. We have the contact, but no agreed deadline" },
+
+  /* Inject 2. Bobot ditulis dua cara sekaligus: bintang pada pertanyaan pertama
+     dan kurung siku pada pertanyaan centang, supaya keduanya terbaca di satu
+     latihan. Satu baris sengaja dibiarkan tanpa kolom Tipe, jadi bentuk sel
+     Jawaban yang menentukan jenisnya, seperti sheet lama sebelum kolom itu ada. */
+  { "Inject No.": "2", Siklus: "Siklus 1 Deteksi", Waktu: "1.5",
+    Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.",
+    Peran: "Risk Management", Tipe: "pg",
+    Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?",
+    Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox",
+    Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.",
+    Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "",
+    Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?",
+    Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
+
+  /* Inject 3. Esai dengan jamnya sendiri lewat kolom Waktu Esai. Unit yang
+     hanya mendapat pertanyaan pilihan selesai lebih dulu lalu menunggu, dan
+     layar fasilitator menampilkan dua cincin sekaligus. */
+  { "Inject No.": "3", Siklus: "Siklus 2 Respons", Waktu: "2", "Waktu Esai": "4",
+    Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.",
+    Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg",
+    Pertanyaan: "Apa yang masuk dalam respons pertama?",
+    Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai",
+    Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.",
+    Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "",
+    Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?",
+    Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
+
+  /* Inject 4. Tanpa kolom Waktu sama sekali, jadi ia memakai jam bawaan yang
+     disetel di Pengaturan. Hanya satu unit yang ditanya, untuk menguji inject
+     yang tidak melibatkan seluruh ruangan. Bobotnya ditulis dengan kurung siku,
+     cara kedua selain bintang, dan hanya berlaku untuk pilihan tunggal. */
+  { "Inject No.": "4", Siklus: "Siklus 2 Respons",
+    Kondisi: "Siang hari, tim forensik meminta satu host produksi dibekukan untuk diambil image-nya. Layanan di host itu masih melayani nasabah.",
+    Peran: "IT Operations", Tipe: "pg",
+    Pertanyaan: "Apa yang Anda lakukan terhadap permintaan itu?",
+    Jawaban: "A. Menolak sampai jam layanan berakhir [0]\nB. Menyiapkan failover dulu, lalu bekukan host dan ambil image [3]\nC. Membekukan host sekarang juga tanpa failover [1]" },
+
+  /* Inject 5. Waktu nol berarti tanpa batas: jamnya tidak pernah mencapai nol,
+     jadi pilihan "Buka jawaban hanya setelah waktu habis" tidak boleh menahan
+     tombolnya di sini. Seluruh unit ditanya sekaligus, untuk menguji papan
+     peringkat dan rekap di akhir. */
+  { "Inject No.": "5", Siklus: "Siklus 3 Pemulihan", Waktu: "0",
+    Kondisi: "Tiga hari kemudian, sesi pembelajaran digelar. Insiden sudah ditutup dan layanan pulih sepenuhnya.",
+    Peran: "SOC, IT Operations, Vendor Management, Risk Management, Hukum & Kepatuhan, Corporate Communications",
+    Tipe: "checkbox",
+    Pertanyaan: "Mana yang pantas masuk daftar perbaikan wajib? Centang semua yang sesuai.",
+    Jawaban: "*A. Akses vendor dibatasi waktu dan ditinjau berkala\nB. Menambah jumlah dashboard pemantauan\n*C. Latihan notifikasi regulator secara berkala\n*D. Kontak darurat vendor diuji dua kali setahun" },
 ];
 
 /* ------------------------- crash containment ------------------------- */
@@ -939,6 +1003,10 @@ function Host({ onExit }) {
   const [settings, setSettings] = useState({
     mode: "auto", timeLimit: 60, essayLimit: 300, essayGrace: 60, points: 1000,
     speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
+    /* Menahan tombol Buka jawaban selama jam menjawab masih berisi sisa.
+       Mati secara bawaan: saat latihan sungguhan fasilitator kadang memang perlu
+       menutup lebih awal, dan untuk itu sudah ada peringatan. */
+    lockReveal: false,
   });
   const [times, setTimes] = useState({});
   const [etimes, setEtimes] = useState({});     // jendela esai per inject
@@ -1376,6 +1444,17 @@ function Host({ onExit }) {
     return Math.max(0, Math.round((lim - run) / 1000));
   };
   const owedNow = phase === "open" ? owedOn(inject) : [];
+  /* Tombol Buka jawaban ditahan selama jam menjawab masih berisi sisa, kalau
+     pengaturannya memang meminta begitu. Inject tanpa batas waktu tidak pernah
+     ditahan, karena jamnya tidak akan pernah mencapai nol.
+
+     Nilainya dititipkan juga ke sebuah ref, karena pintasan papan ketik dibuat
+     sekali lewat useCallback dan tidak ikut dirender ulang tiap detik. Tanpa
+     itu, menahan tombolnya tidak ada artinya: Spasi dan R tetap membukanya. */
+  const lockRef = useRef(false);
+  const revealLocked = !!settings.lockReveal && phase === "open"
+    && settings.mode === "auto" && (leftNowSec() ?? 0) > 0;
+  lockRef.current = revealLocked;
   /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
      dibaca lewat ref, bukan lewat tangkapan render. */
   const owedRef = useRef([]);
@@ -1432,6 +1511,7 @@ function Host({ onExit }) {
     if (phase === "lobby") setPhase("briefing");
     else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
     else if (phase === "open") {
+      if (lockRef.current) return;
       if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
       else setPhase("revealed");
     } else goNext();
@@ -1454,6 +1534,7 @@ function Host({ onExit }) {
       const k = String(e.key).toLowerCase();
       if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
       else if (k === "r" && phase === "open" && canDrive) {
+        if (lockRef.current) return;
         if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
         else { echo.current = ""; setPhase("revealed"); }
       }
@@ -1496,6 +1577,9 @@ function Host({ onExit }) {
             <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
               {t("Muat contoh latihan saja")}
             </button>
+            <p className="hint">
+              {t("Contohnya berisi lima inject dan enam unit, dan sengaja melewati setiap keadaan yang bisa muncul saat latihan sungguhan: jam yang berbeda antar unit, unit yang jendelanya habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot bertingkat lewat bintang maupun kurung siku, inject yang memakai jam bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit, dan satu inject dua bahasa.")}
+            </p>
 
             {/* Fasilitator kedua tidak memuat sheet. Ia masuk dengan kode dari
                 pemilik ruangan, dan kode itu yang menentukan haknya. */}
@@ -1585,6 +1669,9 @@ function Host({ onExit }) {
                   <Check label={t("Buka jawaban otomatis saat waktu habis")} checked={settings.autoReveal}
                     onChange={(v) => patchSettings({ autoReveal: v })}
                     hint={t("Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.")} />
+                  <Check label={t("Buka jawaban hanya setelah waktu habis")} checked={settings.lockReveal}
+                    onChange={(v) => patchSettings({ lockReveal: v })}
+                    hint={t("Mematikan tombol Buka jawaban selama masih ada sisa waktu, supaya tidak terpencet di tengah unit yang sedang mengetik. Kalau dibiarkan mati, tombolnya tetap bisa ditekan tapi memunculkan peringatan dulu.")} />
                   <Check label={t("Tampilkan peringkat")} checked={settings.leaderboard}
                     onChange={(v) => patchSettings({ leaderboard: v })}
                     hint={t("Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.")} />
@@ -1717,6 +1804,7 @@ function Host({ onExit }) {
           <b className="injno">{tf("Inject {0}", inject.id)}</b>
           <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
             /* Menutup waktu menjawab dari sini pun harus lewat pintu yang sama. */
+            if (k === "revealed" && lockRef.current) return;
             if (k !== "open" && phase === "open" && owedRef.current.length > 0) {
               return setAsk({ kind: "phase", to: k });
             }
@@ -1893,8 +1981,20 @@ function Host({ onExit }) {
                       : allIn ? t("Semua unit sudah menjawab")
                         : tf("Menunggu jawaban, {0} dari {1} unit sudah duduk", seatsHere.length, inject.roles.length)}
                   </span>
+                  {/* Menambah dan mengurangi berdiri berdampingan. Sebelumnya hanya ada
+                      penambah, dan satu satunya cara memendekkan jam yang terlanjur
+                      kepanjangan adalah mengetik ulang angkanya di tiap baris unit. */}
                   {canDrive && settings.mode === "auto" && (
                     <span className="addtime">
+                      <span className="unit">{t("Kurangi")}</span>
+                      {[300, 120, 60].map((sec) => (
+                        <button key={`m${sec}`} className="btn quiet pill"
+                          title={t(hasEssay(inject) ? "Mengurangi kedua jam" : "Mengurangi waktu menjawab")}
+                          onClick={() => {
+                            addTime(inject.id, -sec, false);
+                            if (hasEssay(inject)) addTime(inject.id, -sec, true);
+                          }}>&minus;{sec / 60}m</button>
+                      ))}
                       <span className="unit">{t("Tambah")}</span>
                       {[60, 120, 300].map((sec) => (
                         <button key={sec} className="btn quiet pill"
@@ -1906,8 +2006,16 @@ function Host({ onExit }) {
                       ))}
                     </span>
                   )}
+                  {/* Tombol ini dulu memanggil setPhase langsung, jadi ia satu satunya
+                      jalan keluar dari fase menjawab yang melewati peringatan. Sekarang
+                      ia lewat pintu yang sama dengan Spasi, R, dan daftar inject. */}
                   {canDrive && (
-                    <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                    <button className="btn" disabled={revealLocked}
+                      title={revealLocked
+                        ? tf("Masih tersisa {0}. Pengaturan menahan tombol ini sampai waktunya habis.",
+                          fmt(leftNowSec() ?? 0))
+                        : ""}
+                      onClick={() => guard({ kind: "reveal" }, doReveal)}>
                       {t("Buka jawaban")}
                     </button>
                   )}
@@ -5046,6 +5154,13 @@ const EN = {
   "Sisa waktu {0} dalam detik": "Time left for {0}, in seconds",
   "Sisa waktu {0}. Ketik angka untuk menyetel sisanya, atau -30 dan +30 untuk menggeser. Enter untuk menerapkan.": "Time left for {0}. Type a number to set the time left, or -30 and +30 to shift it. Enter applies it.",
   "dtk": "sec",
+  "Buka jawaban hanya setelah waktu habis": "Open answers only once time runs out",
+  "Mematikan tombol Buka jawaban selama masih ada sisa waktu, supaya tidak terpencet di tengah unit yang sedang mengetik. Kalau dibiarkan mati, tombolnya tetap bisa ditekan tapi memunculkan peringatan dulu.": "Disables the Open answers button while time is left, so it cannot be hit while a unit is still typing. Left off, the button still works but asks first.",
+  "Masih tersisa {0}. Pengaturan menahan tombol ini sampai waktunya habis.": "{0} still left. Settings hold this button until time runs out.",
+  "Kurangi": "Take off",
+  "Mengurangi kedua jam": "Takes time off both clocks",
+  "Mengurangi waktu menjawab": "Takes time off the answering window",
+  "Contohnya berisi lima inject dan enam unit, dan sengaja melewati setiap keadaan yang bisa muncul saat latihan sungguhan: jam yang berbeda antar unit, unit yang jendelanya habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot bertingkat lewat bintang maupun kurung siku, inject yang memakai jam bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit, dan satu inject dua bahasa.": "The sample holds five injects and six units, and deliberately walks through every situation a real exercise can produce: units on different clocks, a unit whose window closes first and is left behind, an essay on its own clock, tiered weights written with stars and with brackets, an inject on the default clock, an inject with no time limit, an inject that asks a single unit, and one inject in two languages.",
   "{0} sudah mengirim jawabannya, jendelanya tidak diubah lagi.": "{0} has sent its answer, so its window is no longer changed.",
   "Kurangi satu menit untuk {0} saja": "Take one minute off {0} alone",
   "Ruangan berpindah inject": "The room moved to another inject",
