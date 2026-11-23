@@ -7,684 +7,96 @@ index f1e509c..aa0c066 100644
  dist
  rooms.json
 +__pycache__/
-diff --git a/deploy/README.md b/deploy/README.md
-new file mode 100644
-index 0000000..19f00c6
---- /dev/null
-+++ b/deploy/README.md
-@@ -0,0 +1,139 @@
-+# Memasang TTX Live di VM Google Cloud
-+
-+Susunannya: Node berjalan sebagai service systemd di `127.0.0.1:3000`, dan
-+Apache di depan membuka port 80 lalu meneruskan ke sana, termasuk WebSocket.
-+Apache tidak menjalankan aplikasinya, dia hanya pintu depan.
-+
-+## Baca ini dulu: soal HTTPS
-+
-+Dengan **IP publik saja, tidak ada HTTPS**. Tidak ada otoritas sertifikat yang
-+menerbitkan sertifikat tepercaya untuk alamat IP biasa. Pilihannya dua, dan
-+keduanya punya harga:
-+
-+**Jalan HTTP biasa.** Peserta tidak melihat halaman peringatan apa pun, hanya
-+tulisan "Not secure" di bilah alamat. Lancar, tapi seluruh lalu lintas terbuka,
-+termasuk **kata sandi fasilitator saat Anda membuka ruangan**. Untuk latihan
-+berisi skenario insiden bank, ini perlu Anda sampaikan ke yang berwenang, bukan
-+diputuskan sendiri.
-+
-+**Sertifikat buatan sendiri.** Jangan. Setiap peserta disambut layar merah
-+peringatan keamanan dan harus menekan Advanced lalu Proceed. Jauh lebih buruk
-+daripada halaman ngrok yang kemarin Anda hindari.
-+
-+**Jalan ketiga, dan ini yang saya sarankan:** ambil satu nama host gratis yang
-+menunjuk ke IP VM, misalnya lewat DuckDNS, lalu jalankan certbot. Hasilnya
-+HTTPS sungguhan, gembok hijau, tanpa peringatan apa pun, tanpa biaya. Nama
-+hostnya juga lebih enak dicetak di poster daripada deretan angka IP. Tambahan
-+kerjanya sekitar sepuluh menit.
-+
-+## 1. Siapkan VM
-+
-+Debian 12 atau Ubuntu 22.04, mesin terkecil sudah cukup. Aplikasi ini satu
-+proses Node tanpa basis data.
-+
-+```bash
-+sudo apt update
-+sudo apt install -y nodejs npm apache2 git
-+node --version     # harus 18 ke atas
-+```
-+
-+Kalau versinya di bawah 18, pasang dari NodeSource, jangan dari apt bawaan.
-+
-+## 2. Buka port 80 di firewall GCP
-+
-+Dari mesin yang punya `gcloud`, atau lewat konsol GCP:
-+
-+```bash
-+gcloud compute firewall-rules create ttx-live-allow-http \
-+  --project=PROJECT_ANDA \
-+  --allow=tcp:80 \
-+  --target-tags=ttx-live \
-+  --description="TTX Live, dibuka hanya selama periode latihan"
-+```
-+
-+lalu pasang tag `ttx-live` pada VM-nya. **Catat nama aturan ini.** Setelah
-+latihan selesai, hapus dengan `gcloud compute firewall-rules delete
-+ttx-live-allow-http` supaya tidak ada yang menganggur terbuka.
-+
-+## 3. Ambil kode dan build
-+
-+```bash
-+sudo useradd --system --home /opt/ttx-live --shell /usr/sbin/nologin ttx
-+sudo git clone https://github.com/leon4rd07/ttx-live.git /opt/ttx-live
-+cd /opt/ttx-live
-+sudo npm install
-+sudo npm run build
-+sudo chown -R ttx:ttx /opt/ttx-live
-+```
-+
-+## 4. Variabel lingkungan
-+
-+```bash
-+sudo install -d -m 750 /etc/ttx-live
-+sudo cp /opt/ttx-live/deploy/ttx-live.env.example /etc/ttx-live/ttx-live.env
-+sudo chmod 640 /etc/ttx-live/ttx-live.env
-+sudo nano /etc/ttx-live/ttx-live.env
-+```
-+
-+Isi minimal `HOST_KEY`. Sisanya sudah berisi default yang benar.
-+
-+Berkas ini **tidak boleh masuk git**. Yang ada di repo hanya contohnya.
-+
-+## 5. Jalankan sebagai service
-+
-+```bash
-+sudo cp /opt/ttx-live/deploy/ttx-live.service /etc/systemd/system/
-+sudo systemctl daemon-reload
-+sudo systemctl enable --now ttx-live
-+sudo systemctl status ttx-live
-+```
-+
-+Periksa dari dalam VM sebelum menyentuh Apache:
-+
-+```bash
-+curl -I http://127.0.0.1:3000/
-+```
-+
-+Harus menjawab `200`. Kalau tidak, `journalctl -u ttx-live -n 50` menunjukkan
-+sebabnya.
-+
-+## 6. Apache di depannya
-+
-+```bash
-+sudo a2enmod proxy proxy_http proxy_wstunnel headers
-+sudo cp /opt/ttx-live/deploy/ttx-live.conf /etc/apache2/sites-available/
-+sudo nano /etc/apache2/sites-available/ttx-live.conf    # isi ServerName
-+sudo a2dissite 000-default
-+sudo a2ensite ttx-live
-+sudo apache2ctl configtest
-+sudo systemctl reload apache2
-+```
-+
-+`proxy_wstunnel` adalah yang paling sering terlupa. Tanpa modul itu halamannya
-+terbuka normal tapi ruangan tidak pernah tersambung.
-+
-+## 7. Uji dari luar
-+
-+Buka `http://IP_PUBLIK/host` dari kuota ponsel, bukan dari dalam kantor. Yang
-+harus Anda lihat: pojok bilah menampilkan nomor build, dan tulisan
-+"Menyambung ulang" **tidak** menetap. Kalau tulisan itu tidak hilang hilang,
-+WebSocketnya tidak lolos dan tersangkanya `proxy_wstunnel`.
-+
-+Lalu masuk sebagai peserta dari perangkat lain dan pastikan kursinya terisi.
-+
-+## Memperbarui kode nanti
-+
-+```bash
-+cd /opt/ttx-live
-+sudo git pull
-+sudo npm install
-+sudo npm run build
-+sudo systemctl restart ttx-live
-+```
-+
-+## Setelah latihan selesai
-+
-+```bash
-+sudo systemctl stop ttx-live
-+gcloud compute firewall-rules delete ttx-live-allow-http
-+```
-diff --git a/deploy/ttx-live.conf b/deploy/ttx-live.conf
-new file mode 100644
-index 0000000..2f3bf1c
---- /dev/null
-+++ b/deploy/ttx-live.conf
-@@ -0,0 +1,53 @@
-+# Apache sebagai pintu depan TTX Live.
-+#
-+#   sudo a2enmod proxy proxy_http proxy_wstunnel headers
-+#   sudo cp deploy/ttx-live.conf /etc/apache2/sites-available/ttx-live.conf
-+#   sudo a2dissite 000-default
-+#   sudo a2ensite ttx-live
-+#   sudo apache2ctl configtest
-+#   sudo systemctl reload apache2
-+#
-+# Apache tidak menjalankan aplikasinya. Node yang berjalan di 127.0.0.1:3000
-+# lewat systemd, dan berkas ini hanya meneruskan ke sana.
-+
-+<VirtualHost *:80>
-+    # Isi dengan IP publik VM, atau nama host kalau nanti punya.
-+    ServerName GANTI_DENGAN_IP_ATAU_HOSTNAME
-+
-+    ProxyRequests Off
-+    ProxyPreserveHost On
-+
-+    # Urutan ini penting dan tidak boleh dibalik. /ws harus didahulukan,
-+    # karena ProxyPass mencocokkan dari atas. Kalau aturan "/" di bawah
-+    # ditaruh lebih dulu, permintaan upgrade WebSocket ikut jalur HTTP biasa,
-+    # halaman tetap terbuka, tapi ruangan tidak pernah tersambung dan layar
-+    # peserta berhenti di "Menyambung ulang".
-+    ProxyPass        /ws  ws://127.0.0.1:3000/ws  retry=0
-+    ProxyPassReverse /ws  ws://127.0.0.1:3000/ws
-+
-+    ProxyPass        /    http://127.0.0.1:3000/  retry=0
-+    ProxyPassReverse /    http://127.0.0.1:3000/
-+
-+    # Latihan berjalan dua sampai tiga jam dan socketnya menganggur di antara
-+    # inject. Default Apache memutus lebih cepat dari itu.
-+    ProxyTimeout 3600
-+
-+    # Aplikasinya sendiri tidak memuat apa pun dari luar.
-+    Header always set X-Content-Type-Options "nosniff"
-+    Header always set Referrer-Policy "no-referrer"
-+
-+    ErrorLog  ${APACHE_LOG_DIR}/ttx-live-error.log
-+    CustomLog ${APACHE_LOG_DIR}/ttx-live-access.log combined
-+</VirtualHost>
-+
-+# ----------------------------------------------------------------------
-+# Kalau nanti ada nama host, bukan cuma IP, jalankan:
-+#
-+#   sudo apt install certbot python3-certbot-apache
-+#   sudo certbot --apache -d nama-host-anda
-+#
-+# Certbot menulis sendiri blok <VirtualHost *:443> dan mengalihkan 80 ke 443.
-+# Aturan ProxyPass di atas disalin apa adanya ke blok itu, dan klien otomatis
-+# berpindah ke wss:// karena halamannya sudah https. Tidak ada kode yang
-+# perlu diubah.
-+# ----------------------------------------------------------------------
-diff --git a/deploy/ttx-live.env.example b/deploy/ttx-live.env.example
-new file mode 100644
-index 0000000..9f2346d
---- /dev/null
-+++ b/deploy/ttx-live.env.example
-@@ -0,0 +1,66 @@
-+# TTX Live — variabel lingkungan untuk VM
-+#
-+# Salin berkas ini ke server sebagai /etc/ttx-live/ttx-live.env lalu isi yang
-+# kosong. JANGAN commit berkas yang sudah terisi ke git: HOST_KEY adalah kata
-+# sandi, dan .gitignore di repo ini tidak menyaringnya.
-+#
-+#   sudo install -d -m 750 /etc/ttx-live
-+#   sudo cp deploy/ttx-live.env.example /etc/ttx-live/ttx-live.env
-+#   sudo chmod 640 /etc/ttx-live/ttx-live.env
-+#   sudo nano /etc/ttx-live/ttx-live.env
-+#
-+# Berkas ini dibaca systemd lewat EnvironmentFile=, bukan oleh Node sendiri.
-+# Proyek ini tidak memakai dotenv, jadi menaruh .env di folder aplikasi tidak
-+# berpengaruh apa apa.
-+
-+# ======================================================================
-+# 1. Dibaca langsung oleh server.js. Hanya tiga ini yang dilihat aplikasi.
-+# ======================================================================
-+
-+# Port internal yang didengar Node. Bukan port publik: Apache yang membuka 80,
-+# lalu meneruskan ke sini. Biarkan 3000 kecuali ada yang memakainya.
-+PORT=3000
-+
-+# Kata sandi fasilitator. Wajib diisi di alamat publik. Tanpa ini, siapa pun
-+# yang menemukan alamatnya bisa membuka ruangan sendiri dan menjalankan
-+# latihan. Pakai yang panjang dan acak, dan jangan sama dengan kata sandi lain.
-+HOST_KEY=
-+
-+# Tempat keadaan ruangan disimpan, supaya latihan tidak hilang kalau proses
-+# restart di tengah jalan. Foldernya dibuat systemd lewat StateDirectory dan
-+# dimiliki user service, jadi biarkan apa adanya.
-+SNAPSHOT_PATH=/var/lib/ttx-live/rooms.json
-+
-+# ======================================================================
-+# 2. Lokasi resource dan akses. TIDAK dibaca aplikasi. Dipakai unit systemd,
-+#    konfigurasi Apache, dan perintah gcloud saat memasang serta memperbarui.
-+# ======================================================================
-+
-+# Tempat kode berada di server, dan user yang menjalankannya. User ini sengaja
-+# tanpa login dan tanpa hak root.
-+APP_DIR=/opt/ttx-live
-+APP_USER=ttx
-+APP_GROUP=ttx
-+
-+# Letak Node. Periksa dengan: which node
-+NODE_BIN=/usr/bin/node
-+
-+# Sumber kode. Memperbarui aplikasi berarti git pull di APP_DIR lalu build.
-+REPO_URL=https://github.com/leon4rd07/ttx-live.git
-+REPO_BRANCH=main
-+
-+# Resource GCP tempat VM ini berada. Isi sesuai punya kolega Anda.
-+# Zona default di bawah adalah Jakarta; ganti kalau VM-nya di tempat lain.
-+GCP_PROJECT=
-+GCP_ZONE=asia-southeast2-a
-+GCP_INSTANCE=ttx-live
-+
-+# Alamat publik VM. SERVER_NAME dipakai di vhost Apache. Kalau hanya punya IP,
-+# isi keduanya dengan IP yang sama. Kalau nanti punya nama host, isi namanya di
-+# SERVER_NAME supaya HTTPS bisa dipasang.
-+PUBLIC_IP=
-+SERVER_NAME=
-+
-+# Nama aturan firewall GCP yang membuka port 80. Dicatat di sini supaya tidak
-+# perlu dicari cari saat menutupnya kembali setelah latihan selesai.
-+GCP_FIREWALL_RULE=ttx-live-allow-http
-diff --git a/deploy/ttx-live.service b/deploy/ttx-live.service
-new file mode 100644
-index 0000000..df0c023
---- /dev/null
-+++ b/deploy/ttx-live.service
-@@ -0,0 +1,53 @@
-+# Unit systemd untuk TTX Live.
-+#
-+#   sudo cp deploy/ttx-live.service /etc/systemd/system/ttx-live.service
-+#   sudo systemctl daemon-reload
-+#   sudo systemctl enable --now ttx-live
-+#
-+# Node dijalankan sebagai service supaya hidup lagi setelah VM reboot atau
-+# setelah proses mati. Ini yang membuat latihan tidak bergantung pada satu
-+# jendela terminal yang kebetulan terbuka.
-+
-+[Unit]
-+Description=TTX Live tabletop exercise server
-+Documentation=https://github.com/leon4rd07/ttx-live
-+After=network-online.target
-+Wants=network-online.target
-+
-+[Service]
-+Type=simple
-+User=ttx
-+Group=ttx
-+WorkingDirectory=/opt/ttx-live
-+
-+# Tiga variabel yang dibaca aplikasi datang dari sini. Kalau berkasnya hilang
-+# atau salah izin, service gagal start dan alasannya terbaca di journalctl.
-+EnvironmentFile=/etc/ttx-live/ttx-live.env
-+
-+ExecStart=/usr/bin/node server.js
-+
-+# Ruangan ada di memori. Kalau proses mati di tengah latihan, systemd
-+# menghidupkannya lagi dalam hitungan detik dan rooms.json memulihkan isinya.
-+Restart=always
-+RestartSec=3
-+
-+# Membuat /var/lib/ttx-live, dimiliki user service. Ini tempat rooms.json.
-+StateDirectory=ttx-live
-+StateDirectoryMode=0750
-+
-+# Pengetatan secukupnya. Aplikasi ini hanya perlu membaca foldernya sendiri dan
-+# menulis ke /var/lib/ttx-live.
-+NoNewPrivileges=true
-+PrivateTmp=true
-+ProtectSystem=full
-+ProtectHome=true
-+ProtectKernelTunables=true
-+ProtectControlGroups=true
-+RestrictSUIDSGID=true
-+
-+StandardOutput=journal
-+StandardError=journal
-+SyslogIdentifier=ttx-live
-+
-+[Install]
-+WantedBy=multi-user.target
 diff --git a/server.js b/server.js
-index aa20c48..78858ea 100644
+index 51109c6..78858ea 100644
 --- a/server.js
 +++ b/server.js
-@@ -21,6 +21,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
- const PORT = process.env.PORT || 3000;
- const SNAPSHOT = process.env.SNAPSHOT_PATH || join(__dirname, "rooms.json");
- const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
-+/* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
-+   Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
-+   melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
+@@ -24,7 +24,7 @@ const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
+ /* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
+    Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
+    melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
+-const SBUILD = "b44";
 +const SBUILD = "b46";
  const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
  
  /* Optional facilitator passcode. Unset means anyone reaching /host can run an
-@@ -54,42 +58,143 @@ const DEFAULTS = {
-   leaderboard: true,
- };
+@@ -139,6 +139,11 @@ function longestLimit(room, inj) {
+    daripada yang dijadwalkan untuk injectnya, jadi nilai antar unit tetap
+    sebanding. */
  
--/* Answer time for an inject: its own override, else the global default. */
--const limitFor = (room, injId) => {
--  const v = room.times?.[injId];
--  return v === "" || v == null ? room.settings.timeLimit : Number(v);
-+/* ---- jendela waktu: empat tingkat, dari yang paling khusus ----------------
-+
-+   Unit tidak selesai pada waktu yang sama, dan kadang perbedaannya memang
-+   disengaja: pertanyaan satu unit lebih berat daripada unit lain di inject yang
-+   sama. Karena itu jendela waktu dapat disetel per unit, bukan hanya per inject.
-+
-+   Urutannya: unit pada inject itu, lalu inject itu, lalu default global. Esai
-+   punya rangkaian yang sama, dengan satu tingkat tambahan di belakang: kalau
-+   tidak ada yang menyebut jendela esai, ia mengikuti jendela biasa.
-+
-+   Akibat sampingannya baik untuk penilaian. Bonus kecepatan dihitung terhadap
-+   jendela milik unit itu sendiri, jadi unit yang memang diberi waktu lebih
-+   panjang tidak otomatis kalah oleh unit yang pertanyaannya ringan. */
-+
-+const uKey = (injId, peran) => `${injId}::${peran}`;
-+const pick = (v) => (v === "" || v == null ? null : Number(v));
-+
-+/* Jendela menjawab untuk satu unit pada satu inject. */
-+const limitFor = (room, injId, peran) => {
-+  const u = peran == null ? null : pick(room.utimes?.[uKey(injId, peran)]);
-+  if (u != null) return u;
-+  const i = pick(room.times?.[injId]);
-+  if (i != null) return i;
-+  return room.settings.timeLimit;
- };
- 
--/* An essay takes longer to write than a tile takes to tap, so essays carry a
--   window of their own: the inject's essay override, else the global essay
--   default, else the ordinary window. */
--const essayBaseFor = (room, injId) => {
--  const v = room.etimes?.[injId];
--  if (v !== "" && v != null) return Number(v);
-+/* Esai butuh waktu menulis, bukan hanya waktu memutuskan, jadi ia punya
-+   rangkaiannya sendiri sebelum jatuh ke jendela biasa. */
-+const essayBaseFor = (room, injId, peran) => {
-+  const u = peran == null ? null : pick(room.uetimes?.[uKey(injId, peran)]);
-+  if (u != null) return u;
-+  const i = pick(room.etimes?.[injId]);
-+  if (i != null) return i;
-   const g = room.settings?.essayLimit;
--  return g === "" || g == null ? limitFor(room, injId) : Number(g);
-+  return g === "" || g == null ? limitFor(room, injId, peran) : Number(g);
- };
- /* Mengetik dan menekan kirim butuh waktu yang bukan kelambatan berpikir, jadi
-    kelonggaran ini ditambahkan ke jendela esai dan dipotong dari waktu yang
-    dinilai. Esai yang masuk dalam kelonggaran dihitung secepat mungkin. */
- const graceOf = (room) => Math.max(0, Number(room.settings?.essayGrace) || 0);
--const essayLimitFor = (room, injId) => {
--  const base = essayBaseFor(room, injId);
-+const essayLimitFor = (room, injId, peran) => {
-+  const base = essayBaseFor(room, injId, peran);
-   return base ? base + graceOf(room) : base;
- };
--const limitForQ = (room, injId, q) =>
--  (q?.type === "open" ? essayLimitFor(room, injId) : limitFor(room, injId));
-+const limitForQ = (room, injId, q) => (q?.type === "open"
-+  ? essayLimitFor(room, injId, q?.peran)
-+  : limitFor(room, injId, q?.peran));
- 
- /* The inject is done when its slowest question is done. Zero anywhere means
--   somebody has no limit at all, so nothing closes on its own. */
-+   somebody has no limit at all, so nothing closes on its own.
-+
-+   Dengan jendela per unit, "paling lambat" harus dihitung dari tiap pertanyaan,
-+   bukan dari satu angka milik inject, karena unit yang berbeda bisa punya jam
-+   yang berbeda di inject yang sama. */
- function longestLimit(room, inj) {
--  const a = limitFor(room, inj?.id);
--  if (!(inj?.questions || []).some((q) => q.type === "open")) return a;
--  const b = essayLimitFor(room, inj?.id);
--  if (!a || !b) return 0;
--  return Math.max(a, b);
-+  const qs = inj?.questions || [];
-+  if (!qs.length) return limitFor(room, inj?.id, null);
-+  let max = 0;
-+  for (const q of qs) {
-+    const v = limitForQ(room, inj.id, q);
-+    if (!v) return 0;                    // satu saja tanpa batas, inject tak menutup sendiri
-+    if (v > max) max = v;
-+  }
-+  return max;
-+}
-+
-+/* ---- jendela yang dibawa, dan susulan ------------------------------------
-+
-+   Satu ruangan hanya punya satu jam, dan dulu jam itu ikut berpindah bersama
-+   inject. Akibatnya unit yang masih mengerjakan inject lama kehilangan sisa
-+   waktunya begitu fasilitator menekan lanjut, padahal unit lain sudah selesai
-+   dan tidak ada gunanya menahan mereka menunggu.
-+
-+   Sekarang waktu yang sudah terpakai dicatat per inject di `spent`, dan inject
-+   yang ditinggalkan dalam keadaan masih berutang jawaban dipindah ke `carry`
-+   dengan jam aslinya, bukan jam baru. Dua akibatnya yang penting: unit yang
-+   tertinggal melanjutkan sisa waktunya, dan susulan yang dibuka nanti juga
-+   memakai sisa itu. Tidak ada unit yang bisa memperoleh waktu lebih banyak
-+   daripada yang dijadwalkan untuk injectnya, jadi nilai antar unit tetap
-+   sebanding. */
-+
 +/* Waktu yang dipakai semua hitungan ruangan ini. Saat latihan dijeda, waktu
 +   berhenti di satu titik, jadi tidak ada satu pun jendela yang terus menyusut
 +   sementara ruangan sedang menunggu. */
 +const nowOf = (room) => (room && room.pausedAt) || Date.now();
 +
-+const injById = (room, injId) =>
-+  room.deck.injects.find((i) => String(i.id) === String(injId));
-+
-+/* Siapa yang masih berutang jawaban di inject ini. */
-+function owedBy(room, inj) {
-+  if (!inj) return [];
-+  return Object.values(room.people || {})
-+    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
-+    .map((p) => p.pid);
-+}
-+
-+/* Waktu yang sudah dipakai inject ini, dibatasi jendelanya sendiri supaya
-+   jendela yang sudah lewat tidak tercatat lebih panjang daripada izinnya. */
-+function usedOf(room, injId, openedAt) {
-+  const limit = longestLimit(room, injById(room, injId)) * 1000;
+ const injById = (room, injId) =>
+   room.deck.injects.find((i) => String(i.id) === String(injId));
+ 
+@@ -154,7 +159,8 @@ function owedBy(room, inj) {
+    jendela yang sudah lewat tidak tercatat lebih panjang daripada izinnya. */
+ function usedOf(room, injId, openedAt) {
+   const limit = longestLimit(room, injById(room, injId)) * 1000;
+-  const run = Math.max(0, Date.now() - (openedAt || Date.now()));
 +  const now = nowOf(room);
 +  const run = Math.max(0, now - (openedAt || now));
-+  return limit ? Math.min(run, limit) : run;
-+}
-+
-+/* Sisa waktu inject ini. Nol berarti jendelanya tidak pernah menutup sendiri. */
-+function leftOf(room, injId) {
-+  const limit = longestLimit(room, injById(room, injId)) * 1000;
-+  if (!limit) return Infinity;
-+  return Math.max(0, limit - ((room.spent || {})[injId] || 0));
+   return limit ? Math.min(run, limit) : run;
  }
  
-+/* Jendela bawaan yang sudah tidak berlaku dibereskan saat dibaca, jadi tidak
-+   ada timer kedua yang perlu dijaga. Sebuah jendela mati kalau waktunya habis,
-+   kuncinya sudah dibuka, atau semua unit sudah menjawab. */
-+function sweepCarry(room) {
-+  room.carry = room.carry || {};
-+  room.spent = room.spent || {};
-+  for (const [injId, at] of Object.entries(room.carry)) {
-+    const inj = injById(room, injId);
-+    const limit = longestLimit(room, inj) * 1000;
+@@ -174,7 +180,7 @@ function sweepCarry(room) {
+   for (const [injId, at] of Object.entries(room.carry)) {
+     const inj = injById(room, injId);
+     const limit = longestLimit(room, inj) * 1000;
+-    const dead = !inj || (limit && Date.now() - at > limit + 800)
 +    const dead = !inj || (limit && nowOf(room) - at > limit + 800)
-+      || !!(room.keys || {})[injId] || !owedBy(room, inj).length;
-+    if (dead) {
-+      room.spent[injId] = usedOf(room, injId, at);
-+      delete room.carry[injId];
-+    }
-+  }
-+  return room.carry;
-+}
-+
-+/* Satu bentuk pesan keadaan, supaya setiap jalur mengirim medan yang sama. */
-+const stateMsg = (room) => ({ ...room.state, ran: Object.keys(room.ran || {}),
+       || !!(room.keys || {})[injId] || !owedBy(room, inj).length;
+     if (dead) {
+       room.spent[injId] = usedOf(room, injId, at);
+@@ -186,7 +192,7 @@ function sweepCarry(room) {
+ 
+ /* Satu bentuk pesan keadaan, supaya setiap jalur mengirim medan yang sama. */
+ const stateMsg = (room) => ({ ...room.state, ran: Object.keys(room.ran || {}),
+-  carry: sweepCarry(room), spent: room.spent || {},
 +  carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0,
-+  keyed: Object.keys(room.keys || {}) });
-+
+   keyed: Object.keys(room.keys || {}) });
+ 
  /* Who may do what. The facilitator who opened the room owns it and hands out
-    co-host codes, each carrying the role that code grants. */
- const ROLE_RANK = { owner: 3, full: 2, grader: 1, viewer: 0 };
-@@ -120,6 +225,15 @@ function restore() {
-     const now = Date.now();
-     for (const r of saved) {
-       if (now - r.touched > ROOM_TTL_MS) continue;
-+      /* Ruangan yang disimpan sebelum rekap ada tidak punya dua medan ini.
-+         Diisi di sini sekali, supaya tidak perlu dijaga di setiap pemakaian. */
-+      r.ran = r.ran || {};
-+      r.keys = r.keys || {};
-+      r.recap = r.recap || null;
-+      r.spent = r.spent || {};
-+      r.carry = r.carry || {};
-+      r.utimes = r.utimes || {};
-+      r.uetimes = r.uetimes || {};
-       rooms.set(r.id, r);
-       for (const [code, peran] of Object.entries(r.codes || {})) {
-         codeIndex.set(code, { roomId: r.id, peran });
-@@ -170,8 +284,11 @@ function armReveal(room) {
+@@ -278,7 +284,7 @@ function armReveal(room) {
    clearReveal(room.id);
    const inj = room.deck.injects[room.state.activeIdx];
    const limit = longestLimit(room, inj);
 -  if (!room.settings.autoReveal || !limit) return;
--  const fireIn = limit * 1000 + 1200; // small grace for in-flight answers
 +  if (!room.settings.autoReveal || !limit || room.pausedAt) return;
-+  /* Susulan berjalan dengan sisa waktu, jadi hitungannya dari jam yang sedang
-+     berjalan, bukan dari sekarang. Untuk inject biasa keduanya sama. */
-+  const run = Math.max(0, Date.now() - (room.state.openedAt || Date.now()));
-+  const fireIn = Math.max(0, limit * 1000 - run) + 1200; // grace for in-flight answers
-   revealTimers.set(room.id, setTimeout(() => {
-     const r = rooms.get(room.id);
-     if (!r || r.state.phase !== "open") return;
-@@ -219,7 +336,9 @@ function deckFor(room, peran) {
-     injects: room.deck.injects.map((i) => ({
-       id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
-       window: i.window,
--      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
-+      /* Jendela unit ini sendiri, bukan jendela inject, karena unit lain pada
-+         inject yang sama bisa punya jam yang berbeda. */
-+      limit: limitFor(room, i.id, peran), elimit: essayLimitFor(room, i.id, peran),
-       questions: i.questions
-         .filter((q) => q.peran === peran)
-         .map((q) => ({
-@@ -240,7 +359,9 @@ function screenDeck(room) {
-     injects: room.deck.injects.map((i) => ({
-       id: i.id, siklus: i.siklus, condition: i.condition, conditionAlt: i.conditionAlt || "",
-       roles: i.roles,
--      limit: limitFor(room, i.id), elimit: essayLimitFor(room, i.id),
-+      /* Proyektor menampilkan semua unit sekaligus, jadi yang berarti baginya
-+         adalah jendela yang paling lambat menutup. */
-+      limit: longestLimit(room, i), elimit: essayLimitFor(room, i.id, null),
-       questions: i.questions.map((q) => ({
-         qid: q.qid, peran: q.peran, text: q.text, alt: q.alt || "", type: q.type,
-         weighted: !!q.weighted,
-@@ -250,10 +371,14 @@ function screenDeck(room) {
-   };
- }
- 
--/* Participants only learn the key once answering has closed. */
--function sendKey(room) {
--  const inj = room.deck.injects[room.state.activeIdx];
--  if (!inj) return;
-+/* Participants only learn the key once answering has closed.
-+
-+   Kuncinya juga disimpan per inject, tidak sekadar disiarkan sekali lewat.
-+   Rekap di proyektor dan riwayat di layar peserta membaca inject yang sudah
-+   lewat, dan tanpa simpanan ini keduanya hanya bisa menampilkan jawaban tanpa
-+   kunci. Yang disimpan tetap hanya inject yang kuncinya memang sudah dibuka
-+   fasilitator, jadi tidak ada kunci yang bocor lebih awal. */
-+function keyOf(inj) {
-   const key = {};
-   inj.questions.forEach((q) => {
-     const idx = (q.choices || []).map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
-@@ -262,6 +387,14 @@ function sendKey(room) {
-     key[q.qid] = { i: idx[0], text: q.choices[idx[0]].text,
-       is: idx, texts: idx.map((i) => q.choices[i].text) };
-   });
-+  return key;
-+}
-+function sendKey(room) {
-+  const inj = room.deck.injects[room.state.activeIdx];
-+  if (!inj) return;
-+  const key = keyOf(inj);
-+  room.keys = room.keys || {};
-+  room.keys[inj.id] = key;
-   toRoom(room.id, { t: "key", injectId: inj.id, key });
- }
- 
-@@ -404,7 +537,8 @@ wss.on("connection", (ws) => {
-         const room = { id, deck: m.deck, settings, codes, people: {},
-           times: m.times || {}, etimes: m.etimes || {},
-           hostCodes: {}, ownerKey: newCode() + newCode(),
--          ran: {},
-+          ran: {}, keys: {}, recap: null, spent: {}, carry: {},
-+          utimes: m.utimes || {}, uetimes: m.uetimes || {},
-           state: { activeIdx: 0, phase: "lobby", openedAt: null, limit: null, elimit: null },
-           touched: Date.now() };
-         rooms.set(id, room);
-@@ -412,7 +546,9 @@ wss.on("connection", (ws) => {
-         sockets.set(ws, { roomId: id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
+   /* Susulan berjalan dengan sisa waktu, jadi hitungannya dari jam yang sedang
+      berjalan, bukan dari sekarang. Untuk inject biasa keduanya sama. */
+   const run = Math.max(0, Date.now() - (room.state.openedAt || Date.now()));
+@@ -541,7 +547,7 @@ wss.on("connection", (ws) => {
          send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
            etimes: room.etimes, state: room.state, role: "owner",
--          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [] });
-+          ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
+           ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
+-          carry: {}, spent: {}, keyed: [], sbuild: SBUILD,
 +          carry: {}, spent: {}, keyed: [], paused: 0, sbuild: SBUILD,
-+          utimes: room.utimes || {}, uetimes: room.uetimes || {} });
+           utimes: room.utimes || {}, uetimes: room.uetimes || {} });
          pushHosts(room);
          markSnapshot();
-         break;
-@@ -427,8 +563,11 @@ wss.on("connection", (ws) => {
-         sockets.set(ws, { roomId: byId.id, isHost: true, role: "owner", hostName: (m.hostName || "").trim() });
-         send(ws, { t: "hosted", roomId: byId.id, codes: byId.codes,
-           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
-+          utimes: byId.utimes || {}, uetimes: byId.uetimes || {},
+@@ -561,7 +567,7 @@ wss.on("connection", (ws) => {
            state: byId.state, role: "owner", ownerKey: byId.ownerKey,
--          hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}) });
-+          hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
-+          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+           hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
+           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+-          keyed: Object.keys(byId.keys || {}), sbuild: SBUILD });
 +          keyed: Object.keys(byId.keys || {}), paused: byId.pausedAt || 0, sbuild: SBUILD });
          send(ws, { t: "roster", people: roster(byId) });
          pushHosts(byId);
          break;
-@@ -478,8 +617,11 @@ wss.on("connection", (ws) => {
-           hostCode: code, hostName: (m.name || entry.label || "").trim() });
-         send(ws, { t: "cohosted", roomId: room.id, role: entry.role, code,
-           deck: room.deck, codes: room.codes, settings: room.settings,
--          times: room.times || {}, etimes: room.etimes || {}, state: room.state,
--          ran: Object.keys(room.ran || {}) });
-+          times: room.times || {}, etimes: room.etimes || {},
-+          utimes: room.utimes || {}, uetimes: room.uetimes || {}, state: room.state,
-+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
-+          recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {},
+@@ -615,7 +621,7 @@ wss.on("connection", (ws) => {
+           utimes: room.utimes || {}, uetimes: room.uetimes || {}, state: room.state,
+           ran: Object.keys(room.ran || {}), keys: room.keys || {},
+           recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {},
+-          sbuild: SBUILD });
 +          paused: room.pausedAt || 0, sbuild: SBUILD });
          send(ws, { t: "roster", people: roster(room) });
          if (room.state.keyShown) sendKey(room);
          pushHosts(room);
-@@ -491,6 +633,8 @@ wss.on("connection", (ws) => {
-         if (m.settings) byId.settings = { ...byId.settings, ...m.settings };
-         if (m.times) byId.times = { ...byId.times, ...m.times };
-         if (m.etimes) byId.etimes = { ...byId.etimes, ...m.etimes };
-+        if (m.utimes) byId.utimes = { ...byId.utimes, ...m.utimes };
-+        if (m.uetimes) byId.uetimes = { ...byId.uetimes, ...m.uetimes };
-         /* points-per-question or the mode may have moved — ceilings shift and every
-            grade already given has to be recomputed against the new numbers, then
-            pushed, or the host and the phones keep showing the old arithmetic */
-@@ -502,14 +646,15 @@ wss.on("connection", (ws) => {
-           if (pp) send(sk, { t: "ack", me: pp });
-         }
-         toRoom(byId.id, { t: "settings", settings: byId.settings, times: byId.times,
--          etimes: byId.etimes || {} });
-+          etimes: byId.etimes || {}, utimes: byId.utimes || {},
-+          uetimes: byId.uetimes || {} });
-         /* The window for the inject on screen may have just moved. Push the new
-            limit to every device and re-arm the auto-reveal against it, otherwise
-            the phones keep counting to the old number. */
-         const cur = byId.deck.injects[byId.state.activeIdx];
-         if (cur) {
--          byId.state = { ...byId.state, limit: limitFor(byId, cur.id),
--            elimit: essayLimitFor(byId, cur.id) };
-+          byId.state = { ...byId.state, limit: longestLimit(byId, cur),
-+            elimit: essayLimitFor(byId, cur.id, null) };
-           toRoom(byId.id, { t: "state", ...byId.state });
-           if (byId.state.phase === "open") armReveal(byId);
-         }
-@@ -527,6 +672,34 @@ wss.on("connection", (ws) => {
+@@ -666,6 +672,34 @@ wss.on("connection", (ws) => {
          break;
        }
  
@@ -719,225 +131,74 @@ index aa20c48..78858ea 100644
        /* ---- a code tells us the room, the unit, and whether its seat is free ---- */
        case "peek": {
          const hit = codeIndex.get(String(m.code || "").toUpperCase());
-@@ -579,7 +752,10 @@ wss.on("connection", (ws) => {
-         send(ws, { t: "joined", pid, roomId: room.id, peran: hit.peran,
-           deck: deckFor(room, hit.peran), state: room.state,
-           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
--          me: room.people[pid] });
-+          utimes: room.utimes || {}, uetimes: room.uetimes || {},
-+          me: room.people[pid],
-+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
+@@ -721,7 +755,7 @@ wss.on("connection", (ws) => {
+           utimes: room.utimes || {}, uetimes: room.uetimes || {},
+           me: room.people[pid],
+           ran: Object.keys(room.ran || {}), keys: room.keys || {},
+-          carry: sweepCarry(room), spent: room.spent || {} });
 +          carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0 });
          if (room.state.keyShown) sendKey(room); // joined after the key went out
          markDirty(room.id);
          markSnapshot();
-@@ -596,7 +772,10 @@ wss.on("connection", (ws) => {
-         sockets.set(ws, { roomId: room.id, pid: m.pid });
-         send(ws, { t: "joined", pid: m.pid, roomId: room.id, peran: me.peran,
-           deck: deckFor(room, me.peran), state: room.state,
--          settings: room.settings, times: room.times || {}, etimes: room.etimes || {}, me });
-+          settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
-+          utimes: room.utimes || {}, uetimes: room.uetimes || {}, me,
-+          ran: Object.keys(room.ran || {}), keys: room.keys || {},
+@@ -741,7 +775,7 @@ wss.on("connection", (ws) => {
+           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
+           utimes: room.utimes || {}, uetimes: room.uetimes || {}, me,
+           ran: Object.keys(room.ran || {}), keys: room.keys || {},
+-          carry: sweepCarry(room), spent: room.spent || {} });
 +          carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0 });
          if (room.state.keyShown) sendKey(room);
          markDirty(room.id);
          break;
-@@ -608,7 +787,11 @@ wss.on("connection", (ws) => {
-         sockets.set(ws, { roomId: byId.id, isScreen: true });
-         send(ws, { t: "screened", roomId: byId.id, deck: screenDeck(byId),
-           settings: byId.settings, times: byId.times || {}, etimes: byId.etimes || {},
--          state: byId.state, codes: byId.codes });
-+          utimes: byId.utimes || {}, uetimes: byId.uetimes || {},
-+          state: byId.state, codes: byId.codes,
-+          ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
-+          recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+@@ -757,7 +791,7 @@ wss.on("connection", (ws) => {
+           state: byId.state, codes: byId.codes,
+           ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
+           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
+-          sbuild: SBUILD });
 +          paused: byId.pausedAt || 0, sbuild: SBUILD });
          send(ws, { t: "roster", people: roster(byId) });
          if (byId.state.keyShown) sendKey(byId);
          break;
-@@ -652,9 +835,30 @@ wss.on("connection", (ws) => {
-       /* ---- phase changes; the answer clock starts here ---- */
-       case "state": {
-         if (!byId || !canDrive(ws)) return;
+@@ -820,7 +854,7 @@ wss.on("connection", (ws) => {
+         }
+         /* Membuka sebuah inject lewat jalur biasa berarti memberi jendela penuh
+            lagi, bukan menyambung. Yang menyambung sisa waktu hanya susulan. */
 -        const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
-+        byId.spent = byId.spent || {};
-+        byId.carry = byId.carry || {};
-+        /* Inject yang ditinggalkan dalam keadaan masih dibuka: waktunya dicatat,
-+           dan kalau ruangan benar benar berpindah sementara masih ada unit yang
-+           berutang jawaban, jendelanya dibiarkan hidup dengan jam aslinya.
-+           Berhenti di inject yang sama untuk membuka kunci bukan perpindahan,
-+           jadi itu menutup jendelanya seperti biasa. */
-+        const leaving = byId.deck.injects[byId.state.activeIdx];
-+        if (leaving && byId.state.phase === "open") {
-+          byId.spent[leaving.id] = usedOf(byId, leaving.id, byId.state.openedAt);
-+          const switching = m.activeIdx !== byId.state.activeIdx;
-+          const owed = owedBy(byId, leaving);
-+          if (switching && owed.length && leftOf(byId, leaving.id) > 1500
-+              && !(byId.keys || {})[leaving.id]) {
-+            byId.carry[leaving.id] = byId.state.openedAt;
-+          }
-+        }
-+        /* Membuka sebuah inject lewat jalur biasa berarti memberi jendela penuh
-+           lagi, bukan menyambung. Yang menyambung sisa waktu hanya susulan. */
 +        const openedAt = m.phase === "open" ? nowOf(byId) : byId.state.openedAt;
          const inj0 = byId.deck.injects[m.activeIdx];
          if (m.phase === "open" && inj0) {
-+          delete byId.spent[inj0.id];
-+          delete byId.carry[inj0.id];
-           byId.ran = byId.ran || {};
-           if (!byId.ran[inj0.id]) {
-             byId.ran[inj0.id] = true;
-@@ -673,9 +877,12 @@ wss.on("connection", (ws) => {
-         }
-         byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
-           keyShown: false,
--          limit: inj0 ? limitFor(byId, inj0.id) : byId.settings.timeLimit,
--          elimit: inj0 ? essayLimitFor(byId, inj0.id) : byId.settings.essayLimit };
--        toRoom(byId.id, { t: "state", ...byId.state, ran: Object.keys(byId.ran || {}) });
-+          /* Angka ini dipakai proyektor, yang menampilkan semua unit sekaligus,
-+             jadi yang berarti baginya adalah jendela yang paling lambat menutup.
-+             Tiap peserta menghitung jendelanya sendiri dari decknya. */
-+          limit: inj0 ? longestLimit(byId, inj0) : byId.settings.timeLimit,
-+          elimit: inj0 ? essayLimitFor(byId, inj0.id, null) : byId.settings.essayLimit };
-+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
-         if (m.phase === "open") armReveal(byId); else clearReveal(byId.id);
-         markDirty(byId.id);
-         markSnapshot();
-@@ -687,16 +894,33 @@ wss.on("connection", (ws) => {
-         if (!room) return;
-         const p = room.people[m.pid];
-         if (!p) return;
--        if (room.state.phase !== "open") return send(ws, { t: "locked" });
+           delete byId.spent[inj0.id];
+@@ -874,7 +908,8 @@ wss.on("connection", (ws) => {
  
--        const inj = room.deck.injects[room.state.activeIdx];
--        const elapsed = room.state.openedAt ? Date.now() - room.state.openedAt : 0;
-+        /* Jawaban membawa nomor injectnya sendiri, jadi unit yang tertinggal
-+           tetap bisa mengirim inject lama setelah ruangan pindah. Tanpa nomor
-+           itu, yang dimaksud adalah inject yang sedang berjalan, seperti dulu. */
-+        const act = room.deck.injects[room.state.activeIdx];
-+        const want = m.injectId == null ? act?.id : String(m.injectId);
-+        const onActive = act != null && String(act.id) === String(want);
-+        const carriedAt = sweepCarry(room)[want];
-+        if (onActive ? room.state.phase !== "open" : carriedAt == null) {
-+          return send(ws, { t: "locked" });
-+        }
-+
-+        const inj = onActive ? act : injById(room, want);
-+        const openedAt = onActive ? room.state.openedAt : carriedAt;
+         const inj = onActive ? act : injById(room, want);
+         const openedAt = onActive ? room.state.openedAt : carriedAt;
+-        const elapsed = openedAt ? Date.now() - openedAt : 0;
 +        if (room.pausedAt) return send(ws, { t: "paused" });
 +        const elapsed = openedAt ? nowOf(room) - openedAt : 0;
-+        /* Jendela bawaan dan susulan hanya menerima jawaban pertama. Tanpa batas
-+           ini, unit yang sudah selesai bisa memperbaiki jawabannya dengan apa
-+           yang sudah terdengar di ruangan sejak inject itu ditinggalkan. */
-+        const firstOnly = !onActive || !!room.state.catchup;
-         /* Each question closes on its own clock, so an essay can still be
-            arriving after the tiles have locked. */
-         let applied = 0, expired = 0;
-         for (const [qid, val] of Object.entries(m.answers || {})) {
-           const q = inj?.questions.find((x) => x.qid === qid);
-           if (!q || q.peran !== p.peran) continue;
-+          if (firstOnly && p.answers[qid]) continue;
-           const limit = limitForQ(room, inj?.id, q);
-           if (limit && elapsed > limit * 1000 + 800) { expired += 1; continue; }
-           applied += 1;
-@@ -730,6 +954,12 @@ wss.on("connection", (ws) => {
-         }
-         retally(room, p);
-         send(ws, { t: "ack", me: p });
-+        /* Jawaban yang masuk lewat jendela bawaan bisa menutup jendela itu, dan
-+           panel susulan fasilitator membaca daftar ini. */
-+        if (!onActive) {
-+          toRoom(room.id, { t: "carry", carry: sweepCarry(room), spent: room.spent || {},
-+            keyed: Object.keys(room.keys || {}) });
-+        }
-         markDirty(room.id);
-         markSnapshot();
-         break;
-@@ -738,8 +968,60 @@ wss.on("connection", (ws) => {
-       case "showkey": {
-         if (!byId || !canDrive(ws)) return;
-         byId.state = { ...byId.state, keyShown: true };
--        toRoom(byId.id, { t: "state", ...byId.state });
-+        /* Kunci yang sudah terdengar menutup jendela bawaan inject itu: tidak ada
-+           susulan setelah jawabannya dibacakan. sendKey yang mencatat kuncinya,
-+           jadi sweepCarry di bawahnya sudah melihat catatan itu. */
-         sendKey(byId);
-+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
-+        markSnapshot();
-+        break;
-+      }
-+
-+      /* ---- fasilitator melempar inject lama ke proyektor, atau melepasnya ----
-+
-+         Hanya nomor injectnya yang disiarkan. Proyektor sudah memegang deck dan
-+         roster, dan kunci inject lama hanya ada padanya kalau kunci itu memang
-+         sudah pernah dibuka, jadi rekap tidak bisa dipakai membocorkan kunci
-+         inject yang belum selesai. */
-+      case "recap": {
-+        if (!byId || !canDrive(ws)) return;
-+        const id = m.injectId == null ? null : String(m.injectId);
-+        const known = id != null && byId.deck.injects.some((i) => String(i.id) === id);
-+        byId.recap = known ? id : null;
-+        toRoom(byId.id, { t: "recap", injectId: byId.recap });
-+        break;
-+      }
-+
-+      /* ---- fasilitator membuka susulan untuk inject yang ditinggalkan ----
-+
-+         Seluruh ruangan kembali ke inject itu dengan sisa waktunya, dan unit yang
-+         sudah menjawab terkunci lewat `catchup`: jawabannya tidak bisa diubah
-+         lagi. Kalau kuncinya sudah pernah dibuka, susulan ditolak, karena
-+         jawaban yang benar sudah terdengar di ruangan. */
-+      case "catchup": {
-+        if (!byId || !canDrive(ws)) return;
-+        const id = String(m.injectId);
-+        const idx = byId.deck.injects.findIndex((i) => String(i.id) === id);
-+        const inj = byId.deck.injects[idx];
-+        if (!inj) return;
-+        if ((byId.keys || {})[id]) return send(ws, { t: "nocatchup", injectId: id, why: "key" });
-+        if (leftOf(byId, id) <= 1500) return send(ws, { t: "nocatchup", injectId: id, why: "time" });
-+        if (!owedBy(byId, inj).length) return send(ws, { t: "nocatchup", injectId: id, why: "done" });
-+
-+        byId.spent = byId.spent || {};
-+        byId.carry = byId.carry || {};
-+        delete byId.carry[id];
-+        byId.ran = byId.ran || {};
-+        byId.ran[id] = true;
-+        /* Jam dimundurkan sebanyak waktu yang sudah terpakai, jadi hitungan di
-+           semua perangkat langsung menunjukkan sisanya dan penilaian memakai
-+           total waktu berpikir, bukan hanya bagian terakhirnya. */
-+        byId.state = { activeIdx: idx, phase: "open", keyShown: false, catchup: true,
+         /* Jendela bawaan dan susulan hanya menerima jawaban pertama. Tanpa batas
+            ini, unit yang sudah selesai bisa memperbaiki jawabannya dengan apa
+            yang sudah terdengar di ruangan sejak inject itu ditinggalkan. */
+@@ -982,7 +1017,7 @@ wss.on("connection", (ws) => {
+            semua perangkat langsung menunjukkan sisanya dan penilaian memakai
+            total waktu berpikir, bukan hanya bagian terakhirnya. */
+         byId.state = { activeIdx: idx, phase: "open", keyShown: false, catchup: true,
+-          openedAt: Date.now() - (byId.spent[id] || 0),
 +          openedAt: nowOf(byId) - (byId.spent[id] || 0),
-+          limit: longestLimit(byId, inj), elimit: essayLimitFor(byId, inj.id, null) };
-+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
-+        armReveal(byId);
-+        markDirty(byId.id);
-         markSnapshot();
-         break;
-       }
+           limit: longestLimit(byId, inj), elimit: essayLimitFor(byId, inj.id, null) };
+         toRoom(byId.id, { t: "state", ...stateMsg(byId) });
+         armReveal(byId);
 diff --git a/src/App.jsx b/src/App.jsx
-index 075d990..1c34010 100644
+index 5a3eced..1c34010 100644
 --- a/src/App.jsx
 +++ b/src/App.jsx
 @@ -20,7 +20,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
  /* Bumping this version invalidates every stored session. A leftover
     session from an older build was the cause of the white screens. */
  const V = "v4";
--const BUILD = "b38";  // shown in the corner so you can confirm what is deployed
+-const BUILD = "b44";  // shown in the corner so you can confirm what is deployed
 +const BUILD = "b46";  // shown in the corner so you can confirm what is deployed
  const K_HOST = `ttx:${V}:host`;
  const K_ME = `ttx:${V}:me`;
  const K_KEY = `ttx:${V}:key`;
-@@ -173,7 +173,7 @@ function useLang() {
- /* Panduan menulis sheet. Tiap baris satu paragraf penuh, jadi terjemahannya
-    boleh menyusun ulang kalimatnya sendiri. */
- const HELP_SHEET = [
--  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.",
-+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, dalam menit. Angka pada baris pertama sebuah inject mengatur waktu inject itu; angka berbeda pada baris unit lain memberi unit tersebut jam sendiri.",
-   "Untuk pilihan ganda, tulis tiap opsi di barisnya sendiri dalam sel Jawaban (`A. …` / `B. …`) dan beri tanda `*` di depan opsi yang benar. Beri tanda pada *dua opsi atau lebih* dan pertanyaan itu menjadi centang semua yang sesuai.",
-   "Bintang juga bisa bertingkat kalau ada jawaban yang lebih tepat dan ada yang kurang tepat. `***` untuk yang terbaik, `**` untuk yang masih bisa diterima, `*` untuk yang lemah, tanpa bintang untuk yang salah. Poin dihitung sebanding dengan tingkat tertinggi di soal itu, jadi `3 2 1` dan `30 20 10` memberi hasil yang sama.",
-   "Bobot juga bisa diatur manual dengan angka dalam kurung siku, di awal atau akhir baris: `[3] B. Verifikasi alert` atau `B. Verifikasi alert [3]`. Angka nol berarti pilihan itu tidak bernilai. Bobot manual menang atas bintang, dan angkanya tetap dihitung sebanding dengan angka tertinggi di soal itu.",
 @@ -290,7 +290,13 @@ const AiNote = () => (
   * per connection and count in server time everywhere.
   * ---------------------------------------------------------------------- */
@@ -953,28 +214,7 @@ index 075d990..1c34010 100644
  function noteTimeSample(c, srv) {
    const now = Date.now(), rtt = now - c;
    if (rtt < 0 || rtt > 4000) return;
-@@ -584,6 +590,11 @@ function buildModel(rows) {
-       siklus: get(row, "siklus") || lastSiklus || "(no siklus)",
-       window: get(row, "window") || lastWindow,
-       ewindow: get(row, "ewindow") || lastEWindow,
-+      /* Nilai yang benar benar tertulis di baris ini, tanpa warisan dari baris
-+         sebelumnya. Inilah yang membedakan "unit ini punya jam sendiri" dari
-+         "baris ini hanya meneruskan jam injectnya". */
-+      windowOwn: get(row, "window"),
-+      ewindowOwn: get(row, "ewindow"),
-       question, answer: get(row, "answer"), roles: splitPeran(peranRaw),
-       qtype: TYPE_ALIASES[normKey(get(row, "qtype"))] || "",
-     });
-@@ -645,6 +656,8 @@ function buildModel(rows) {
-       inj.questions.push({
-         qid: `${r.inject}::${peran}::${r.srcRow}::${k}`,
-         peran, text: qq.text, alt: qq.alt, answerRaw: r.answer, type, choices, weighted,
-+        /* Dipakai sekali saat deck dimuat, untuk menurunkan jam per unit. */
-+        windowOwn: r.windowOwn, ewindowOwn: r.ewindowOwn,
-       });
-     });
-   });
-@@ -828,6 +841,26 @@ function Ring({ openedAt, limit, size = "s72", cap }) {
+@@ -835,6 +841,26 @@ function Ring({ openedAt, limit, size = "s72", cap }) {
    );
  }
  
@@ -1001,257 +241,52 @@ index 075d990..1c34010 100644
  const Crest = ({ peran, idx, size }) => (
    <span className="crest" style={{
      background: UNIT_VARS[(idx < 0 ? 0 : idx) % 6],
-@@ -835,7 +868,7 @@ const Crest = ({ peran, idx, size }) => (
-   }}>{monogram(peran)}</span>
- );
- 
--function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
-+function Bar({ left, right, onExit, exitLabel, conn, theme = true, srv }) {
-   return (
-     <header className="bar striped">
-       <div className="brand"><BrandLogo />{left}</div>
-@@ -846,7 +879,12 @@ function Bar({ left, right, onExit, exitLabel, conn, theme = true }) {
-             antarmukanya sendiri bisa diganti ke Inggris walau soalnya tidak. */}
-         <LangToggle />
-         {theme && <ThemeToggle />}
--        <span className="build">{BUILD}</span>
-+        {/* Kalau versi server berbeda dari versi tampilan, itu disebut di sini.
-+            Separuh fitur susulan ada di server, jadi perbedaan ini harus terlihat. */}
-+        <span className={`build ${srv && srv !== BUILD ? "mismatch" : ""}`}
-+          title={srv && srv !== BUILD ? t("Versi server berbeda dari versi tampilan") : ""}>
-+          {BUILD}{srv && srv !== BUILD ? tf(" · server {0}", srv) : ""}
-+        </span>
-         {onExit && <button className="btn quiet" onClick={onExit}>{exitLabel || t("Keluar")}</button>}
-       </div>
-     </header>
-@@ -904,6 +942,10 @@ function Host({ onExit }) {
-   });
-   const [times, setTimes] = useState({});
-   const [etimes, setEtimes] = useState({});     // jendela esai per inject
-+  /* Jendela per unit pada satu inject, berkunci "injectId::peran". Hanya berisi
-+     unit yang memang sengaja dibedakan dari jam injectnya. */
-+  const [utimes, setUtimes] = useState({});
-+  const [uetimes, setUetimes] = useState({});
-   const [ran, setRan] = useState([]);           // inject yang pernah dibuka
-   const [model, setModel] = useState(null);
-   const [warnings, setWarnings] = useState([]);
-@@ -917,7 +959,12 @@ function Host({ onExit }) {
-   const [notes, setNotes] = useState({});
-   const [revealKey, setRevealKey] = useState({});
-   const [roomOpen, setRoomOpen] = useState(false);
--  const [confirmNext, setConfirmNext] = useState(false);
-+  /* Satu pertanyaan untuk semua jalan keluar dari fase menjawab: pindah inject,
-+     menutup waktu menjawab, atau melompat lewat daftar di kiri. */
-+  const [ask, setAsk] = useState(null);
+@@ -936,6 +962,9 @@ function Host({ onExit }) {
+   /* Satu pertanyaan untuk semua jalan keluar dari fase menjawab: pindah inject,
+      menutup waktu menjawab, atau melompat lewat daftar di kiri. */
+   const [ask, setAsk] = useState(null);
 +  /* Titik waktu saat latihan dijeda, nol kalau sedang berjalan. Datang dari
 +     server, jadi semua perangkat membeku di titik yang sama. */
 +  const [paused, setPaused] = useState(0);
    const echo = useRef("");
    const [booted, setBooted] = useState(false);
    const [keyRequired, setKeyRequired] = useState(false);
-@@ -936,6 +983,23 @@ function Host({ onExit }) {
-   /* onMsg dibuat sekali, jadi ia membaca layar lewat ref, bukan lewat state. */
-   const screenRef = useRef("setup");
-   const [teamOpen, setTeamOpen] = useState(false);
-+  const [recapOpen, setRecapOpen] = useState(false);
-+  /* Inject lama yang sedang tampil di proyektor, dipegang server supaya
-+     fasilitator kedua melihat keadaan yang sama. */
-+  const [recapId, setRecapId] = useState(null);
-+  /* Inject yang ditinggalkan sementara masih ada unit yang berutang jawaban.
-+     `carry` memegang jam aslinya, `spent` memegang waktu yang sudah terpakai,
-+     dan keduanya datang dari server supaya fasilitator kedua melihat hal yang
-+     sama. `catchup` menandai bahwa yang sedang berjalan adalah susulan. */
-+  const [carry, setCarry] = useState({});
-+  const [spent, setSpent] = useState({});
-+  const [catchup, setCatchup] = useState(false);
-+  const [keyed, setKeyed] = useState([]);          // inject yang kuncinya sudah dibacakan
-+  /* Versi server. "lama" berarti server belum mengirimkannya sama sekali. */
-+  const [sbuild, setSbuild] = useState("");
-+  const [susulOpen, setSusulOpen] = useState(false);
-+  const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
-+  const [susulErr, setSusulErr] = useState("");
+@@ -971,7 +1000,6 @@ function Host({ onExit }) {
+   const [susulOpen, setSusulOpen] = useState(false);
+   const [susulAsk, setSusulAsk] = useState(null);   // inject yang menunggu konfirmasi
+   const [susulErr, setSusulErr] = useState("");
+-  const [unitTimeOpen, setUnitTimeOpen] = useState(false);
    const fileRef = useRef(null);
  
    /* Apa yang boleh dilakukan peran ini. Pemilik dan kendali penuh menjalankan
-@@ -952,12 +1016,17 @@ function Host({ onExit }) {
-     if (m.t === "hosted") {
-       setRoomId(m.roomId); setCodes(m.codes); setSettings(m.settings); setTimes(m.times || {});
-       setEtimes(m.etimes || {});
-+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
-       if (m.ran) setRan(m.ran);
-+      setRecapId(m.recap ?? null);
-       setRole(m.role || "owner");
-       if (m.ownerKey) setOwnerKey(m.ownerKey);
-       setHostCodes(m.hostCodes || {});
-       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
--      setKeyShown(!!m.state.keyShown);
-+      setKeyShown(!!m.state.keyShown); setCatchup(!!m.state.catchup);
-+      setCarry(m.carry || {}); setSpent(m.spent || {}); setKeyed(m.keyed || []);
-+      setSbuild(m.sbuild || "lama");
+@@ -998,6 +1026,7 @@ function Host({ onExit }) {
+       setKeyShown(!!m.state.keyShown); setCatchup(!!m.state.catchup);
+       setCarry(m.carry || {}); setSpent(m.spent || {}); setKeyed(m.keyed || []);
+       setSbuild(m.sbuild || "lama");
 +      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
        setOpenedAt(m.state.openedAt); setScreen("run");
      } else if (m.t === "cohosted") {
        /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
-@@ -966,12 +1035,19 @@ function Host({ onExit }) {
-       /* Fasilitator tambahan tidak memuat sheet apa pun: decknya datang dari server. */
-       setRoomId(m.roomId); setModel(m.deck); setCodes(m.codes || {});
-       setSettings(m.settings); setTimes(m.times || {}); setEtimes(m.etimes || {});
-+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
-       setRole(m.role || "viewer"); setOwnerKey("");
-       if (m.ran) setRan(m.ran);
-+      setRecapId(m.recap ?? null);
-       setActiveIdx(m.state.activeIdx); setPhase(m.state.phase);
+@@ -1014,6 +1043,7 @@ function Host({ onExit }) {
        setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
-+      setCatchup(!!m.state.catchup); setCarry(m.carry || {}); setSpent(m.spent || {});
-+      setKeyed(m.keyed || Object.keys(m.keys || {}));
+       setCatchup(!!m.state.catchup); setCarry(m.carry || {}); setSpent(m.spent || {});
+       setKeyed(m.keyed || Object.keys(m.keys || {}));
 +      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
-+      setSbuild(m.sbuild || "lama");
+       setSbuild(m.sbuild || "lama");
        setJoinErr(""); setScreen("run");
--    } else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
-+    } else if (m.t === "recap") setRecapId(m.injectId ?? null);
-+    else if (m.t === "hostcodes") setHostCodes(m.hostCodes || {});
-     else if (m.t === "hosts") setHosts(m.hosts || []);
-     else if (m.t === "nosuchhost") {
-       setJoinErr("Kode fasilitator itu tidak dikenali.");
-@@ -987,10 +1063,27 @@ function Host({ onExit }) {
-       setActiveIdx(m.activeIdx);
-       setPhase(m.phase);
-       setKeyShown(!!m.keyShown);
-+      setCatchup(!!m.catchup);
-+      if (m.carry) setCarry(m.carry);
-+      if (m.spent) setSpent(m.spent);
-+      if (m.keyed) setKeyed(m.keyed);
+     } else if (m.t === "recap") setRecapId(m.injectId ?? null);
+@@ -1037,6 +1067,7 @@ function Host({ onExit }) {
+       if (m.carry) setCarry(m.carry);
+       if (m.spent) setSpent(m.spent);
+       if (m.keyed) setKeyed(m.keyed);
 +      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
        if (m.openedAt) setOpenedAt(m.openedAt);
--    } else if (m.t === "roster") setPeople(m.people || []);
-+    } else if (m.t === "carry") {
-+      setCarry(m.carry || {}); setSpent(m.spent || {});
-+      if (m.keyed) setKeyed(m.keyed);
-+    }
-+    else if (m.t === "nocatchup") {
-+      setSusulAsk(null);
-+      setSusulErr(m.why === "key" ? "Kunci inject itu sudah dibuka, jadi susulan tidak bisa dijalankan lagi."
-+        : m.why === "done" ? "Semua unit sudah menjawab inject itu."
-+        : "Waktu inject itu sudah habis terpakai.");
-+    }
-+    else if (m.t === "roster") setPeople(m.people || []);
-     else if (m.t === "settings") {
-       setSettings(m.settings);
-+      if (m.utimes) setUtimes(m.utimes);
-+      if (m.uetimes) setUetimes(m.uetimes);
-       if (m.times) setTimes(m.times);
-       if (m.etimes) setEtimes(m.etimes);
-     }
-@@ -1061,6 +1154,23 @@ function Host({ onExit }) {
-     setDraftCodes(Object.fromEntries(built.roles.map((r) => [r, rand(4)])));
-     setTimes(Object.fromEntries(built.injects.map((i) => [i.id, i.window ? String(Math.round(Number(i.window) * 60)) : ""])));
-     setEtimes(Object.fromEntries(built.injects.map((i) => [i.id, i.ewindow ? String(Math.round(Number(i.ewindow) * 60)) : ""])));
-+    /* Jam per unit diturunkan dari kolom Waktu yang ditulis pada baris unit itu
-+       sendiri. Baris yang kosong mewarisi jam injectnya dan tidak menghasilkan
-+       apa apa di sini, begitu pula baris yang angkanya sama dengan injectnya.
-+       Jadi yang tercatat hanya unit yang memang sengaja dibedakan. */
-+    const mins = (v) => String(Math.round(Number(v) * 60));
-+    const u = {}, ue = {};
-+    built.injects.forEach((i) => {
-+      (i.questions || []).forEach((q) => {
-+        if (q.windowOwn && (!i.window || Number(q.windowOwn) !== Number(i.window))) {
-+          u[`${i.id}::${q.peran}`] = mins(q.windowOwn);
-+        }
-+        if (q.ewindowOwn && (!i.ewindow || Number(q.ewindowOwn) !== Number(i.ewindow))) {
-+          ue[`${i.id}::${q.peran}`] = mins(q.ewindowOwn);
-+        }
-+      });
-+    });
-+    setUtimes(u); setUetimes(ue);
-     setNotes({}); setActiveIdx(0); setPhase("lobby");
-     setScreen("config");
-   }
-@@ -1081,43 +1191,143 @@ function Host({ onExit }) {
-     if (keyIn) lsSet(K_KEY, keyIn);
-     if (hostName) lsSet(K_NAME, hostName);
-     send({ t: "host", deck: model, settings, codes: draftCodes, times, etimes,
--      key: keyIn, hostName });
-+      utimes, uetimes, key: keyIn, hostName });
+     } else if (m.t === "carry") {
+       setCarry(m.carry || {}); setSpent(m.spent || {});
+@@ -1230,6 +1261,57 @@ function Host({ onExit }) {
+     return max;
    };
  
-   const setInjectTime = (id, v) => {
-     setTimes((m) => ({ ...m, [id]: v }));
-     if (roomId) send({ t: "settings", roomId, times: { [id]: v } });
-   };
-+  /* Jam satu unit pada satu inject. Nilai kosong berarti unit itu kembali
-+     mengikuti jam injectnya, bukan berarti tanpa batas. */
-+  const setUnitTime = (id, peran, v) => {
-+    const k = `${id}::${peran}`;
-+    setUtimes((m) => ({ ...m, [k]: v }));
-+    if (roomId) send({ t: "settings", roomId, utimes: { [k]: v } });
-+  };
-+  const setUnitETime = (id, peran, v) => {
-+    const k = `${id}::${peran}`;
-+    setUetimes((m) => ({ ...m, [k]: v }));
-+    if (roomId) send({ t: "settings", roomId, uetimes: { [k]: v } });
-+  };
-   const setInjectETime = (id, v) => {
-     setEtimes((m) => ({ ...m, [id]: v }));
-     if (roomId) send({ t: "settings", roomId, etimes: { [id]: v } });
-   };
--  const limitOf = (id) => {
--    const v = times[id];
--    return v === "" || v == null ? settings.timeLimit : Number(v);
-+  const num = (v) => (v === "" || v == null ? null : Number(v));
-+  const limitOf = (id, peran) => {
-+    const u = peran == null ? null : num(utimes[`${id}::${peran}`]);
-+    if (u != null) return u;
-+    const i = num(times[id]);
-+    return i == null ? settings.timeLimit : i;
-   };
-   /* Esai memakai jendelanya sendiri: override inject, lalu default esai, lalu
-      jendela biasa. Dibaca sama persis seperti di server. */
--  const elimitOf = (id) => {
--    const v = etimes[id];
--    const base = v !== "" && v != null ? Number(v)
-+  const elimitOf = (id, peran) => {
-+    const u = peran == null ? null : num(uetimes[`${id}::${peran}`]);
-+    const i = u != null ? u : num(etimes[id]);
-+    const base = i != null ? i
-       : settings.essayLimit === "" || settings.essayLimit == null
--        ? limitOf(id) : Number(settings.essayLimit);
-+        ? limitOf(id, peran) : Number(settings.essayLimit);
-     return base ? base + (Number(settings.essayGrace) || 0) : base;
-   };
-   const hasEssay = (inj) => (inj?.questions || []).some((q) => q.type === "open");
-   /* Inject selesai ketika pertanyaan paling lambat selesai. */
-+  /* Dengan jam per unit, "paling lambat" dihitung dari tiap pertanyaan, bukan
-+     dari satu angka milik inject. Dibaca sama persis seperti di server. */
-   const longestOf = (inj) => {
--    const a = limitOf(inj?.id);
--    if (!hasEssay(inj)) return a;
--    const b = elimitOf(inj?.id);
--    return !a || !b ? 0 : Math.max(a, b);
-+    const qs = inj?.questions || [];
-+    if (!qs.length) return limitOf(inj?.id, null);
-+    let max = 0;
-+    for (const q of qs) {
-+      const v = q.type === "open" ? elimitOf(inj.id, q.peran) : limitOf(inj.id, q.peran);
-+      if (!v) return 0;
-+      if (v > max) max = v;
-+    }
-+    return max;
-+  };
-+  /* Jendela terpanjang untuk tiap jenis pertanyaan pada satu inject. Dua
-+     cincin di layar fasilitator memakainya, supaya cincin tidak habis lebih
-+     dulu daripada unit yang memang diberi waktu lebih panjang. */
-+  const maxOf = (inj, essay) => {
-+    const qs = (inj?.questions || []).filter((q) => (q.type === "open") === !!essay);
-+    if (!qs.length) return essay ? elimitOf(inj?.id, null) : limitOf(inj?.id, null);
-+    let max = 0;
-+    for (const q of qs) {
-+      const v = essay ? elimitOf(inj.id, q.peran) : limitOf(inj.id, q.peran);
-+      if (!v) return 0;
-+      if (v > max) max = v;
-+    }
-+    return max;
-+  };
-+
 +  /* Menambah waktu untuk satu unit saja, dari baris unit itu sendiri. Unit yang
 +     belum punya jam sendiri mendapatkannya di sini, jadi tambahan ini tidak
 +     merembet ke unit lain yang sudah selesai. */
@@ -1281,8 +316,7 @@ index 075d990..1c34010 100644
 +    if (!lims.length || lims.some((v) => !v)) return null;
 +    const el = Math.max(0, (serverNow() - (openedAt || serverNow())) / 1000);
 +    return Math.max(0, Math.round(Math.max(...lims) - el));
-   };
--  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan. */
++  };
 +
 +  /* Menetapkan sisa waktu satu unit saat inject sedang berjalan.
 +
@@ -1304,92 +338,26 @@ index 075d990..1c34010 100644
 +    }
 +  };
 +
-+  /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan.
-+
-+     Jam inject dan setiap jam per unit pada inject itu ikut bertambah, karena
-+     yang dimaksud fasilitator saat menekannya adalah "semua dapat tambahan
-+     sekian menit", bukan "unit tanpa pengecualian saja". */
-   const addTime = (id, secs, essay) => {
--    const cur = essay ? elimitOf(id) : limitOf(id);
--    const next = String(Math.max(0, Math.round(cur + secs)));
--    if (essay) setInjectETime(id, next); else setInjectTime(id, next);
-+    const bump = (v) => String(Math.max(0, Math.round(Number(v) + secs)));
-+    if (essay) setInjectETime(id, bump(elimitOf(id, null) - (Number(settings.essayGrace) || 0)));
-+    else setInjectTime(id, bump(limitOf(id, null)));
-+    const map = essay ? uetimes : utimes;
-+    const pre = `${id}::`;
-+    for (const [k, v] of Object.entries(map)) {
-+      if (!k.startsWith(pre) || v === "" || v == null) continue;
-+      const peran = k.slice(pre.length);
-+      if (essay) setUnitETime(id, peran, bump(v)); else setUnitTime(id, peran, bump(v));
-+    }
-   };
+   /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan.
  
-   const patchSettings = (patch) => {
-@@ -1138,6 +1348,46 @@ function Host({ onExit }) {
-     return tf("Unit {0}", i < 0 ? "?" : String.fromCharCode(65 + i));
+      Jam inject dan setiap jam per unit pada inject itu ikut bertambah, karena
+@@ -1294,12 +1376,6 @@ function Host({ onExit }) {
+     return Math.max(0, Math.round((lim - run) / 1000));
    };
-   const seatOf = (peran) => people.find((p) => p.peran === peran);
-+
-+  /* ---- siapa yang masih berutang jawaban ----------------------------------
-+
-+     Dihitung dengan urutan yang sama seperti server, dan hanya untuk unit yang
-+     kursinya memang terisi, supaya peringatan di sini tidak menyebut unit yang
-+     belum pernah masuk sementara server menganggapnya tidak berutang.
-+
-+     Letaknya sengaja di atas tombol dan pintasan papan ketik, karena keduanya
-+     membacanya sebelum menutup jendela menjawab. */
-+  const owedOn = (inj) => (!inj ? [] : people
-+    .filter((p) => (inj.questions || []).some((q) => q.peran === p.peran && !p.answers?.[q.qid]))
-+    .map((p) => p.peran));
-+  /* Sisa detik sebuah inject yang sudah ditinggalkan. null berarti jendelanya
-+     tidak pernah menutup sendiri. */
-+  const leftSec = (inj) => {
-+    const lim = longestOf(inj) * 1000;
-+    if (!lim) return null;
-+    return Math.max(0, Math.round((lim - (Number(spent[inj?.id]) || 0)) / 1000));
-+  };
-+  /* Sisa detik inject yang sedang berjalan, dihitung dari jamnya sendiri karena
-+     waktu terpakai baru dicatat saat inject itu ditinggalkan. */
-+  const leftNowSec = () => {
-+    const lim = longestOf(inject) * 1000;
-+    if (!lim) return null;
-+    const run = Math.max(0, serverNow() - (openedAt || serverNow()));
-+    return Math.max(0, Math.round((lim - run) / 1000));
-+  };
-+  const owedNow = phase === "open" ? owedOn(inject) : [];
-+  /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
-+     dibaca lewat ref, bukan lewat tangkapan render. */
-+  const owedRef = useRef([]);
-+  owedRef.current = owedNow;
-+  /* Inject yang masih bisa disusulkan: ada unit yang berutang, kuncinya belum
-+     dibuka, dan waktunya belum habis. Yang sedang berjalan tidak ikut. */
-+  const susulList = (model?.injects || [])
-+    .map((inj, idx) => ({ inj, idx, owed: owedOn(inj), left: leftSec(inj) }))
-+    .filter((x) => x.idx !== activeIdx && x.owed.length > 0
-+      && !keyed.includes(String(x.inj.id))
-+      && (Number(spent[x.inj.id]) || 0) > 0 && (x.left === null || x.left > 1));
-+
-   const openProjector = useCallback(() => {
-     if (roomId) window.open(`/screen#${roomId}`, "_blank", "noopener");
-   }, [roomId]);
-@@ -1145,21 +1395,46 @@ function Host({ onExit }) {
-   /* ---- keyboard: the room is watching, don't hunt for buttons ---- */
-   const goNext = useCallback(() => {
-     if (!model) return;
--    setConfirmNext(false); echo.current = "";
-+    setAsk(null); echo.current = "";
-     setActiveIdx((i) => Math.min(model.injects.length - 1, i + 1));
-     setPhase("briefing");
-   }, [model]);
-   const goPrev = useCallback(() => {
--    setConfirmNext(false); echo.current = "";
-+    setAsk(null); echo.current = "";
-     setActiveIdx((i) => Math.max(0, i - 1));
-     setPhase("briefing");
+   const owedNow = phase === "open" ? owedOn(inject) : [];
+-  /* Berapa unit yang jamnya sengaja dibedakan pada inject yang sedang tampil. */
+-  const unitSetCount = !inject ? 0 : (inject.roles || []).filter((r) => {
+-    const k = `${inject.id}::${r}`;
+-    const a = utimes[k], b = uetimes[k];
+-    return (a !== "" && a != null) || (b !== "" && b != null);
+-  }).length;
+   /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
+      dibaca lewat ref, bukan lewat tangkapan render. */
+   const owedRef = useRef([]);
+@@ -1330,6 +1406,20 @@ function Host({ onExit }) {
    }, []);
-+  const doReveal = () => { echo.current = ""; setPhase("revealed"); };
-+  const doJump = (i) => { echo.current = ""; setAsk(null); setActiveIdx(i); setPhase("briefing"); };
+   const doReveal = () => { echo.current = ""; setPhase("revealed"); };
+   const doJump = (i) => { echo.current = ""; setAsk(null); setActiveIdx(i); setPhase("briefing"); };
 +  /* Peringatan yang sedang terbuka dipegang di ref juga, supaya papan ketik
 +     bisa menjawabnya tanpa membuat pendengar tombol dipasang ulang tiap kali
 +     peringatannya berubah. */
@@ -1404,27 +372,10 @@ index 075d990..1c34010 100644
 +    else if (a.kind === "phase") { echo.current = ""; setPhase(a.to); }
 +    else doReveal();
 +  }, [goNext]);
-+  /* Satu pintu. Semua jalan yang menutup jendela menjawab atau berpindah inject
-+     lewat sini, jadi peringatannya tidak bisa terlewat hanya karena fasilitator
-+     memakai papan ketik atau daftar inject di kiri, bukan tombolnya. */
-+  const guard = (what, run) => {
-+    if (phase === "open" && owedRef.current.length > 0) setAsk(what);
-+    else run();
-+  };
-   const advance = useCallback(() => {
-     echo.current = "";
-     if (phase === "lobby") setPhase("briefing");
-     else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
--    else if (phase === "open") setPhase("revealed");
--    else goNext();
-+    else if (phase === "open") {
-+      if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
-+      else setPhase("revealed");
-+    } else goNext();
-   }, [phase, goNext]);
- 
-   useEffect(() => {
-@@ -1167,19 +1442,36 @@ function Host({ onExit }) {
+   /* Satu pintu. Semua jalan yang menutup jendela menjawab atau berpindah inject
+      lewat sini, jadi peringatannya tidak bisa terlewat hanya karena fasilitator
+      memakai papan ketik atau daftar inject di kiri, bukan tombolnya. */
+@@ -1352,6 +1442,15 @@ function Host({ onExit }) {
      const onKey = (e) => {
        if (e.target.closest && e.target.closest("input, textarea, select")) return;
        if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1439,22 +390,8 @@ index 075d990..1c34010 100644
 +      }
        const k = String(e.key).toLowerCase();
        if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
--      else if (k === "r" && phase === "open" && canDrive) { echo.current = ""; setPhase("revealed"); }
-+      else if (k === "r" && phase === "open" && canDrive) {
-+        if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
-+        else { echo.current = ""; setPhase("revealed"); }
-+      }
-       else if (k === "k" && phase === "revealed" && !keyShown && canDrive) send({ t: "showkey", roomId });
-       else if (k === "c") setRoomOpen((v) => !v);
-       else if (k === "p") openProjector();
--      else if (e.key === "ArrowRight") { if (canDrive) goNext(); }
-+      else if (e.key === "ArrowRight") {
-+        if (!canDrive) return;
-+        if (phase === "open" && owedRef.current.length > 0) setAsk({ kind: "next" });
-+        else goNext();
-+      }
-       else if (e.key === "ArrowLeft") { if (canDrive) goPrev(); }
-       else if (e.key === "Escape") setRoomOpen(false);
+       else if (k === "r" && phase === "open" && canDrive) {
+@@ -1371,7 +1470,8 @@ function Host({ onExit }) {
      };
      window.addEventListener("keydown", onKey);
      return () => window.removeEventListener("keydown", onKey);
@@ -1464,45 +401,10 @@ index 075d990..1c34010 100644
  
    /* ---- setup ---- */
    if (screen === "setup") {
-@@ -1408,17 +1700,26 @@ function Host({ onExit }) {
-   }
- 
-   const answeredBy = (q) => people.filter((p) => p.peran === q.peran && p.answers?.[q.qid]);
-+  /* ---- siapa yang masih berutang, dan berapa sisa waktu sebuah inject ----
-+
-+     Dihitung dengan urutan yang sama seperti server, dan hanya untuk unit yang
-+     kursinya memang terisi, supaya peringatan di sini tidak menyebut unit yang
-+     belum pernah masuk sementara server menganggapnya tidak berutang. */
-   const seatsHere = inject.roles.map(seatOf).filter(Boolean);
-   const allIn = seatsHere.length === inject.roles.length && seatsHere.length > 0 &&
-     inject.questions.every((q) => seatOf(q.peran)?.answers?.[q.qid]);
- 
-   return (
-     <>
--      <Bar conn={status} onExit={onExit}
-+      <Bar conn={status} onExit={onExit} srv={roomId ? sbuild : ""}
-         left={<>
-           <span className="crumb">{inject.siklus}</span>
-           <b className="injno">{tf("Inject {0}", inject.id)}</b>
-           <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
-+            /* Menutup waktu menjawab dari sini pun harus lewat pintu yang sama. */
-+            if (k !== "open" && phase === "open" && owedRef.current.length > 0) {
-+              return setAsk({ kind: "phase", to: k });
-+            }
-             echo.current = "";
-             if (k === "open" && phase !== "open") setOpenedAt(serverNow());
-             setPhase(k);
-@@ -1436,6 +1737,20 @@ function Host({ onExit }) {
-           <button className="btn quiet" onClick={() => setRoomOpen(true)}>
-             {t("Kursi")} · {people.length}/{model.roles.length}
+@@ -1644,6 +1744,13 @@ function Host({ onExit }) {
+             title={t("Inject yang ditinggalkan dan masih bisa diselesaikan")}>
+             {t("Susulan")} · {susulList.length}
            </button>
-+          <button className={`btn quiet ${recapId ? "on" : ""}`} onClick={() => setRecapOpen(true)}
-+            title={t("Buka inject yang sudah dijalankan")}>{t("Rekap")}</button>
-+          <button className={`btn quiet ${susulList.length ? "on" : ""}`}
-+            onClick={() => { setSusulErr(""); setSusulAsk(null); setSusulOpen(true); }}
-+            title={t("Inject yang ditinggalkan dan masih bisa diselesaikan")}>
-+            {t("Susulan")} · {susulList.length}
-+          </button>
 +          {canDrive && settings.mode === "auto" && (
 +            <button className={`btn quiet pill ${paused ? "on" : ""}`}
 +              title={t(paused ? "Jalankan lagi jam semua unit" : "Hentikan sementara jam semua unit")}
@@ -1513,28 +415,10 @@ index 075d990..1c34010 100644
            <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
            <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
          </>} />
-@@ -1448,6 +1763,36 @@ function Host({ onExit }) {
-           onLobby={() => { echo.current = ""; setPhase("lobby"); setRoomOpen(false); }} />
+@@ -1674,6 +1781,18 @@ function Host({ onExit }) {
+           onClose={() => { setSusulOpen(false); setSusulAsk(null); }} />
        )}
  
-+      {recapOpen && (
-+        <RecapPanel {...{ model, ran, activeIdx, people, unitOf, roleIdx, settings, recapId, canDrive }}
-+          onShow={(id) => { setRecapId(id); send({ t: "recap", roomId, injectId: id }); }}
-+          onClose={() => setRecapOpen(false)} />
-+      )}
-+
-+      {susulOpen && (
-+        <SusulPanel {...{ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr, catchup, inject }}
-+          onAsk={(id) => { setSusulErr(""); setSusulAsk(id); }}
-+          onCancel={() => setSusulAsk(null)}
-+          onRun={(id) => {
-+            setSusulAsk(null); setSusulOpen(false); setAsk(null);
-+            echo.current = "";
-+            send({ t: "catchup", roomId, injectId: id });
-+          }}
-+          onClose={() => { setSusulOpen(false); setSusulAsk(null); }} />
-+      )}
-+
 +      {paused > 0 && (
 +        <div className="pausebar" role="status">
 +          <b>{t("Latihan dijeda.")}</b>{" "}
@@ -1550,33 +434,59 @@ index 075d990..1c34010 100644
        {teamOpen && (
          <TeamPanel {...{ hosts, hostCodes, isOwner, role, status }}
            onResync={resync}
-@@ -1468,7 +1813,7 @@ function Host({ onExit }) {
-                   {head && <li className="tlhead">{inj.siklus}</li>}
-                   <li className={`tlrow ${state}`}>
-                     <button disabled={!canDrive}
--                      onClick={() => { echo.current = ""; setActiveIdx(i); setPhase("briefing"); }}>
-+                      onClick={() => guard({ kind: "jump", idx: i }, () => doJump(i))}>
-                       <span className="tldot" aria-hidden="true" />
-                       <span className="tlno">{inj.id}</span>
-                       <span className="tltext">{words}{words ? "…" : "·"}</span>
-@@ -1536,12 +1881,12 @@ function Host({ onExit }) {
-                 </>)}
- 
-                 {phase === "open" && (<>
--                  {settings.mode === "auto" && limitOf(inject.id) > 0
--                    ? <Ring openedAt={openedAt} limit={limitOf(inject.id)}
-+                  {settings.mode === "auto" && maxOf(inject, false) > 0
-+                    ? <Ring openedAt={openedAt} limit={maxOf(inject, false)}
-                         cap={hasEssay(inject) ? t("pilihan") : ""} />
-                     : <span className="msg">{t("Jawaban sudah dibuka.")}</span>}
--                  {settings.mode === "auto" && hasEssay(inject) && elimitOf(inject.id) > 0 && (
--                    <Ring openedAt={openedAt} limit={elimitOf(inject.id)} cap={t("esai")} />
-+                  {settings.mode === "auto" && hasEssay(inject) && maxOf(inject, true) > 0 && (
-+                    <Ring openedAt={openedAt} limit={maxOf(inject, true)} cap={t("esai")} />
+@@ -1754,51 +1873,6 @@ function Host({ onExit }) {
+                       </>)}
+                     </span>
                    )}
-                   <span className="msg">
-                     {seatsHere.length === 0 ? t("Belum ada unit yang mengambil kursi untuk inject ini")
-@@ -1610,8 +1955,12 @@ function Host({ onExit }) {
+-                  {/* Jam per unit untuk inject ini. Ditutup secara bawaan, karena
+-                      sebagian besar inject tidak memerlukannya, tapi hitungannya
+-                      disebut di tombol supaya pengecualian tidak terlupakan. */}
+-                  {settings.mode === "auto" && canDrive && (
+-                    <span className="unittimes">
+-                      <button className="link" onClick={() => setUnitTimeOpen((v) => !v)}>
+-                        {t(unitTimeOpen ? "Sembunyikan waktu per unit" : "Waktu per unit")}
+-                        {unitSetCount > 0 ? tf(" · {0} disetel", unitSetCount) : ""}
+-                      </button>
+-                      {unitTimeOpen && (
+-                        <span className="utbox">
+-                          <span className="hint">
+-                            {t("Kosongkan berarti unit itu mengikuti waktu inject. Angka di sini hanya berlaku untuk inject ini, dan skor tiap unit dihitung terhadap jendelanya sendiri.")}
+-                          </span>
+-                          {inject.roles.map((r) => {
+-                            const qs = (inject.questions || []).filter((q) => q.peran === r);
+-                            const anyEssay = qs.some((q) => q.type === "open");
+-                            const anyTile = qs.some((q) => q.type !== "open");
+-                            return (
+-                              <span key={r} className="utrow">
+-                                <span className="utname">
+-                                  <Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}
+-                                </span>
+-                                {anyTile && (<>
+-                                  <input type="number" min="0" step="5"
+-                                    placeholder={String(limitOf(inject.id, null))}
+-                                    value={utimes[`${inject.id}::${r}`] ?? ""}
+-                                    onChange={(e) => setUnitTime(inject.id, r, e.target.value)} />
+-                                  <span className="unit">{t("pilihan")}</span>
+-                                </>)}
+-                                {anyEssay && (<>
+-                                  <input type="number" min="0" step="30"
+-                                    placeholder={String(Math.max(0,
+-                                      elimitOf(inject.id, null) - (Number(settings.essayGrace) || 0)))}
+-                                    value={uetimes[`${inject.id}::${r}`] ?? ""}
+-                                    onChange={(e) => setUnitETime(inject.id, r, e.target.value)} />
+-                                  <span className="unit">{t("esai")}</span>
+-                                </>)}
+-                              </span>
+-                            );
+-                          })}
+-                        </span>
+-                      )}
+-                    </span>
+-                  )}
+                   {canDrive && (
+                     <button className="btn" onClick={() => {
+                       echo.current = ""; setOpenedAt(serverNow()); setPhase("open");
+@@ -1881,8 +1955,12 @@ function Host({ onExit }) {
                  </div>
                )}
  
@@ -1591,7 +501,7 @@ index 075d990..1c34010 100644
                    {inject.roles.map((r) => {
                      const seat = seatOf(r);
                      const qs = inject.questions.filter((q) => q.peran === r);
-@@ -1619,17 +1968,82 @@ function Host({ onExit }) {
+@@ -1890,17 +1968,82 @@ function Host({ onExit }) {
                      const pct = qs.length ? Math.round((done / qs.length) * 100) : 0;
                      const finishedMs = seat && qs.length && done === qs.length
                        ? Math.max(...qs.map((q) => seat.answers[q.qid]?.ms || 0)) : null;
@@ -1680,55 +590,50 @@ index 075d990..1c34010 100644
                        </div>
                      );
                    })}
-@@ -1662,6 +2076,16 @@ function Host({ onExit }) {
-                 </div>
-               )}
- 
-+              {/* Siapa yang belum mengirim, terbaca terus menerus. Fasilitator perlu
-+                  tahu ini untuk memutuskan kapan lanjut, tanpa membuka panel. */}
-+              {canDrive && phase === "open" && (
-+                <p className={`owednow ${owedNow.length ? "wait" : "done"}`}>
-+                  {owedNow.length === 0
-+                    ? t("Semua unit sudah mengirim jawaban.")
-+                    : tf("Belum menjawab: {0}", owedNow.map(unitOf).join(", "))}
-+                </p>
-+              )}
-+
-               <div className="nav">
-                 <button className="btn quiet" disabled={activeIdx === 0 || !canDrive} onClick={goPrev}>{t("Sebelumnya")}</button>
-                 {!canDrive ? (
-@@ -1671,15 +2095,7 @@ function Host({ onExit }) {
+@@ -1951,39 +2094,6 @@ function Host({ onExit }) {
+                       ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
                        : "Anda memantau. Perpindahan inject dipegang fasilitator utama.")}
                    </span>
-                 ) : activeIdx < model.injects.length - 1 ? (
--                  confirmNext ? (
--                    <span className="confirm">
--                      <span className="msg">{tf("Pindahkan semua ke inject {0}?", model.injects[activeIdx + 1].id)}</span>
--                      <button className="btn quiet" onClick={() => setConfirmNext(false)}>{t("Batal")}</button>
--                      <button className="btn" onClick={goNext}>{t("Ya, lanjut")}</button>
+-                ) : ask ? (
+-                  <span className="confirm">
+-                    <span className="msg">
+-                      {ask.kind === "reveal" || ask.kind === "phase"
+-                        ? t("Tutup waktu menjawab sekarang?")
+-                        : tf("Pindahkan semua ke inject {0}?",
+-                          model.injects[ask.kind === "jump" ? ask.idx : activeIdx + 1]?.id)}
 -                    </span>
--                  ) : (
--                    <button className="btn" onClick={() => setConfirmNext(true)}>{t("Inject berikutnya")}</button>
--                  )
-+                  <button className="btn" onClick={() => setAsk({ kind: "next" })}>{t("Inject berikutnya")}</button>
+-                    {owedNow.length > 0 && (
+-                      <span className="owedwarn">
+-                        <b>{tf("Belum selesai di inject ini: {0}.",
+-                          owedNow.map(unitOf).join(", "))}</b>{" "}
+-                        {ask.kind === "reveal" || ask.kind === "phase"
+-                          ? t("Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.")
+-                          : leftNowSec() === null
+-                            ? t("Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.")
+-                            : tf("Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.", fmt(leftNowSec()))}{" "}
+-                        {ask.kind === "reveal" || ask.kind === "phase" ? "" :
+-                          t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
+-                      </span>
+-                    )}
+-                    <button className="btn quiet" onClick={() => setAsk(null)}>{t("Batal")}</button>
+-                    <button className="btn" onClick={() => {
+-                      const a = ask; setAsk(null);
+-                      if (!a) return;
+-                      if (a.kind === "jump") doJump(a.idx);
+-                      else if (a.kind === "next") goNext();
+-                      else if (a.kind === "phase") { echo.current = ""; setPhase(a.to); }
+-                      else doReveal();
+-                    }}>
+-                      {t(ask.kind === "reveal" || ask.kind === "phase" ? "Ya, tutup" : "Ya, lanjut")}
+-                    </button>
+-                  </span>
+                 ) : activeIdx < model.injects.length - 1 ? (
+                   <button className="btn" onClick={() => setAsk({ kind: "next" })}>{t("Inject berikutnya")}</button>
                  ) : (
-                   <button className="btn" onClick={() => setScreen("report")}>{t("Selesai")}</button>
-                 )}
-@@ -1701,6 +2117,277 @@ function Host({ onExit }) {
- 
- /* Beberapa fasilitator dalam satu ruangan. Pemilik membuat kode, dan tiap kode
-    membawa perannya sendiri, jadi peran ditentukan saat kode dibuat. */
-+/* Rekap inject yang sudah dijalankan, untuk dibahas lagi di inject berikutnya.
-+   Fasilitator memegang deck lengkap beserta tanda kunci, dan roster membawa
-+   seluruh jawaban tiap unit sejak awal, jadi panel ini tidak meminta apa pun
-+   ke server. Yang lewat jaringan hanya satu hal: nomor inject yang dilempar ke
-+   proyektor. */
-+/* Inject yang ditinggalkan sementara masih ada unit yang berutang jawaban.
-+
-+   Membuka susulan membawa seluruh ruangan kembali ke inject itu dengan sisa
-+   waktunya, dan unit yang sudah menjawab terkunci. Keduanya disebutkan di
-+   peringatan sebelum tombolnya bekerja, karena yang satu menghentikan jalannya
-+   latihan sebentar dan yang satu tidak bisa dibatalkan. */
+@@ -2018,6 +2128,77 @@ function Host({ onExit }) {
+    waktunya, dan unit yang sudah menjawab terkunci. Keduanya disebutkan di
+    peringatan sebelum tombolnya bekerja, karena yang satu menghentikan jalannya
+    latihan sebentar dan yang satu tidak bisa dibatalkan. */
 +/* Isian sisa waktu untuk satu unit, dipakai saat inject sedang berjalan.
 +
 +   Isiannya sengaja tidak dikendalikan React. Angka yang ditampilkan sebagai
@@ -1800,439 +705,57 @@ index 075d990..1c34010 100644
 +  );
 +}
 +
-+function SusulPanel({ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr,
-+  catchup, inject, onAsk, onCancel, onRun, onClose }) {
-+  useEffect(() => {
-+    const esc = (e) => e.key === "Escape" && onClose();
-+    window.addEventListener("keydown", esc);
-+    return () => window.removeEventListener("keydown", esc);
-+  }, [onClose]);
-+
-+  return (
-+    <div className="scrim" onClick={onClose}>
-+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
-+        aria-label={t("Susulan")}>
-+        <div className="phead">
-+          <h2>{t("Susulan")}</h2>
-+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
-+        </div>
-+        <p className="hint">
-+          {t("Unit tidak selesai pada waktu yang sama. Kalau sebagian unit sudah mengirim jawabannya, Anda boleh lanjut ke inject berikutnya tanpa menunggu yang lain, lalu kembali ke sini untuk menyelesaikan inject yang tertinggal. Sisa waktu unit itu disimpan, jadi mereka tidak mendapat waktu baru dan nilainya tetap sebanding dengan unit yang mengerjakan tepat waktu.")}
-+        </p>
-+
-+        {catchup && (
-+          <p className="hint on">
-+            {tf("Inject {0} sedang berjalan sebagai susulan.", inject?.id)}
-+          </p>
-+        )}
-+        {susulErr && <p className="hint bad">{t(susulErr)}</p>}
-+
-+        {susulList.length === 0 && (
-+          <p className="hint empty">
-+            {t("Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, jendelanya masih menyisakan waktu, dan kuncinya belum dibacakan. Jendela yang sudah habis terpakai tidak muncul di sini, karena tidak ada sisa waktu untuk disusulkan.")}
-+          </p>
-+        )}
-+
-+        <ul className="susullist">
-+          {susulList.map(({ inj, owed, left }) => {
-+            const asking = String(susulAsk) === String(inj.id);
-+            return (
-+              <li key={inj.id}>
-+                <div className="suhead">
-+                  <b>{tf("Inject {0}", inj.id)}</b>
-+                  <small>{inj.siklus}</small>
-+                  <span className="suleft mono">
-+                    {left === null ? t("tanpa batas waktu") : tf("sisa {0}", fmt(left))}
-+                  </span>
-+                </div>
-+                <div className="suunits">
-+                  {owed.map((r) => (
-+                    <span key={r} className="chip">
-+                      <Crest peran={r} idx={roleIdx(r)} />{unitOf(r)}
-+                    </span>
-+                  ))}
-+                </div>
-+                {!canDrive ? (
-+                  <p className="hint">{t("Susulan dijalankan fasilitator utama.")}</p>
-+                ) : asking ? (
-+                  <div className="suask">
-+                    <p>
-+                      {tf("Seluruh ruangan akan kembali ke inject {0} dengan sisa waktu {1}.",
-+                        inj.id, left === null ? t("tanpa batas") : fmt(left))}{" "}
-+                      {t("Unit yang sudah menjawab hanya melihat: jawabannya terkunci dan tidak bisa diubah. Kuncinya belum boleh dibacakan sebelum susulan ini ditutup, karena jawaban yang benar akan terdengar seluruh ruangan.")}
-+                    </p>
-+                    <div className="surow">
-+                      <button className="btn quiet" onClick={onCancel}>{t("Batal")}</button>
-+                      <button className="btn" onClick={() => onRun(inj.id)}>{t("Ya, buka susulan")}</button>
-+                    </div>
-+                  </div>
-+                ) : (
-+                  <button className="btn quiet pill" onClick={() => onAsk(inj.id)}>
-+                    {t("Buka susulan")}
-+                  </button>
-+                )}
-+              </li>
-+            );
-+          })}
-+        </ul>
-+      </aside>
-+    </div>
-+  );
-+}
-+
-+function RecapPanel({ model, ran, activeIdx, people, unitOf, roleIdx, settings,
-+  recapId, canDrive, onShow, onClose }) {
-+  const [openId, setOpenId] = useState(null);
-+  useEffect(() => {
-+    const esc = (e) => e.key === "Escape" && onClose();
-+    window.addEventListener("keydown", esc);
-+    return () => window.removeEventListener("keydown", esc);
-+  }, [onClose]);
-+
-+  const done = new Set((ran || []).map(String));
-+  const list = model.injects
-+    .map((inj, idx) => ({ inj, idx }))
-+    .filter((x) => x.idx !== activeIdx && done.has(String(x.inj.id)));
-+
-+  return (
-+    <div className="scrim" onClick={onClose}>
-+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
-+        aria-label={t("Rekap inject")}>
-+        <div className="phead">
-+          <h2>{t("Rekap inject")}</h2>
-+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
-+        </div>
-+        <p className="hint">
-+          {t("Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.")}
-+        </p>
-+
-+        {list.length === 0 && (
-+          <p className="hint empty">
-+            {t("Belum ada inject yang bisa direkap. Sebuah inject masuk ke daftar ini setelah waktu menjawabnya pernah dibuka, karena sebelum itu belum ada jawaban untuk dibahas. Membuka ruangan baru juga mengosongkan daftar ini.")}
-+          </p>
-+        )}
-+
-+        <ul className="recaplist">
-+          {list.map(({ inj }) => {
-+            const open = openId === inj.id;
-+            const onProj = String(recapId) === String(inj.id);
-+            return (
-+              <li key={inj.id} className={open ? "open" : ""}>
-+                <div className="rchead">
-+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
-+                    <b>{tf("Inject {0}", inj.id)}</b>
-+                    <small>{inj.siklus}</small>
-+                  </button>
-+                  {canDrive && (
-+                    <button className={`btn quiet pill ${onProj ? "on" : ""}`}
-+                      onClick={() => onShow(onProj ? null : inj.id)}>
-+                      {t(onProj ? "Lepas dari proyektor" : "Tampilkan di proyektor")}
-+                    </button>
-+                  )}
-+                </div>
-+                {open && (
-+                  <div className="rcbody">
-+                    {inj.condition && (
-+                      <blockquote className="rccond">{inj.condition}</blockquote>
-+                    )}
-+                    {inj.questions.map((q) => {
-+                      const keyIdx = (q.choices || [])
-+                        .map((c, i) => (c.correct ? i : -1)).filter((i) => i >= 0);
-+                      const rs = people.filter((p) => p.peran === q.peran);
-+                      return (
-+                        <div className="rcq" key={q.qid}>
-+                          <p className="rcpunit">
-+                            <Crest peran={q.peran} idx={roleIdx(q.peran)} size={18} />
-+                            {unitOf(q.peran)}
-+                          </p>
-+                          <p className="rcqtext">{q.text}</p>
-+                          {keyIdx.length > 0 && (
-+                            <p className="rckey">
-+                              <span className="lab">{t("Kunci")}</span>
-+                              {keyIdx.map((i) => q.choices[i].text).join("; ")}
-+                            </p>
-+                          )}
-+                          <ul className="rcans">
-+                            {rs.length === 0 && (
-+                              <li className="none">{t("Unit ini tidak hadir di inject itu.")}</li>
-+                            )}
-+                            {rs.map((p) => {
-+                              const a = p.answers?.[q.qid];
-+                              if (!a) return (
-+                                <li key={p.pid} className="none">{t("Tidak ada jawaban terkirim")}</li>
-+                              );
-+                              const cls = a.correct ? "ok" : a.acc > 0 ? "part"
-+                                : a.correct === false ? "no" : "";
-+                              return (
-+                                <li key={p.pid} className={cls}>
-+                                  <span className="rcatext">{a.text || "·"}</span>
-+                                  {settings?.mode === "auto" && (
-+                                    <span className="rcapts mono">
-+                                      {a.points ? `+${a.points.toLocaleString()}` : "0"}
-+                                    </span>
-+                                  )}
-+                                </li>
-+                              );
-+                            })}
-+                          </ul>
-+                        </div>
-+                      );
-+                    })}
-+                  </div>
-+                )}
-+              </li>
-+            );
-+          })}
-+        </ul>
-+      </aside>
-+    </div>
-+  );
-+}
-+
- function TeamPanel({ hosts, hostCodes, isOwner, role, status, onAdd, onRemove, onResync, onClose }) {
-   const [newRole, setNewRole] = useState("grader");
-   const [label, setLabel] = useState("");
-@@ -2026,6 +2713,112 @@ function QuestionResult({ q, answers, settings, onGrade, showExpected, toggleExp
- 
- /* =========================== PARTICIPANT =========================== */
- 
-+/* Satu pertanyaan dari inject yang sudah lewat, dengan jawaban unit ini.
-+   Dipakai blok konteks maupun panel riwayat, supaya keduanya tidak pernah
-+   menampilkan hal yang sama dengan cara yang berbeda. */
-+function PastQ({ q, a, k, pick }) {
-+  const keyIdx = k ? (k.is || [k.i]) : null;
-+  const names = (list) => (list || [])
-+    .map((i) => { const c = q.choices?.[i]; return c ? pick(c.text, c.alt) : ""; })
-+    .filter(Boolean).join("; ");
-+  const mineIdx = a ? (a.picks || (a.choice != null ? [a.choice] : [])) : [];
-+  const cls = !a ? "miss"
-+    : a.correct ? "ok" : a.acc > 0 ? "part" : a.correct === false ? "no" : "";
-+  return (
-+    <div className={`pastq ${cls}`}>
-+      <p className="pqq">{pick(q.text, q.alt)}</p>
-+      <p className="pqa">
-+        <span className="lab">{t("Jawaban unit Anda")}</span>
-+        {a ? (names(mineIdx) || a.text || "·") : t("Tidak ada jawaban terkirim")}
-+      </p>
-+      {a && a.quality != null && (
-+        <p className="pqn"><span className="lab">{t("Nilai esai")}</span>{tf("{0} dari 10", a.quality)}</p>
-+      )}
-+      {keyIdx && (
-+        <p className="pqk">
-+          <span className="lab">{t("Kunci")}</span>
-+          {names(keyIdx) || (k.texts ? k.texts.join("; ") : k.text)}
-+        </p>
-+      )}
-+    </div>
-+  );
-+}
-+
-+/* Konteks inject sebelumnya di layar peserta. */
-+function PrevContext({ inject, answers, keyMap, pick }) {
-+  const [open, setOpen] = useState(false);
-+  const qs = inject.questions || [];
-+  if (!qs.length) return null;
-+  return (
-+    <div className={`prevctx ${open ? "open" : ""}`}>
-+      <button className="pcbtn" onClick={() => setOpen(!open)} aria-expanded={open}>
-+        <span className="lab">{tf("Inject {0} sebelumnya", inject.id)}</span>
-+        <span className="pcmore">{t(open ? "Tutup" : "Lihat jawaban unit Anda")}</span>
-+      </button>
-+      {open && (
-+        <div className="pcbody">
-+          {inject.condition && (
-+            <p className="pccond">{pick(inject.condition, inject.conditionAlt)}</p>
-+          )}
-+          {qs.map((q) => (
-+            <PastQ key={q.qid} q={q} a={answers?.[q.qid]} k={keyMap[q.qid]} pick={pick} />
-+          ))}
-+        </div>
-+      )}
-+    </div>
-+  );
-+}
-+
-+/* Riwayat inject yang sudah lewat, hanya baca. */
-+function HistoryPanel({ injects, answers, keys, pick, onClose }) {
-+  const [openId, setOpenId] = useState(injects.length ? injects[injects.length - 1].id : null);
-+  useEffect(() => {
-+    const esc = (e) => e.key === "Escape" && onClose();
-+    window.addEventListener("keydown", esc);
-+    return () => window.removeEventListener("keydown", esc);
-+  }, [onClose]);
-+  return (
-+    <div className="scrim" onClick={onClose}>
-+      <aside className="panel" onClick={(e) => e.stopPropagation()} role="dialog"
-+        aria-label={t("Riwayat")}>
-+        <div className="phead">
-+          <h2>{t("Riwayat")}</h2>
-+          <button className="btn quiet" onClick={onClose}>{t("Tutup")}</button>
-+        </div>
-+        <p className="hint">
-+          {t("Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.")}
-+        </p>
-+        <ul className="recaplist">
-+          {injects.map((inj) => {
-+            const open = openId === inj.id;
-+            return (
-+              <li key={inj.id} className={open ? "open" : ""}>
-+                <div className="rchead">
-+                  <button className="rctitle" onClick={() => setOpenId(open ? null : inj.id)}>
-+                    <b>{tf("Inject {0}", inj.id)}</b>
-+                    <small>{inj.siklus}</small>
-+                  </button>
-+                </div>
-+                {open && (
-+                  <div className="rcbody">
-+                    {inj.condition && (
-+                      <blockquote className="rccond">{pick(inj.condition, inj.conditionAlt)}</blockquote>
-+                    )}
-+                    {(inj.questions || []).map((q) => (
-+                      <PastQ key={q.qid} q={q} a={answers?.[q.qid]}
-+                        k={(keys[inj.id] || {})[q.qid]} pick={pick} />
-+                    ))}
-+                  </div>
-+                )}
-+              </li>
-+            );
-+          })}
-+        </ul>
-+      </aside>
-+    </div>
-+  );
-+}
-+
- function Participant() {
-   const [me, setMe] = useState(null);
-   const [codeIn, setCodeIn] = useState("");
-@@ -2039,8 +2832,22 @@ function Participant() {
-   const [ticks, setTicks] = useState({});   // qid -> number[], uncommitted checkbox picks
-   const [times, setTimes] = useState({});   // per-inject windows, kept in step with the host
-   const [etimes, setEtimes] = useState({}); // jendela esai per inject
-+  /* Jendela milik unit tertentu pada inject tertentu, berkunci "injectId::peran". */
-+  const [utimes, setUtimes] = useState({});
-+  const [uetimes, setUetimes] = useState({});
-   const [msg, setMsg] = useState("");
--  const [key, setKey] = useState({});
-+  /* Kunci disimpan per inject, bukan satu wadah yang ditimpa tiap pindah inject.
-+     Riwayat dan blok konteks membaca inject yang sudah lewat, jadi kuncinya
-+     harus tetap ada setelah ruangan berpindah ke inject berikutnya. */
-+  const [keys, setKeys] = useState({});
-+  const [ran, setRan] = useState([]);       // inject yang pernah dibuka fasilitator
-+  /* Jendela inject lama yang dibiarkan hidup untuk unit yang belum selesai, dan
-+     nomor inject yang perangkat ini pilih untuk diselesaikan dulu. */
-+  const [carry, setCarry] = useState({});
-+  const [stay, setStay] = useState(null);
+ function SusulPanel({ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr,
+   catchup, inject, onAsk, onCancel, onRun, onClose }) {
+   useEffect(() => {
+@@ -2664,6 +2845,8 @@ function Participant() {
+      nomor inject yang perangkat ini pilih untuk diselesaikan dulu. */
+   const [carry, setCarry] = useState({});
+   const [stay, setStay] = useState(null);
 +  /* Jeda dari fasilitator. Nol berarti berjalan. */
 +  const [paused, setPaused] = useState(0);
-+  const [histOpen, setHistOpen] = useState(false);
+   const [histOpen, setHistOpen] = useState(false);
    const [booted, setBooted] = useState(false);
    const [evicted, setEvicted] = useState(false);
-   const codeRef = useRef(null);
-@@ -2061,15 +2868,28 @@ function Participant() {
-         possible: m.me.possible || 0, pct: m.me.pct ?? null };
-       setMe(rec); lsSet(K_ME, rec);
-       setDeck(m.deck); setState(m.state); setSettings(m.settings);
-+      setUtimes(m.utimes || {}); setUetimes(m.uetimes || {});
-       if (m.times) setTimes(m.times);
-       if (m.etimes) setEtimes(m.etimes);
-+      if (m.ran) setRan(m.ran);
-+      if (m.keys) setKeys(m.keys);
-+      setCarry(m.carry || {});
+@@ -2691,12 +2874,14 @@ function Participant() {
+       if (m.ran) setRan(m.ran);
+       if (m.keys) setKeys(m.keys);
+       setCarry(m.carry || {});
 +      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
        setMsg(""); setTaken(null); setEvicted(false);
      } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
      else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
--    else if (m.t === "state") setState({ activeIdx: m.activeIdx, phase: m.phase,
--      openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
-+    else if (m.t === "state") {
-+      setState({ activeIdx: m.activeIdx, phase: m.phase, catchup: !!m.catchup,
-+        openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+     else if (m.t === "state") {
+       setState({ activeIdx: m.activeIdx, phase: m.phase, catchup: !!m.catchup,
+         openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
 +      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
-+      if (m.ran) setRan(m.ran);
-+      if (m.carry) setCarry(m.carry);
-+    }
-+    else if (m.t === "carry") setCarry(m.carry || {});
-     else if (m.t === "settings") {
-       setSettings(m.settings);
-+      if (m.utimes) setUtimes(m.utimes);
-+      if (m.uetimes) setUetimes(m.uetimes);
-       if (m.times) setTimes(m.times);
-       if (m.etimes) setEtimes(m.etimes);
+       if (m.ran) setRan(m.ran);
+       if (m.carry) setCarry(m.carry);
      }
-@@ -2082,9 +2902,13 @@ function Participant() {
+@@ -2717,6 +2902,7 @@ function Participant() {
        setMsg("Terkirim."); setTimeout(() => setMsg(""), 1800);
      }
      else if (m.t === "locked") setMsg("Jawaban sudah ditutup.");
 +    else if (m.t === "paused") setMsg("Latihan sedang dijeda, jawaban belum bisa dikirim.");
      else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
      else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
--    else if (m.t === "key") setKey(m.key || {});
-+    else if (m.t === "key") {
-+      /* Digabung, bukan ditimpa: inject lama tetap memegang kuncinya. */
-+      setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
-+    }
-     else if (m.t === "time") noteTimeSample(m.c, m.s);
-     else if (m.t === "evicted") {
-       lsDel(K_ME); setMe(null); setDeck(null); setState(null); setEvicted(true);
-@@ -2113,28 +2937,111 @@ function Participant() {
-   const leave = () => {
-     if (me?.roomId && me?.pid) send({ t: "leave", roomId: me.roomId, pid: me.pid });
-     nukeAll(); setMe(null); setDeck(null); setState(null);
--    setCodeIn(""); setPeek(null); setTaken(null); setKey({});
-+    setCodeIn(""); setPeek(null); setTaken(null); setKeys({}); setRan([]);
-+    setCarry({}); setStay(null); setUtimes({}); setUetimes({});
-   };
- 
-   /* Derived above every early return. useExpired sat below them, so it only
-      ran once a device had joined — the hook count changed between renders,
-      which is React error #310. */
--  const phase = state?.phase || "lobby";
--  const inject = deck?.injects?.[state?.activeIdx ?? 0];
-+  /* ---- inject yang dilihat perangkat ini -------------------------------
-+
-+     Biasanya sama dengan inject yang sedang dibuka fasilitator. Bedanya hanya
-+     muncul kalau fasilitator sudah lanjut sementara unit ini masih berutang
-+     jawaban: jendela inject lama dibiarkan hidup dengan jam aslinya, dan unit
-+     ini memilih sendiri mau menyelesaikannya dulu atau ikut pindah. Layarnya
-+     bertahan di inject lama secara bawaan, supaya jawaban yang sedang diketik
-+     tidak hilang dari layar tanpa diminta. */
-+  const roomIdx = state?.activeIdx ?? 0;
-+  const carryMine = useMemo(() => {
-+    if (!deck?.injects) return [];
-+    return Object.keys(carry || {})
-+      .map((id) => {
-+        const idx = deck.injects.findIndex((i) => String(i.id) === String(id));
-+        return { id, idx, inj: deck.injects[idx], at: Number(carry[id]) };
-+      })
-+      /* Deck peserta hanya memuat pertanyaan unitnya sendiri, jadi pemeriksaan
-+         ini sudah berarti "unit saya belum selesai". */
-+      .filter((x) => x.inj && x.idx !== roomIdx
-+        && (x.inj.questions || []).length > 0
-+        && (x.inj.questions || []).some((q) => !me?.answers?.[q.qid]));
-+  }, [carry, deck, roomIdx, me]);
-+  const stayOn = carryMine.find((x) => String(x.id) === String(stay)) || null;
+     else if (m.t === "key") {
+@@ -2781,6 +2967,10 @@ function Participant() {
+         && (x.inj.questions || []).some((q) => !me?.answers?.[q.qid]));
+   }, [carry, deck, roomIdx, me]);
+   const stayOn = carryMine.find((x) => String(x.id) === String(stay)) || null;
 +  /* Pemberitahuan sekali saat ruangan berpindah sementara unit ini belum
 +     selesai. Tanpa ini perpindahan hanya terasa sebagai layar yang berubah
 +     sendiri, dan peserta tidak tahu injectnya masih terbuka. */
 +  const [moved, setMoved] = useState(null);
-+  const stayRef = useRef(null);
-+  useEffect(() => { stayRef.current = stay; }, [stay]);
-+  const seenIdx = useRef(roomIdx);
-+  const onCatchup = !!state?.catchup;
-+  useEffect(() => {
-+    const was = seenIdx.current;
-+    seenIdx.current = roomIdx;
-+    if (was === roomIdx) return;
-+    /* Susulan adalah keputusan fasilitator untuk seluruh ruangan, jadi layar ini
-+       mengikutinya tanpa menawar. */
-+    if (onCatchup) return setStay(null);
-+    /* Sudah bertahan di sebuah jendela yang masih hidup: perpindahan ruangan
-+       berikutnya tidak boleh menarik layar ini ke inject lain. */
-+    const held = stayRef.current;
-+    if (held && carryMine.some((x) => String(x.id) === String(held))) return;
-+    const left = carryMine.find((x) => x.idx === was);
-+    setStay(left ? left.id : null);
+   const stayRef = useRef(null);
+   useEffect(() => { stayRef.current = stay; }, [stay]);
+   const seenIdx = useRef(roomIdx);
+@@ -2798,7 +2988,14 @@ function Participant() {
+     if (held && carryMine.some((x) => String(x.id) === String(held))) return;
+     const left = carryMine.find((x) => x.idx === was);
+     setStay(left ? left.id : null);
+-  }, [roomIdx, carryMine, onCatchup]);
 +    if (left) setMoved({ from: left.inj.id, to: deck?.injects?.[roomIdx]?.id ?? "?" });
 +  }, [roomIdx, carryMine, onCatchup, deck]);
 +  /* Jendela yang tertinggal bisa mati sendiri saat waktunya habis. Kalau itu
@@ -2241,89 +764,13 @@ index 075d990..1c34010 100644
 +  useEffect(() => {
 +    if (moved && !carryMine.some((x) => String(x.inj.id) === String(moved.from))) setMoved(null);
 +  }, [carryMine, moved]);
-+
-+  const viewIdx = stayOn ? stayOn.idx : roomIdx;
-+  const phase = stayOn ? "open" : (state?.phase || "lobby");
-+  const inject = deck?.injects?.[viewIdx];
-+  const openedNow = stayOn ? stayOn.at : state?.openedAt;
-+  /* Susulan menerima jawaban pertama saja, jadi jawaban yang sudah masuk
-+     ditampilkan terkunci, bukan seolah masih bisa diperbaiki. */
-+  const frozenAll = !stayOn && !!state?.catchup;
-   const mine = inject?.questions || [];
-+  /* Kunci inject yang sedang berjalan. Nama ini dipakai situs render yang sudah
-+     ada, jadi perpindahan ke simpanan per inject berhenti di satu baris. */
-+  const key = (inject && keys[inject.id]) || {};
-+  /* Inject yang pernah dibuka fasilitator dan memang menanyakan sesuatu ke unit
-+     ini. Yang sedang berjalan tidak ikut, dan urutannya mengikuti deck. */
-+  const idxNow = viewIdx;
-+  const history = useMemo(() => {
-+    if (!deck?.injects) return [];
-+    const done = new Set((ran || []).map(String));
-+    return deck.injects
-+      .map((i, idx) => ({ ...i, idx }))
-+      .filter((i) => i.idx !== idxNow && done.has(String(i.id)) && (i.questions || []).length > 0);
-+  }, [deck, ran, idxNow]);
-+  /* Untuk blok konteks, yang dipakai hanya inject terakhir sebelum yang sekarang. */
-+  const prevInject = useMemo(() => {
-+    const before = history.filter((i) => i.idx < idxNow);
-+    return before.length ? before[before.length - 1] : null;
-+  }, [history, idxNow]);
-   /* Read the window the same way the server does, from the live `times` map, so
-      the facilitator editing it mid-brief changes what this device shows. */
-+  /* Jendela unit ini, dengan urutan yang sama seperti server: jam unit pada
-+     inject ini, lalu jam inject, lalu default global. */
-+  const myNum = (v) => (v === "" || v == null ? null : Number(v));
-   const windowOf = (injId) => {
--    const v = times?.[injId];
--    if (v === "" || v == null) return Number(settings?.timeLimit ?? state?.limit ?? 0);
--    return Number(v);
-+    const u = myNum(utimes?.[`${injId}::${me?.peran}`]);
-+    if (u != null) return u;
-+    const i = myNum(times?.[injId]);
-+    if (i != null) return i;
-+    return Number(settings?.timeLimit ?? state?.limit ?? 0);
-   };
-   const limit = inject ? windowOf(inject.id) : (state?.limit ?? 0);
-   /* Esai punya jamnya sendiri, dibaca dengan urutan yang sama seperti server:
-      override inject, lalu default esai, lalu jendela biasa. */
-   const ewindowOf = (injId) => {
--    const v = etimes?.[injId];
--    const base = v !== "" && v != null ? Number(v)
-+    const u = myNum(uetimes?.[`${injId}::${me?.peran}`]);
-+    const i = u != null ? u : myNum(etimes?.[injId]);
-+    const base = i != null ? i
-       : settings?.essayLimit === "" || settings?.essayLimit == null
-         ? windowOf(injId) : Number(settings.essayLimit);
-     return base ? base + (Number(settings?.essayGrace) || 0) : base;
-@@ -2142,8 +3049,8 @@ function Participant() {
-   const elimit = inject ? ewindowOf(inject.id) : (state?.elimit ?? 0);
-   const autoMode = settings?.mode === "auto";
-   const runningNow = phase === "open" && !!me && !!deck;
--  const timeUp = useExpired(state?.openedAt, autoMode ? limit : 0, runningNow);
--  const essayUp = useExpired(state?.openedAt, autoMode ? elimit : 0, runningNow);
-+  const timeUp = useExpired(openedNow, autoMode ? limit : 0, runningNow);
-+  const essayUp = useExpired(openedNow, autoMode ? elimit : 0, runningNow);
-   const iHaveEssay = mine.some((q) => q.type === "open");
-   const iHaveChoice = mine.some((q) => q.type !== "open");
-   /* Semua pertanyaan unit ini sudah terkunci padahal inject belum ditutup:
-@@ -2250,8 +3157,42 @@ function Participant() {
-             <small className="seatline">{t("satu kursi")}</small>
-           </span>
-         </>}
--        right={settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
--          ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null} />
-+        right={<>
-+          {history.length > 0 && (
-+            <button className="btn quiet pill" onClick={() => setHistOpen(true)}
-+              title={t("Lihat inject yang sudah lewat")}>{t("Riwayat")}</button>
-+          )}
-+          {settings?.mode === "auto" && settings?.leaderboard && state?.keyShown
-+            ? <span className="ptsbadge mono">{(me.total || 0).toLocaleString()}</span> : null}
-+        </>} />
-+      {histOpen && (
-+        <HistoryPanel injects={history} answers={me.answers} keys={keys} pick={pick}
-+          onClose={() => setHistOpen(false)} />
-+      )}
+ 
+   const viewIdx = stayOn ? stayOn.idx : roomIdx;
+   const phase = stayOn ? "open" : (state?.phase || "lobby");
+@@ -2972,6 +3169,30 @@ function Participant() {
+         <HistoryPanel injects={history} answers={me.answers} keys={keys} pick={pick}
+           onClose={() => setHistOpen(false)} />
+       )}
 +      {paused > 0 && (
 +        <div className="pausebar" role="status">
 +          <b>{t("Latihan dijeda.")}</b>{" "}
@@ -2351,16 +798,17 @@ index 075d990..1c34010 100644
        <main className="pmain">
          <div className="pinner">
            {phase === "lobby" && (
-@@ -2262,6 +3203,65 @@ function Participant() {
-             </div>
-           )}
- 
-+          {/* ---- fasilitator sudah lanjut, unit ini belum selesai ----
-+
-+              Layar bertahan di inject lama supaya yang sedang diketik tidak
-+              lenyap, dan kartu ini yang menawarkan pindah. Sisa waktunya nyata:
-+              jamnya berjalan sejak inject itu dibuka, jadi tidak ada unit yang
-+              memperoleh waktu tambahan dengan bertahan di sini. */}
+@@ -2988,27 +3209,51 @@ function Participant() {
+               lenyap, dan kartu ini yang menawarkan pindah. Sisa waktunya nyata:
+               jamnya berjalan sejak inject itu dibuka, jadi tidak ada unit yang
+               memperoleh waktu tambahan dengan bertahan di sini. */}
+-          {stayOn && (
+-            <div className="staycard">
+-              <b>{tf("Ruangan sudah lanjut ke inject {0}.",
+-                deck?.injects?.[roomIdx]?.id ?? "?")}</b>
+-              <p>
+-                {tf("Anda masih mengerjakan inject {0}, dan sisa waktunya tetap berjalan.", stayOn.inj.id)}{" "}
+-                {t("Selesaikan dulu di sini, atau ikut pindah sekarang. Kalau pindah, jawaban inject ini yang belum terkirim tidak akan tercatat.")}
 +          {/* ---- dua inject terbuka sekaligus ----
 +
 +              Unit yang tertinggal tidak lagi harus memilih antara inject lama
@@ -2404,57 +852,29 @@ index 075d990..1c34010 100644
 +                  ? tf("Anda sedang mengisi inject {0} yang tertinggal. Ruangan sudah membahas inject {1}.",
 +                    stayOn.inj.id, deck?.injects?.[roomIdx]?.id ?? "?")
 +                  : t("Inject yang tertinggal masih bisa dibuka lagi lewat baris di atas selama waktunya belum habis. Jawaban yang sudah terkirim tersimpan.")}
-+              </p>
+               </p>
+-              <button className="btn wide" onClick={() => setStay(null)}>
+-                {tf("Ikut ke inject {0} sekarang", deck?.injects?.[roomIdx]?.id ?? "?")}
+-              </button>
+-            </div>
+-          )}
+-          {!stayOn && carryMine.length > 0 && (
+-            <div className="staycard back">
+-              <b>{tf("Inject {0} masih terbuka untuk unit Anda.", carryMine[0].inj.id)}</b>
+-              <p>{t("Waktunya masih berjalan. Kembali ke sana kalau ingin menyelesaikannya.")}</p>
+-              <button className="btn quiet wide" onClick={() => setStay(carryMine[0].id)}>
+-                {tf("Kembali ke inject {0}", carryMine[0].inj.id)}
+-              </button>
+-            </div>
 +            </>
-+          )}
-+          {!stayOn && state?.catchup && (
-+            <div className="staycard back">
-+              <b>{tf("Inject {0} dibuka kembali sebagai susulan.", inject?.id ?? "?")}</b>
-+              <p>{t("Unit yang belum menjawab bisa mengisi sekarang dengan sisa waktunya. Jawaban yang sudah masuk terkunci dan tidak bisa diubah.")}</p>
-+            </div>
-+          )}
-+
-           {phase !== "lobby" && inject && (
-             <>
-               <div className="eyebrow">{inject.siklus} · {tf("Inject {0}", inject.id)}</div>
-@@ -2271,6 +3271,15 @@ function Participant() {
-                 </blockquote>
-               )}
- 
-+              {/* Konteks dari inject sebelumnya. Tertutup secara default supaya
-+                  tidak merebut perhatian dari pertanyaan yang sedang berjalan,
-+                  tapi ada di tempat yang sama tiap inject sehingga unit yang
-+                  mencarinya tahu harus melihat ke mana. */}
-+              {prevInject && phase !== "lobby" && (
-+                <PrevContext inject={prevInject} answers={me.answers}
-+                  keyMap={keys[prevInject.id] || {}} pick={pick} />
-+              )}
-+
-               {phase === "briefing" && (
-                 <div className="standby small">
-                   <span className="pulse" />
-@@ -2295,11 +3304,11 @@ function Participant() {
-                   {autoMode && (limit > 0 || elimit > 0) && (
-                     <div className="ringwrap">
-                       {iHaveChoice && limit > 0 && (
--                        <Ring openedAt={state.openedAt} limit={limit} size="s150"
-+                        <Ring openedAt={openedNow} limit={limit} size="s150"
-                           cap={t(iHaveEssay ? "pilihan" : "sisa")} />
-                       )}
-                       {iHaveEssay && elimit > 0 && (
--                        <Ring openedAt={state.openedAt} limit={elimit} size="s150" cap={t("esai")} />
-+                        <Ring openedAt={openedNow} limit={elimit} size="s150" cap={t("esai")} />
-                       )}
-                     </div>
-                   )}
-@@ -2330,12 +3339,21 @@ function Participant() {
-                     const cur = ticks[q.qid] ?? sent?.picks ?? [];
-                     /* Esai terkunci pada jam esai, sisanya pada jam pilihan. */
-                     const qUp = q.type === "open" ? essayUp : timeUp;
-+                    /* Susulan: jawaban yang sudah masuk terkunci, karena sejak
-+                       inject ini ditinggalkan sudah ada yang terdengar di
-+                       ruangan. Yang belum menjawab tetap bisa mengisi. */
-+                    const frozen = frozenAll && !!sent;
+           )}
+           {!stayOn && state?.catchup && (
+             <div className="staycard back">
+@@ -3098,7 +3343,10 @@ function Participant() {
+                        inject ini ditinggalkan sudah ada yang terdengar di
+                        ruangan. Yang belum menjawab tetap bisa mengisi. */
+                     const frozen = frozenAll && !!sent;
+-                    const shut = qUp || frozen;
 +                    /* Saat latihan dijeda, tidak ada yang bisa dikirim. Server pun
 +                       menolaknya, jadi tombol yang mati di sini hanya membuat
 +                       penolakan itu terlihat sebelum peserta terlanjur menekan. */
@@ -2462,256 +882,41 @@ index 075d990..1c34010 100644
                      const toggle = (i) => {
                        const next = cur.includes(i)
                          ? cur.filter((x) => x !== i)
-                         : [...cur, i].sort((a, b) => a - b);
-                       setTicks((m) => ({ ...m, [q.qid]: next }));
--                      send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: next } });
-+                      send({ t: "answer", roomId: me.roomId, pid: me.pid,
-+                        injectId: inject.id, answers: { [q.qid]: next } });
-                     };
-                     return (
-                       <div className="pq" key={q.qid}>
-@@ -2351,16 +3369,17 @@ function Participant() {
-                                 const o = optOf(i);
-                                 const picked = isCheck ? cur.includes(i) : sent && sent.choice === i;
-                                 const dim = isCheck
--                                  ? (qUp && !picked)
--                                  : ((sent || qUp) && !picked);
-+                                  ? (shut && !picked)
-+                                  : ((sent || shut) && !picked);
-                                 return (
--                                  <button key={i} disabled={qUp}
-+                                  <button key={i} disabled={shut}
-                                     className={`opt ${picked ? "picked" : ""} ${dim ? "faded" : ""}`}
-                                     style={{ "--c": o.c }}
-                                     aria-pressed={isCheck ? picked : undefined}
-                                     onClick={() => isCheck
-                                       ? toggle(i)
--                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: i } })}>
-+                                      : send({ t: "answer", roomId: me.roomId, pid: me.pid,
-+                                        injectId: inject.id, answers: { [q.qid]: i } })}>
-                                     <span className="oglyph"><Glyph shape={o.shape} /></span>
-                                     <span className="otxt">{pick(c.text, c.alt)}</span>
-                                     {isCheck
-@@ -2377,14 +3396,15 @@ function Participant() {
-                                 );
-                               })}
-                             </div>
--                            {qUp ? (
-+                            {shut ? (
-                               <div className="lockstamp">
-                                 <svg viewBox="0 0 24 24" width="17" height="17" fill="none"
-                                   stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
-                                   <path d="M7 11V8a5 5 0 0110 0v3" />
-                                   <rect x="4" y="11" width="16" height="9" rx="2.4" />
-                                 </svg>
--                                {t("Waktu habis, jawaban terkunci")}
-+                                {t(frozen ? "Jawaban unit Anda sudah masuk dan terkunci selama susulan"
-+                                  : "Waktu habis, jawaban terkunci")}
-                               </div>
-                             ) : sent ? (
-                               <>
-@@ -2412,15 +3432,18 @@ function Participant() {
-                           </>
-                         ) : (
-                           <>
--                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={qUp}
-+                            <textarea rows={5} placeholder={t("Tulis jawaban unit Anda")} disabled={shut}
-                               value={drafts[q.qid] ?? sent?.text ?? ""}
-                               onChange={(e) => setDrafts((d) => ({ ...d, [q.qid]: e.target.value }))} />
--                            <button className="btn wide" disabled={qUp}
--                              onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
-+                            <button className="btn wide" disabled={shut}
-+                              onClick={() => send({ t: "answer", roomId: me.roomId, pid: me.pid,
-+                                injectId: inject.id, answers: { [q.qid]: drafts[q.qid] ?? "" } })}>
-                               {t(sent ? "Perbarui jawaban" : "Kirim jawaban")}
-                             </button>
--                            {qUp
--                              ? <div className="lockstamp">{t("Waktu habis")}</div>
-+                            {shut
-+                              ? <div className="lockstamp">
-+                                {t(frozen ? "Sudah masuk dan terkunci selama susulan" : "Waktu habis")}
-+                              </div>
-                               : sent && <p className="hint centre">{t("Terkirim. Masih bisa direvisi sampai jawaban ditutup.")}</p>}
-                           </>
-                         )}
-@@ -2579,6 +3602,42 @@ const KeyLine = ({ idx, text, mine }) => {
- 
- /* ============================= PROJECTOR ============================= */
- 
-+/* Daftar pertanyaan di proyektor. Dipakai dua kali, untuk inject yang sedang
-+   berjalan dan untuk rekap inject lama, jadi hitungan suara dan kunci datang
-+   sebagai argumen, bukan dibaca dari fase. */
-+function ProjQuestions({ questions, keyMap, people, showCounts }) {
-+  return (
-+    <>
-+      {questions.map((q) => {
-+        const k = keyMap?.[q.qid];
-+        return (
-+          <div className="projq" key={q.qid}>
-+            <Dual className="projqtext" text={q.text} alt={q.alt} />
-+            <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
-+            {q.choices?.length > 0 && (
-+              <div className="projopts">
-+                {q.choices.map((c, i) => {
-+                  const o = optOf(i);
-+                  const isKey = !!k && (k.is || [k.i]).includes(i);
-+                  const n = showCounts
-+                    ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
-+                  return (
-+                    <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
-+                      <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
-+                      <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
-+                      {n != null && <span className="on mono">{n}</span>}
-+                    </div>
-+                  );
-+                })}
-+              </div>
-+            )}
-+          </div>
-+        );
-+      })}
-+    </>
-+  );
-+}
-+
- /* /screen#<roomId>. Read-only: condition, question, option shapes, a clock
-    you can read from the back of the room, and the join codes. Never the
-    facilitator's controls, notes or unit scores. */
-@@ -2589,7 +3648,11 @@ function Screen() {
-   const [state, setState] = useState(null);
-   const [settings, setSettings] = useState(null);
-   const [people, setPeople] = useState([]);
--  const [key, setKey] = useState({});
-+  /* Kunci per inject, supaya rekap inject lama tetap bisa menampilkannya. */
-+  const [keys, setKeys] = useState({});
-+  /* Nomor inject yang sedang dilempar fasilitator ke layar ini, atau null. */
-+  const [recap, setRecap] = useState(null);
+@@ -3404,6 +3652,7 @@ function Screen() {
+   const [keys, setKeys] = useState({});
+   /* Nomor inject yang sedang dilempar fasilitator ke layar ini, atau null. */
+   const [recap, setRecap] = useState(null);
 +  const [pausedOn, setPausedOn] = useState(false);
  
    /* Proyektor menampilkan kedua bahasa bertumpuk lewat Dual: satu layar untuk
       seluruh ruangan, jadi tidak ada satu bahasa yang harus dipilih. */
-@@ -2597,13 +3660,17 @@ function Screen() {
-   const onMsg = useCallback((m) => {
+@@ -3412,10 +3661,12 @@ function Screen() {
      if (m.t === "screened") {
        setDeck(m.deck); setCodes(m.codes); setState(m.state); setSettings(m.settings);
-+      if (m.keys) setKeys(m.keys);
+       if (m.keys) setKeys(m.keys);
 +      setPauseMark(m.paused || 0); setPausedOn(!!m.paused);
-+      setRecap(m.recap ?? null);
+       setRecap(m.recap ?? null);
      } else if (m.t === "state") {
        setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
--        limit: m.limit, keyShown: !!m.keyShown });
--      if (!m.keyShown) setKey({});
-+        limit: m.limit, keyShown: !!m.keyShown, catchup: !!m.catchup });
+         limit: m.limit, keyShown: !!m.keyShown, catchup: !!m.catchup });
 +      setPauseMark(m.paused || 0); setPausedOn(!!m.paused);
      } else if (m.t === "roster") setPeople(m.people || []);
-+    else if (m.t === "recap") setRecap(m.injectId ?? null);
+     else if (m.t === "recap") setRecap(m.injectId ?? null);
      else if (m.t === "settings") setSettings(m.settings);
--    else if (m.t === "key") setKey(m.key || {});
-+    else if (m.t === "key") setKeys((prev) => ({ ...prev, [m.injectId]: m.key || {} }));
-     else if (m.t === "time") noteTimeSample(m.c, m.s);
-     else if (m.t === "gone" || m.t === "ended") { setDeck(null); setState(null); }
-   }, []);
-@@ -2636,27 +3703,54 @@ function Screen() {
-   const phase = state.phase;
-   const seatOf = (peran) => people.find((p) => p.peran === peran);
-   const shown = phase === "lobby" ? [] : (inject?.questions || []);
-+  const key = (inject && keys[inject.id]) || {};
-+  /* Inject lama yang sedang dilempar fasilitator ke layar ini. Selama ada, dia
-+     menggantikan seluruh badan layar, termasuk saat ruangan masih di fase
-+     menunggu, supaya pembahasan tidak terpotong tampilan ruang tunggu. */
-+  const recapInject = recap == null ? null
-+    : deck.injects.find((i) => String(i.id) === String(recap)) || null;
- 
-   return (
-     <div className="screen">
-       <div className="projtop striped">
-         <BrandLogo className="big" />
-         <div>
--          <p className="eyebrow">{inject?.siklus}</p>
--          <h1>{tf("Inject {0}", inject?.id)}</h1>
-+          <p className="eyebrow">{(recapInject || inject)?.siklus}</p>
-+          <h1>{tf("Inject {0}", (recapInject || inject)?.id)}</h1>
-         </div>
-         <span className="projlang"><LangToggle /></span>
--        <span className={`projphase ${phase}`}>
--          <span className="pulse" />
--          {t(phase === "lobby" ? "Menunggu"
--            : phase === "briefing" ? "Baca skenario"
--              : phase === "open" ? "Sedang menjawab"
--                : state.keyShown ? "Kunci jawaban" : "Diskusi")}
--        </span>
-+        {recapInject ? (
-+          <span className="projphase recapmark">
-+            {t("Rekap inject sebelumnya")}
-+          </span>
-+        ) : (
+@@ -3473,9 +3724,10 @@ function Screen() {
+             {t("Rekap inject sebelumnya")}
+           </span>
+         ) : (
+-          <span className={`projphase ${phase}`}>
 +          <span className={`projphase ${pausedOn ? "paused" : phase}`}>
-+            <span className="pulse" />
+             <span className="pulse" />
+-            {state.catchup && phase === "open" ? t("Susulan, sisa waktu")
 +            {pausedOn ? t("Dijeda")
 +              : state.catchup && phase === "open" ? t("Susulan, sisa waktu")
-+              : t(phase === "lobby" ? "Menunggu"
-+                : phase === "briefing" ? "Baca skenario"
-+                  : phase === "open" ? "Sedang menjawab"
-+                    : state.keyShown ? "Kunci jawaban" : "Diskusi")}
-+          </span>
-+        )}
-       </div>
- 
-       <div className="projbody">
--        {phase === "lobby" ? (
-+        {recapInject ? (
-+          /* Rekap: kondisi dan pertanyaan inject lama, dengan hitungan suara dan
-+             kunci kalau kuncinya memang sudah pernah dibuka untuk inject itu. */
-+          <div className="projmid">
-+            <div className="projleft">
-+              {recapInject.condition && (
-+                <Dual className="projcond" text={recapInject.condition}
-+                  alt={recapInject.conditionAlt} />
-+              )}
-+              <ProjQuestions questions={recapInject.questions || []}
-+                keyMap={keys[recapInject.id] || {}} people={people} showCounts />
-+            </div>
-+          </div>
-+        ) : phase === "lobby" ? (
-           <div className="projlobby">
-             <h2>{t("Masukkan kode unit Anda")}</h2>
-             <p className="muted">{t("Satu perangkat per unit bisnis.")}</p>
-@@ -2684,32 +3778,8 @@ function Screen() {
-               {inject?.condition && (
-                 <Dual className="projcond" text={inject.condition} alt={inject.conditionAlt} />
-               )}
--              {shown.map((q) => {
--                const k = key[q.qid];
--                return (
--                  <div className="projq" key={q.qid}>
--                    <Dual className="projqtext" text={q.text} alt={q.alt} />
--                    <p className="projtype">{t(TYPE_LABEL[kindOf(q)])}</p>
--                    {q.choices?.length > 0 && (
--                      <div className="projopts">
--                        {q.choices.map((c, i) => {
--                          const o = optOf(i);
--                          const isKey = !!k && (k.is || [k.i]).includes(i);
--                          const n = phase === "revealed"
--                            ? people.filter((p) => picksOf(p.answers?.[q.qid]).includes(i)).length : null;
--                          return (
--                            <div key={i} className={`projopt ${isKey ? "key" : ""}`} style={{ "--c": o.c }}>
--                              <span className="oglyph"><Glyph shape={o.shape} size={15} /></span>
--                              <Dual tag="span" className="otxt" text={c.text} alt={c.alt} />
--                              {n != null && <span className="on mono">{n}</span>}
--                            </div>
--                          );
--                        })}
--                      </div>
--                    )}
--                  </div>
--                );
--              })}
-+              <ProjQuestions questions={shown} keyMap={key} people={people}
-+                showCounts={phase === "revealed"} />
-             </div>
-             {phase === "open" && state.limit > 0 && settings?.mode === "auto" && (
-               <Ring openedAt={state.openedAt} limit={state.limit} size="s220" cap={t("sisa")} />
-@@ -3150,6 +4220,11 @@ html,body{background:var(--ink)}
+               : t(phase === "lobby" ? "Menunggu"
+                 : phase === "briefing" ? "Baca skenario"
+                   : phase === "open" ? "Sedang menjawab"
+@@ -3968,6 +4220,11 @@ html,body{background:var(--ink)}
  /* ---------- header ---------- */
  .bar{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:62px;background:var(--slab);
    border-bottom:1px solid var(--edge2);position:sticky;top:0;z-index:10;flex-wrap:wrap}
@@ -2723,7 +928,7 @@ index 075d990..1c34010 100644
  .brand{display:flex;align-items:center;gap:11px;font-size:14px;min-width:0}
  .wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
  .barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
-@@ -3498,6 +4573,152 @@ html,body{background:var(--ink)}
+@@ -4316,6 +4573,13 @@ html,body{background:var(--ink)}
    position:relative;z-index:31;
    border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
  .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
@@ -2734,30 +939,23 @@ index 075d990..1c34010 100644
 +  border:1px solid var(--edge2);padding:20px 22px 18px}
 +.panel.ask .phead h2{font-size:18px;line-height:1.3}
 +.panel.ask .owedwarn{margin:10px 0 2px;font-size:13px;line-height:1.6;color:var(--warn)}
-+/* ---------- panel rekap inject ---------- */
-+/* ---------- konteks inject sebelumnya di layar peserta ---------- */
-+.prevctx{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
-+  margin-bottom:14px;overflow:hidden}
-+.pcbtn{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;text-align:left}
-+.pcbtn .lab{flex:1;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
-+  color:var(--faint)}
-+.pcmore{font-size:12px;font-weight:600;color:var(--signal-text);flex:none}
-+.pcbody{padding:0 14px 13px;display:flex;flex-direction:column;gap:11px}
-+.pccond{font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
-+  border-left:2px solid var(--edge);padding-left:10px}
-+.pastq{background:var(--ink);border-radius:11px;padding:10px 12px;
-+  display:flex;flex-direction:column;gap:5px;border-left:3px solid var(--edge)}
-+.pastq.ok{border-left-color:var(--live)}
-+.pastq.part{border-left-color:var(--warn)}
-+.pastq.no{border-left-color:var(--wrong)}
-+.pastq.miss{border-left-color:var(--faint)}
-+.pqq{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
-+.pqa,.pqk,.pqn{font-size:12.5px;line-height:1.45;color:var(--dim);white-space:pre-line}
-+.pqk{color:var(--live)}
-+.pqa .lab,.pqk .lab,.pqn .lab{display:block;font-size:9.5px;font-weight:800;letter-spacing:.11em;
-+  text-transform:uppercase;color:var(--faint);margin-bottom:2px}
-+
-+/* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+ /* ---------- panel rekap inject ---------- */
+ /* ---------- konteks inject sebelumnya di layar peserta ---------- */
+ .prevctx{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+@@ -4340,16 +4604,40 @@ html,body{background:var(--ink)}
+   text-transform:uppercase;color:var(--faint);margin-bottom:2px}
+ 
+ /* ---- susulan: peringatan fasilitator dan daftar inject yang tertinggal ---- */
+-.unittimes{order:1;flex:1 1 100%;display:flex;flex-direction:column;gap:9px;
+-  border-top:1px solid var(--edge2);padding-top:12px;margin-top:2px}
+-.unittimes .link{align-self:flex-start;font-size:12.5px}
+-.utbox{display:flex;flex-direction:column;gap:8px}
+-.utbox .hint{margin:0}
+-.utrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+-.utname{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;
+-  min-width:190px}
+-.utrow input{width:74px;font-family:var(--mono);text-align:center;padding:6px}
+-.utrow .unit{font-size:11.5px;color:var(--faint)}
 +/* Empat kolom tetap: kotak pilihan, labelnya, kotak esai, labelnya. Unit yang
 +   tidak punya salah satu jenis mengisi dua kolomnya dengan slot kosong, supaya
 +   kotak isian tetap sejajar antar baris dan mudah dibandingkan sekilas. */
@@ -2792,40 +990,13 @@ index 075d990..1c34010 100644
 +  .tset{width:100%;margin-left:0;grid-template-columns:68px 50px 68px 50px}
 +  .tname{flex:1 1 100%}
 +}
-+.build.mismatch{color:var(--warn);font-weight:700}
-+.owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
-+.owednow.wait{color:var(--warn)}
-+.owednow.done{color:var(--faint)}
-+.owedwarn{flex:1 1 100%;order:-1;font-size:12.5px;line-height:1.55;color:var(--warn);
-+  background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
-+  border-radius:12px;padding:10px 12px}
-+.owedwarn b{font-weight:800}
-+.hint.bad{color:var(--warn);background:var(--warn-soft);border-radius:10px;padding:8px 10px}
-+.hint.on{color:var(--signal-text);background:var(--signal-soft);border-radius:10px;padding:8px 10px}
-+.susullist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
-+.susullist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
-+  padding:11px 12px;display:flex;flex-direction:column;gap:9px;align-items:flex-start}
-+.suhead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;width:100%}
-+.suhead b{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em}
-+.suhead small{font-size:11px;color:var(--faint);flex:1;overflow:hidden;
-+  text-overflow:ellipsis;white-space:nowrap}
-+.suleft{font-size:11.5px;color:var(--warn);font-weight:700}
-+.suunits{display:flex;gap:6px;flex-wrap:wrap}
-+.suask{width:100%;background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
-+  border-radius:12px;padding:10px 12px}
-+.suask p{margin:0;font-size:12.5px;line-height:1.55;color:var(--warn)}
-+.surow{display:flex;gap:8px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
-+
-+/* ---- peserta: inject lama yang masih terbuka untuk unit ini ---- */
-+.staycard{background:var(--warn-soft);box-shadow:inset 0 0 0 1px var(--warn-edge);
-+  border-radius:16px;padding:14px 15px;margin:0 0 18px}
-+.staycard b{display:block;font-family:var(--disp);font-size:15px;font-weight:800;
-+  letter-spacing:-.02em;color:var(--warn)}
-+.staycard p{margin:7px 0 12px;font-size:13px;line-height:1.55;color:var(--dim)}
-+.staycard.back{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
-+.staycard.back b{color:var(--ink)}
-+.staycard.back p{margin-bottom:10px}
-+
+ .build.mismatch{color:var(--warn);font-weight:700}
+ .owednow{margin:22px 0 0;font-size:12.5px;font-weight:700;letter-spacing:-.01em}
+ .owednow.wait{color:var(--warn)}
+@@ -4384,6 +4672,25 @@ html,body{background:var(--ink)}
+ .staycard.back b{color:var(--ink)}
+ .staycard.back p{margin-bottom:10px}
+ 
 +/* Baris tab inject di layar peserta. Dua jendela yang terbuka berdiri
 +   bersebelahan dengan jamnya masing masing, jadi peserta melihat sisa waktu
 +   keduanya tanpa berpindah dulu. */
@@ -2845,46 +1016,10 @@ index 075d990..1c34010 100644
 +.itab.late.on{box-shadow:inset 0 0 0 1.5px var(--warn)}
 +.itabnote{margin:0 0 16px;font-size:12px;line-height:1.55;color:var(--faint)}
 +
-+.recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
-+.recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
-+  padding:10px 12px}
-+.recaplist li.open{box-shadow:inset 0 0 0 1px var(--edge)}
-+.rchead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-+.rctitle{flex:1;min-width:0;display:flex;align-items:baseline;gap:9px;text-align:left}
-+.rctitle b{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em}
-+.rctitle small{font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-+.recaplist .btn.on{background:var(--signal);color:var(--signal-ink)}
-+.rcbody{margin-top:11px;padding-top:11px;border-top:1px solid var(--edge2);
-+  display:flex;flex-direction:column;gap:14px}
-+.rccond{margin:0;font-size:12.5px;line-height:1.5;color:var(--dim);white-space:pre-line;
-+  border-left:2px solid var(--edge);padding-left:10px}
-+.rcq{display:flex;flex-direction:column;gap:6px}
-+.rcpunit{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;color:var(--faint)}
-+.rcqtext{font-size:13px;font-weight:600;line-height:1.35;white-space:pre-line}
-+.rckey{font-size:12px;color:var(--live);line-height:1.4}
-+.rckey .lab{font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;
-+  color:var(--faint);margin-right:7px}
-+.rcans{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
-+.rcans li{display:flex;align-items:baseline;gap:10px;font-size:12.5px;line-height:1.4;
-+  background:var(--ink);border-radius:9px;padding:6px 9px}
-+.rcans li.ok{color:var(--live)}
-+.rcans li.part{color:var(--warn)}
-+.rcans li.no{color:var(--wrong)}
-+.rcans li.none{color:var(--faint);font-style:italic}
-+.rcatext{flex:1;min-width:0;overflow-wrap:anywhere;white-space:pre-line}
-+.rcapts{font-weight:700;flex:none}
- 
- /* ---------- participant ---------- */
- .pmain{display:flex;justify-content:center;padding:20px 16px 80px}
-@@ -3604,10 +4825,16 @@ html,body{background:var(--ink)}
-   border-bottom:1px solid var(--edge2)}
- .projtop h1{font-size:26px;margin:2px 0 0}
- .projlang{margin-left:auto}
-+/* Penanda rekap di proyektor. Warnanya sengaja berbeda dari fase mana pun,
-+   supaya ruangan tidak mengira ini inject yang sedang berjalan. */
-+.projphase.recapmark{background:var(--signal);color:var(--signal-ink);
-+  border-radius:20px;padding:6px 14px;letter-spacing:.1em}
- .projphase{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;
+ .recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+ .recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
+   padding:10px 12px}
+@@ -4526,6 +4833,8 @@ html,body{background:var(--ink)}
    letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
  .projphase .pulse{margin:0;width:12px;height:12px}
  .projphase.revealed{color:var(--signal-text)}
@@ -2893,7 +1028,7 @@ index 075d990..1c34010 100644
  .projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 34px}
  .projlobby{text-align:center;padding:5vh 0 0}
  .projlobby h2{font-size:40px}
-@@ -3760,6 +4987,80 @@ html,body{background:var(--ink)}
+@@ -4678,7 +4987,36 @@ html,body{background:var(--ink)}
     tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
     nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
  const EN = {
@@ -2922,75 +1057,15 @@ index 075d990..1c34010 100644
 +  "tertinggal": "left behind",
 +  "Anda sedang mengisi inject {0} yang tertinggal. Ruangan sudah membahas inject {1}.": "You are filling in inject {0}, the one you were left behind on. The room has moved to inject {1}.",
 +  "Inject yang tertinggal masih bisa dibuka lagi lewat baris di atas selama waktunya belum habis. Jawaban yang sudah terkirim tersimpan.": "The inject you were left behind on can be reopened from the row above while its time lasts. Answers already sent are kept.",
-+  /* ---- waktu per unit ---- */
+   /* ---- waktu per unit ---- */
 +  "detik": "seconds",
 +  "Waktu pilihan {0}": "Choice time for {0}",
 +  "Waktu esai {0}": "Essay time for {0}",
 +  "Tambah satu menit untuk {0} saja": "Add one minute for {0} only",
-+  "Waktu per unit": "Per unit time",
-+  "Sembunyikan waktu per unit": "Hide per unit time",
-+  " · {0} disetel": " · {0} set",
-+  "Kosongkan berarti unit itu mengikuti waktu inject. Angka di sini hanya berlaku untuk inject ini, dan skor tiap unit dihitung terhadap jendelanya sendiri.": "Left empty, that unit follows the inject's time. Numbers here apply to this inject only, and each unit is scored against its own window.",
-+  /* ---- susulan ---- */
-+  " · server {0}": " · server {0}",
-+  "Versi server berbeda dari versi tampilan": "The server version differs from the interface version",
-+  "Tidak ada inject yang menunggu. Sebuah inject masuk ke daftar ini kalau waktu menjawabnya pernah dibuka, lalu ditinggalkan sementara masih ada unit yang belum mengirim jawaban, jendelanya masih menyisakan waktu, dan kuncinya belum dibacakan. Jendela yang sudah habis terpakai tidak muncul di sini, karena tidak ada sisa waktu untuk disusulkan.": "Nothing is waiting. An inject enters this list if its answer window was opened, then left behind while some unit had not sent an answer, its window still has time left, and its key has not been read out. A window that has been fully used up does not appear here, because there is no remaining time to catch up with.",
-+  "Semua unit sudah mengirim jawaban.": "Every unit has sent an answer.",
-+  "Belum menjawab: {0}": "Not yet answered: {0}",
-+  "Tutup waktu menjawab sekarang?": "Close the answer window now?",
-+  "Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.": "Closing the answer window stops them too. Their remaining time is kept and this inject can still be completed through Catch-up, but they cannot keep working while the room discusses this inject, because the discussion would be overheard.",
-+  "Ya, tutup": "Yes, close it",
-+  "Inject yang ditinggalkan dan masih bisa diselesaikan": "Injects left unfinished that can still be completed",
-+  "Susulan": "Catch-up",
-+  "Belum selesai di inject ini: {0}.": "Not finished on this inject: {0}.",
-+  "Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.": "This inject has no time limit, so their window stays open.",
-+  "Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.": "They have {0} left and it is not forfeited. Their device will offer two choices: finish this inject first, or move on now.",
-+  "Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.": "This inject can also be reopened through Catch-up, as long as its key has not been read out.",
-+  "Unit tidak selesai pada waktu yang sama. Kalau sebagian unit sudah mengirim jawabannya, Anda boleh lanjut ke inject berikutnya tanpa menunggu yang lain, lalu kembali ke sini untuk menyelesaikan inject yang tertinggal. Sisa waktu unit itu disimpan, jadi mereka tidak mendapat waktu baru dan nilainya tetap sebanding dengan unit yang mengerjakan tepat waktu.": "Units do not finish at the same moment. Once some units have sent their answers, you may move to the next inject without waiting for the rest, then come back here to finish the inject that was left behind. That unit's remaining time is preserved, so they get no fresh clock and their score stays comparable with the units that answered on time.",
-+  "Inject {0} sedang berjalan sebagai susulan.": "Inject {0} is running as a catch-up.",
-+  "tanpa batas waktu": "no time limit",
-+  "sisa {0}": "{0} left",
-+  "Susulan dijalankan fasilitator utama.": "Catch-up is run by the lead facilitator.",
-+  "Seluruh ruangan akan kembali ke inject {0} dengan sisa waktu {1}.": "The whole room returns to inject {0} with {1} remaining.",
-+  "tanpa batas": "no limit",
-+  "Unit yang sudah menjawab hanya melihat: jawabannya terkunci dan tidak bisa diubah. Kuncinya belum boleh dibacakan sebelum susulan ini ditutup, karena jawaban yang benar akan terdengar seluruh ruangan.": "Units that already answered can only watch: their answers are locked and cannot be changed. Do not read out the key before this catch-up closes, because the correct answer would be heard by the whole room.",
-+  "Ya, buka susulan": "Yes, open catch-up",
-+  "Buka susulan": "Open catch-up",
-+  "Ruangan sudah lanjut ke inject {0}.": "The room has moved on to inject {0}.",
-+  "Anda masih mengerjakan inject {0}, dan sisa waktunya tetap berjalan.": "You are still working on inject {0}, and its clock is still running.",
-+  "Selesaikan dulu di sini, atau ikut pindah sekarang. Kalau pindah, jawaban inject ini yang belum terkirim tidak akan tercatat.": "Finish here first, or move on now. If you move on, any answer for this inject you have not sent will not be recorded.",
-+  "Ikut ke inject {0} sekarang": "Move to inject {0} now",
-+  "Inject {0} masih terbuka untuk unit Anda.": "Inject {0} is still open for your unit.",
-+  "Waktunya masih berjalan. Kembali ke sana kalau ingin menyelesaikannya.": "Its clock is still running. Go back if you want to finish it.",
-+  "Kembali ke inject {0}": "Back to inject {0}",
-+  "Inject {0} dibuka kembali sebagai susulan.": "Inject {0} has been reopened as a catch-up.",
-+  "Unit yang belum menjawab bisa mengisi sekarang dengan sisa waktunya. Jawaban yang sudah masuk terkunci dan tidak bisa diubah.": "Units that have not answered can answer now with their remaining time. Answers already in are locked and cannot be changed.",
-+  "Susulan, sisa waktu": "Catch-up, time remaining",
-+  "Jawaban unit Anda sudah masuk dan terkunci selama susulan": "Your unit's answer is in and locked for this catch-up",
-+  "Sudah masuk dan terkunci selama susulan": "Sent and locked for this catch-up",
-+  "Kunci inject itu sudah dibuka, jadi susulan tidak bisa dijalankan lagi.": "That inject's key has already been read out, so catch-up can no longer be run.",
-+  "Semua unit sudah menjawab inject itu.": "Every unit has already answered that inject.",
-+  "Waktu inject itu sudah habis terpakai.": "That inject's time is fully used up.",
-   " · {0} dicentang": " · {0} ticked",
-   ", esai {0}": ", essay {0}",
-   ", tapi sedang offline": ", but is currently offline",
-@@ -3790,6 +5091,7 @@ const EN = {
-   "Batal": "Cancel",
-   "Batas waktu default (detik, 0 = tanpa batas)": "Default time limit (seconds, 0 = no limit)",
-   "Batas waktu esai (detik, 0 = tanpa batas)": "Essay time limit (seconds, 0 = no limit)",
-+  "Belum ada inject yang bisa direkap. Sebuah inject masuk ke daftar ini setelah waktu menjawabnya pernah dibuka, karena sebelum itu belum ada jawaban untuk dibahas. Membuka ruangan baru juga mengosongkan daftar ini.": "No inject can be recapped yet. An inject joins this list once its answering time has been opened, because before that there are no answers to discuss. Opening a new room also clears this list.",
-   "Belum ada kabar dari server.": "Nothing from the server yet.",
-   "Belum ada kode.": "No codes yet.",
-   "Belum ada unit yang mengambil kursi untuk inject ini": "No unit has taken a seat for this inject yet",
-@@ -3810,6 +5112,7 @@ const EN = {
-   "Briefing": "Briefing",
-   "Buat kode": "Create code",
-   "Buat satu kode untuk tiap orang, dan tentukan sendiri apa yang boleh ia lakukan. Kode ini bukan kode unit, jadi tidak bisa dipakai peserta untuk bergabung.": "Create one code per person and decide yourself what they may do. This is not a unit code, so participants cannot use it to join.",
-+  "Buka inject yang sudah dijalankan": "Open an inject that has already run",
-   "buka jawaban": "open answering",
-   "Buka jawaban": "Open answers",
-   "Buka jawaban otomatis saat waktu habis": "Open answers automatically when time runs out",
-@@ -3827,7 +5130,6 @@ const EN = {
+   "Waktu per unit": "Per unit time",
+   "Sembunyikan waktu per unit": "Hide per unit time",
+   " · {0} disetel": " · {0} set",
+@@ -4792,7 +5130,6 @@ const EN = {
    "dari {0} kursi": "of {0} seats",
    "dari {0} poin yang tersedia untuk unit Anda": "of {0} points available to your unit",
    "Debrief": "Debrief",
@@ -2998,85 +1073,6 @@ index 075d990..1c34010 100644
    "Detik": "Seconds",
    "Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.": "In this exercise they are not the same, so raw points would favour whoever was asked more.",
    "Dibuat internal dengan bantuan AI": "Built in house with AI assistance",
-@@ -3861,8 +5163,11 @@ const EN = {
-   "Inject ini tidak melibatkan unit Anda. Simak saja.": "This inject does not involve your unit. Just follow along.",
-   "Inject ini tidak punya esai": "This inject has no essay",
-   "Inject ini tidak punya teks skenario. Sampaikan dari catatan Anda.": "This inject has no scenario text. Deliver it from your own notes.",
-+  "Inject yang sudah dijalankan, lengkap dengan jawaban tiap unit dan kuncinya. Pakai ini untuk menyambungkan inject sekarang dengan keputusan sebelumnya.": "Injects that have already run, with every unit answer and the key. Use this to connect the current inject to earlier decisions.",
-+  "Inject yang sudah lewat beserta jawaban yang unit Anda kirim. Hanya bisa dibaca, jawabannya tidak bisa diubah lagi.": "Past injects and the answers your unit sent. Read only, the answers can no longer be changed.",
-   "Inject {0}": "Inject {0}",
-   "Inject {0} punya lebih dari satu Kondisi. Hanya yang pertama yang ditampilkan.": "Inject {0} has more than one Situation. Only the first is shown.",
-+  "Inject {0} sebelumnya": "Previous inject {0}",
-   "Inject {0} tidak punya teks Kondisi.": "Inject {0} has no Situation text.",
-   "Inject {0}: ditandai checkbox tapi sel Jawaban tidak berisi opsi, jadi diperlakukan sebagai esai.": "Inject {0}: marked as checkbox but the Answer cell holds no options, so it is treated as an essay.",
-   "jawaban benar": "correct answers",
-@@ -3876,6 +5181,7 @@ const EN = {
-   "Jawaban terbaik": "Best answer",
-   "Jawaban terkirim": "Answer sent",
-   "Jawaban unit": "Unit answer",
-+  "Jawaban unit Anda": "Your unit answer",
-   "Jawaban unit Anda sudah tercatat.": "Your unit's answer has been recorded.",
-   "Jumlah pertanyaan berskor per unit tidak sama ({0}). Poin mentah akan menguntungkan yang ditanya lebih banyak, jadi peringkat dihitung dari persentase maksimum tiap unit sendiri. Poin mentah tetap ditampilkan.": "The number of scored questions per unit is uneven ({0}). Raw points would favour whoever was asked more, so the ranking is computed from each unit's percentage of its own maximum. Raw points are still shown.",
-   "Jumlah soal": "Questions",
-@@ -3902,6 +5208,7 @@ const EN = {
-   "kosong": "empty",
-   "Kosongkan semua, ikuti angka default": "Clear them all and follow the default",
-   "kuat": "strong",
-+  "Kunci": "Key",
-   "Kunci jawaban": "Answer key",
-   "Kunci jawaban sudah tampil di semua layar.": "The answer key is showing on every screen.",
-   "Kuncinya adalah": "The key is",
-@@ -3917,7 +5224,10 @@ const EN = {
-   "Latihan Tabletop": "Tabletop Exercise",
-   "lemah": "weak",
-   "Lepas": "Release",
-+  "Lepas dari proyektor": "Clear from projector",
-+  "Lihat inject yang sudah lewat": "Look at past injects",
-   "Lihat jawaban model": "Show model answer",
-+  "Lihat jawaban unit Anda": "See your unit answer",
-   "Maks": "Max",
-   "Maks unit": "Unit max",
-   "Manual (Anda yang menilai)": "Manual (you grade)",
-@@ -3997,10 +5307,14 @@ const EN = {
-   "Rata detik": "Avg seconds",
-   "Rata nilai esai": "Avg essay grade",
-   "rata-rata skor unit": "average unit score",
-+  "Rekap": "Recap",
-+  "Rekap inject": "Inject recap",
-+  "Rekap inject sebelumnya": "Recap of an earlier inject",
-   "Rincian per Peran": "Breakdown by Role",
-+  "Riwayat": "History",
-   "Salah": "Wrong",
-   "sangat kuat": "very strong",
--  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, mengatur lama menjawab untuk inject itu dalam menit.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional and sets how long that inject may be answered, in minutes.",
-+  "Satu baris per pertanyaan, berisi *Inject No.*, *Kondisi*, *Peran*, *Siklus*, *Pertanyaan* dan *Jawaban*. Kolom *Waktu* opsional, dalam menit. Angka pada baris pertama sebuah inject mengatur waktu inject itu; angka berbeda pada baris unit lain memberi unit tersebut jam sendiri.": "One row per question, holding *Inject No.*, *Situation*, *Role*, *Cycle*, *Question* and *Answer*. The *Time* column is optional, in minutes. A number on an inject's first row sets that inject's window; a different number on another unit's row gives that unit a clock of its own.",
-   "Satu jawaban untuk seluruh unit. Putuskan bersama, lalu ketuk.": "One answer for the whole unit. Decide together, then tap.",
-   "satu kursi": "one seat",
-   "Satu kursi per unit bisnis. Kode menentukan unitnya, dan perangkat pertama yang memakainya memegang kursi itu. Perangkat kedua dengan kode sama akan ditolak.": "One seat per business unit. The code decides the unit, and the first device to use it holds that seat. A second device with the same code is refused.",
-@@ -4039,6 +5353,7 @@ const EN = {
-   "Sudah tampil di semua perangkat. Menunggu fasilitator utama membuka waktu menjawab.": "Showing on every device. Waiting for the lead facilitator to open the answering time.",
-   "Tambah": "Add",
-   "Tampilan di layar": "What the screens show",
-+  "Tampilkan di proyektor": "Show on projector",
-   "tampilkan kunci": "show key",
-   "Tampilkan kunci jawaban": "Show answer key",
-   "Tampilkan nama unit": "Show unit names",
-@@ -4068,6 +5383,7 @@ const EN = {
-   "Unit Anda sudah masuk": "Your unit is in",
-   "Unit ditanya": "Units asked",
-   "unit ikut": "units taking part",
-+  "Unit ini tidak hadir di inject itu.": "This unit was not present for that inject.",
-   "Unit ini tidak menjawab.": "This unit did not answer.",
-   "Unit kerja": "Business unit",
-   "Unit lain mungkin masih menulis esai. Tunggu fasilitator membuka sesi diskusi.": "Other units may still be writing essays. Wait for the facilitator to open the discussion.",
-@@ -4085,6 +5401,7 @@ const EN = {
-   "Ya": "Yes",
-   "Ya, lanjut": "Yes, continue",
-   "{0} belum dinilai": "{0} not yet graded",
-+  "{0} dari 10": "{0} out of 10",
-   "{0} dtk": "{0} s",
-   "{0} hal yang perlu dicek": "{0} things to check",
-   "{0} jam": "{0} hours",
 diff --git a/tools/poster/README.md b/tools/poster/README.md
 new file mode 100644
 index 0000000..e9176cd
