@@ -20,11 +20,13 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 /* Bumping this version invalidates every stored session. A leftover
    session from an older build was the cause of the white screens. */
 const V = "v4";
-const BUILD = "b45";  // shown in the corner so you can confirm what is deployed
+const BUILD = "b47";  // shown in the corner so you can confirm what is deployed
 const K_HOST = `ttx:${V}:host`;
 const K_ME = `ttx:${V}:me`;
 const K_KEY = `ttx:${V}:key`;
 const K_NAME = `ttx:${V}:hostname`;
+/* Target jam baca dan jam diskusi milik fasilitator di perangkat ini. */
+const K_TGT = `ttx:${V}:phasetarget`;
 const K_THEME = "ttx:theme";
 
 const isHostRoute = () =>
@@ -290,7 +292,13 @@ const AiNote = () => (
  * per connection and count in server time everywhere.
  * ---------------------------------------------------------------------- */
 let clockOffset = 0, bestRtt = Infinity;
-const serverNow = () => Date.now() + clockOffset;
+/* Saat fasilitator menjeda latihan, server membekukan waktunya di satu titik
+   dan mengirimkan titik itu. Pembekuannya dipasang di sini, di satu pintu yang
+   dipakai setiap penghitung di aplikasi ini, supaya tidak ada satu pun jam yang
+   luput dijeda hanya karena menghitung sendiri. */
+let pauseMark = 0;
+const setPauseMark = (v) => { pauseMark = Number(v) || 0; };
+const serverNow = () => pauseMark || Date.now() + clockOffset;
 function noteTimeSample(c, srv) {
   const now = Date.now(), rtt = now - c;
   if (rtt < 0 || rtt > 4000) return;
@@ -747,14 +755,78 @@ function buildModel(rows) {
 }
 
 const SAMPLE = [
-  { "Inject No.": "1", Siklus: "Siklus 1 - Deteksi", Waktu: "2", Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.", Peran: "SOC, IT Operations", Tipe: "pg", Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?", Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?", Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati" },
-  { "Inject No.": "2", Siklus: "Siklus 1 - Deteksi", Waktu: "1.5", Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.", Peran: "Risk Management", Tipe: "pg", Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?", Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox", Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.", Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "", Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?", Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
-  { "Inject No.": "3", Siklus: "Siklus 2 - Respons", Waktu: "2", Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.", Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg", Pertanyaan: "Apa yang masuk dalam respons pertama?", Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai", Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.", Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
-  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "", Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?", Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
+  /* Deck latihan. Isinya sengaja dibuat melewati setiap keadaan yang bisa
+     muncul saat latihan sungguhan, jadi fasilitator bisa mencobanya sendiri
+     tanpa menyiapkan sheet: jam per unit yang berbeda, unit yang jendelanya
+     habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot
+     bertingkat lewat bintang maupun lewat kurung siku, inject yang memakai jam
+     bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit,
+     dan satu inject dua bahasa untuk menguji tombol ID/EN. */
+
+  /* Inject 1. Dua unit berbagi satu pertanyaan berbobot, dan satu unit diberi
+     jam jauh lebih pendek lewat kolom Waktu di barisnya sendiri. Unit itulah
+     yang akan selesai atau kehabisan waktu lebih dulu, jadi di sinilah jendela
+     tertinggal dan baris tab dua inject di layar peserta ikut teruji. */
+  { "Inject No.": "1", Siklus: "Siklus 1 Deteksi", Waktu: "2",
+    Kondisi: "Pukul 02:14 WIB, tool monitoring SOC memunculkan lonjakan gagal autentikasi ke portal admin core banking. Sumbernya subnet internal yang dialokasikan untuk vendor pemeliharaan pihak ketiga. Analis on-call belum melakukan eskalasi.\n===\nAt 02:14 local time, SOC monitoring shows a spike of failed logins against the core banking admin portal. The source is an internal subnet assigned to a third party maintenance vendor. The on-call analyst has not escalated yet.",
+    Peran: "SOC, IT Operations", Tipe: "pg",
+    Pertanyaan: "Apa tindakan pertama Anda dalam 15 menit ke depan?\n===\nWhat is your first action in the next 15 minutes?",
+    Jawaban: "A. Menunggu alert kedua sebelum bertindak\n***B. Verifikasi alert, nonaktifkan akun vendor, beri tahu IR lead\n**C. Menelepon vendor dan menanyakan aktivitas mereka\n*D. Membuat tiket dan menyerahkan saat pergantian shift\n===\nA. Wait for a second alert before acting\nB. Verify the alert, disable the vendor account, tell the IR lead\nC. Call the vendor and ask about their activity\nD. Raise a ticket and hand it over at shift change" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Vendor Management", Tipe: "pg", Waktu: "0.5",
+    Pertanyaan: "Apakah Anda punya kontak darurat vendor di luar jam kerja dan batas waktu notifikasi kontraktual?\n===\nDo you have an out of hours vendor contact and a contractual notification deadline?",
+    Jawaban: "A. Tidak, harus menunggu jam kerja\n*B. Ya, keduanya ada di contract register dan bisa dihubungi sekarang\nC. Ada kontaknya, tapi tidak ada batas waktu yang disepakati\n===\nA. No, we must wait for office hours\nB. Yes, both sit in the contract register and can be reached now\nC. We have the contact, but no agreed deadline" },
+
+  /* Inject 2. Bobot ditulis dua cara sekaligus: bintang pada pertanyaan pertama
+     dan kurung siku pada pertanyaan centang, supaya keduanya terbaca di satu
+     latihan. Satu baris sengaja dibiarkan tanpa kolom Tipe, jadi bentuk sel
+     Jawaban yang menentukan jenisnya, seperti sheet lama sebelum kolom itu ada. */
+  { "Inject No.": "2", Siklus: "Siklus 1 Deteksi", Waktu: "1.5",
+    Kondisi: "Tiga puluh menit kemudian akun vendor dikonfirmasi telah dikompromikan. Log menunjukkan akses berhasil ke database berisi dokumen identitas nasabah. Jumlah record yang tersentuh belum diketahui.",
+    Peran: "Risk Management", Tipe: "pg",
+    Pertanyaan: "Apakah ini sudah melewati ambang batas Anda untuk menyatakan insiden mayor?",
+    Jawaban: "A. Belum, tunggu jumlah record final\n*B. Ya, nyatakan segera saat akses tidak sah ke data nasabah terkonfirmasi\nC. Eskalasikan ke CISO untuk keputusan\nD. Catat sebagai security event, bahas di forum mingguan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "SOC", Tipe: "checkbox",
+    Pertanyaan: "Bukti apa saja yang wajib diamankan sebelum host dibangun ulang? Centang semua yang sesuai.",
+    Jawaban: "*A. Log autentikasi akun vendor\n*B. Memory image host yang terdampak\nC. Riwayat tiket helpdesk milik vendor\n*D. Log akses database pada periode tersebut\nE. Salinan kebijakan kata sandi perusahaan" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Hukum & Kepatuhan", Tipe: "",
+    Pertanyaan: "Jam notifikasi ke regulator mulai berjalan sejak kapan?",
+    Jawaban: "*A. Sejak akses tidak sah ke data pribadi terkonfirmasi\nB. Sejak jumlah record final\nC. Sejak Direksi diberi penjelasan" },
+
+  /* Inject 3. Esai dengan jamnya sendiri lewat kolom Waktu Esai. Unit yang
+     hanya mendapat pertanyaan pilihan selesai lebih dulu lalu menunggu, dan
+     layar fasilitator menampilkan dua cincin sekaligus. */
+  { "Inject No.": "3", Siklus: "Siklus 2 Respons", Waktu: "2", "Waktu Esai": "4",
+    Kondisi: "Pukul 08:40 seorang jurnalis mengirim email ke Corporate Communications menanyakan konfirmasi kebocoran data dokumen identitas nasabah. Ia mengutip unggahan di sebuah forum kriminal dan meminta jawaban dalam dua jam.",
+    Peran: "Corporate Communications, Hukum & Kepatuhan", Tipe: "pg",
+    Pertanyaan: "Apa yang masuk dalam respons pertama?",
+    Jawaban: "A. Penjelasan lengkap atas semua yang sudah diketahui\n*B. Holding statement yang sudah direview legal, dari satu juru bicara\nC. Tidak merespons sampai investigasi selesai" },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Corporate Communications", Tipe: "esai",
+    Pertanyaan: "Tulis holding statement dua kalimat yang akan Anda kirim ke jurnalis tersebut.",
+    Jawaban: "Mengakui adanya laporan, menyatakan investigasi sedang berjalan, tanpa mengonfirmasi angka apa pun, dan menyebut satu titik kontak resmi." },
+  { "Inject No.": "", Siklus: "", Kondisi: "", Peran: "Risk Management", Tipe: "",
+    Pertanyaan: "Pihak mana saja yang harus diberi tahu dalam 24 jam pertama?",
+    Jawaban: "*A. Direksi dan Komite Risiko\n*B. Regulator sesuai ketentuan yang berlaku\nC. Seluruh karyawan melalui email massal\n*D. Penyedia asuransi siber" },
+
+  /* Inject 4. Tanpa kolom Waktu sama sekali, jadi ia memakai jam bawaan yang
+     disetel di Pengaturan. Hanya satu unit yang ditanya, untuk menguji inject
+     yang tidak melibatkan seluruh ruangan. Bobotnya ditulis dengan kurung siku,
+     cara kedua selain bintang, dan hanya berlaku untuk pilihan tunggal. */
+  { "Inject No.": "4", Siklus: "Siklus 2 Respons",
+    Kondisi: "Siang hari, tim forensik meminta satu host produksi dibekukan untuk diambil image-nya. Layanan di host itu masih melayani nasabah.",
+    Peran: "IT Operations", Tipe: "pg",
+    Pertanyaan: "Apa yang Anda lakukan terhadap permintaan itu?",
+    Jawaban: "A. Menolak sampai jam layanan berakhir [0]\nB. Menyiapkan failover dulu, lalu bekukan host dan ambil image [3]\nC. Membekukan host sekarang juga tanpa failover [1]" },
+
+  /* Inject 5. Waktu nol berarti tanpa batas: jamnya tidak pernah mencapai nol,
+     jadi pilihan "Buka jawaban hanya setelah waktu habis" tidak boleh menahan
+     tombolnya di sini. Seluruh unit ditanya sekaligus, untuk menguji papan
+     peringkat dan rekap di akhir. */
+  { "Inject No.": "5", Siklus: "Siklus 3 Pemulihan", Waktu: "0",
+    Kondisi: "Tiga hari kemudian, sesi pembelajaran digelar. Insiden sudah ditutup dan layanan pulih sepenuhnya.",
+    Peran: "SOC, IT Operations, Vendor Management, Risk Management, Hukum & Kepatuhan, Corporate Communications",
+    Tipe: "checkbox",
+    Pertanyaan: "Mana yang pantas masuk daftar perbaikan wajib? Centang semua yang sesuai.",
+    Jawaban: "*A. Akses vendor dibatasi waktu dan ditinjau berkala\nB. Menambah jumlah dashboard pemantauan\n*C. Latihan notifikasi regulator secara berkala\n*D. Kontak darurat vendor diuji dua kali setahun" },
 ];
 
 /* ------------------------- crash containment ------------------------- */
@@ -933,6 +1005,10 @@ function Host({ onExit }) {
   const [settings, setSettings] = useState({
     mode: "auto", timeLimit: 60, essayLimit: 300, essayGrace: 60, points: 1000,
     speedBonus: true, autoReveal: true, showNames: true, showUnits: true, leaderboard: true,
+    /* Menahan tombol Buka jawaban selama jam menjawab masih berisi sisa.
+       Mati secara bawaan: saat latihan sungguhan fasilitator kadang memang perlu
+       menutup lebih awal, dan untuk itu sudah ada peringatan. */
+    lockReveal: false,
   });
   const [times, setTimes] = useState({});
   const [etimes, setEtimes] = useState({});     // jendela esai per inject
@@ -956,6 +1032,14 @@ function Host({ onExit }) {
   /* Satu pertanyaan untuk semua jalan keluar dari fase menjawab: pindah inject,
      menutup waktu menjawab, atau melompat lewat daftar di kiri. */
   const [ask, setAsk] = useState(null);
+  /* Titik waktu saat latihan dijeda, nol kalau sedang berjalan. Datang dari
+     server, jadi semua perangkat membeku di titik yang sama. */
+  const [paused, setPaused] = useState(0);
+  /* Titik mulai fase yang sedang berjalan, dari server, untuk jam baca dan jam
+     diskusi. Targetnya disimpan di perangkat ini saja. */
+  const [phaseAt, setPhaseAt] = useState(0);
+  const [tgt, setTgt] = useState(() => lsGet(K_TGT) || { briefing: 0, revealed: 0 });
+  const setTarget = (ph, v) => setTgt((m) => { const n = { ...m, [ph]: v }; lsSet(K_TGT, n); return n; });
   const echo = useRef("");
   const [booted, setBooted] = useState(false);
   const [keyRequired, setKeyRequired] = useState(false);
@@ -1017,6 +1101,8 @@ function Host({ onExit }) {
       setKeyShown(!!m.state.keyShown); setCatchup(!!m.state.catchup);
       setCarry(m.carry || {}); setSpent(m.spent || {}); setKeyed(m.keyed || []);
       setSbuild(m.sbuild || "lama");
+      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
+      setPhaseAt(m.state.phaseAt || 0);
       setOpenedAt(m.state.openedAt); setScreen("run");
     } else if (m.t === "cohosted") {
       /* Simpan kodenya. Tanpa ini, sambung ulang jatuh ke jalur rehost, ditolak
@@ -1033,6 +1119,8 @@ function Host({ onExit }) {
       setKeyShown(!!m.state.keyShown); setOpenedAt(m.state.openedAt);
       setCatchup(!!m.state.catchup); setCarry(m.carry || {}); setSpent(m.spent || {});
       setKeyed(m.keyed || Object.keys(m.keys || {}));
+      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
+      setPhaseAt(m.state.phaseAt || 0);
       setSbuild(m.sbuild || "lama");
       setJoinErr(""); setScreen("run");
     } else if (m.t === "recap") setRecapId(m.injectId ?? null);
@@ -1056,6 +1144,8 @@ function Host({ onExit }) {
       if (m.carry) setCarry(m.carry);
       if (m.spent) setSpent(m.spent);
       if (m.keyed) setKeyed(m.keyed);
+      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
+      if (m.phaseAt) setPhaseAt(m.phaseAt);
       if (m.openedAt) setOpenedAt(m.openedAt);
     } else if (m.t === "carry") {
       setCarry(m.carry || {}); setSpent(m.spent || {});
@@ -1266,6 +1356,40 @@ function Host({ onExit }) {
     }
   };
 
+  /* Sisa waktu satu unit pada inject yang sedang berjalan, dalam detik. Nol di
+     jendelanya berarti tanpa batas, dan itu dilaporkan sebagai null. */
+  const leftOfUnit = (peran) => {
+    const inj = model?.injects[activeIdx];
+    if (!inj) return null;
+    const qs = (inj.questions || []).filter((q) => q.peran === peran);
+    const lims = [];
+    if (qs.some((q) => q.type !== "open")) lims.push(limitOf(inj.id, peran));
+    if (qs.some((q) => q.type === "open")) lims.push(elimitOf(inj.id, peran));
+    if (!lims.length || lims.some((v) => !v)) return null;
+    const el = Math.max(0, (serverNow() - (openedAt || serverNow())) / 1000);
+    return Math.max(0, Math.round(Math.max(...lims) - el));
+  };
+
+  /* Menetapkan sisa waktu satu unit saat inject sedang berjalan.
+
+     Yang diketik fasilitator adalah sisa, bukan panjang jendela sejak dibuka.
+     Di tengah latihan yang dipikirkan adalah "unit ini butuh dua menit lagi",
+     bukan "jendelanya harus sembilan menit terhitung sejak tadi". Jadi angkanya
+     dijumlahkan dengan waktu yang sudah berjalan sebelum disimpan. */
+  const setUnitLeft = (peran, secs) => {
+    const inj = model?.injects[activeIdx];
+    if (!inj) return;
+    const qs = (inj.questions || []).filter((q) => q.peran === peran);
+    const el = Math.max(0, Math.round((serverNow() - (openedAt || serverNow())) / 1000));
+    const grace = Number(settings.essayGrace) || 0;
+    if (qs.some((q) => q.type !== "open")) {
+      setUnitTime(inj.id, peran, String(Math.max(0, el + secs)));
+    }
+    if (qs.some((q) => q.type === "open")) {
+      setUnitETime(inj.id, peran, String(Math.max(0, el + secs - grace)));
+    }
+  };
+
   /* Tombol jaga jaga: menambah menit ke jendela yang sedang berjalan.
 
      Jam inject dan setiap jam per unit pada inject itu ikut bertambah, karena
@@ -1330,6 +1454,17 @@ function Host({ onExit }) {
     return Math.max(0, Math.round((lim - run) / 1000));
   };
   const owedNow = phase === "open" ? owedOn(inject) : [];
+  /* Tombol Buka jawaban ditahan selama jam menjawab masih berisi sisa, kalau
+     pengaturannya memang meminta begitu. Inject tanpa batas waktu tidak pernah
+     ditahan, karena jamnya tidak akan pernah mencapai nol.
+
+     Nilainya dititipkan juga ke sebuah ref, karena pintasan papan ketik dibuat
+     sekali lewat useCallback dan tidak ikut dirender ulang tiap detik. Tanpa
+     itu, menahan tombolnya tidak ada artinya: Spasi dan R tetap membukanya. */
+  const lockRef = useRef(false);
+  const revealLocked = !!settings.lockReveal && phase === "open"
+    && settings.mode === "auto" && (leftNowSec() ?? 0) > 0;
+  lockRef.current = revealLocked;
   /* Pintasan papan ketik dibuat sekali lewat useCallback, jadi daftar ini
      dibaca lewat ref, bukan lewat tangkapan render. */
   const owedRef = useRef([]);
@@ -1360,6 +1495,20 @@ function Host({ onExit }) {
   }, []);
   const doReveal = () => { echo.current = ""; setPhase("revealed"); };
   const doJump = (i) => { echo.current = ""; setAsk(null); setActiveIdx(i); setPhase("briefing"); };
+  /* Peringatan yang sedang terbuka dipegang di ref juga, supaya papan ketik
+     bisa menjawabnya tanpa membuat pendengar tombol dipasang ulang tiap kali
+     peringatannya berubah. */
+  const askRef = useRef(null);
+  askRef.current = ask;
+  const runAsk = useCallback(() => {
+    const a = askRef.current;
+    setAsk(null);
+    if (!a) return;
+    if (a.kind === "jump") doJump(a.idx);
+    else if (a.kind === "next") goNext();
+    else if (a.kind === "phase") { echo.current = ""; setPhase(a.to); }
+    else doReveal();
+  }, [goNext]);
   /* Satu pintu. Semua jalan yang menutup jendela menjawab atau berpindah inject
      lewat sini, jadi peringatannya tidak bisa terlewat hanya karena fasilitator
      memakai papan ketik atau daftar inject di kiri, bukan tombolnya. */
@@ -1372,6 +1521,7 @@ function Host({ onExit }) {
     if (phase === "lobby") setPhase("briefing");
     else if (phase === "briefing") { setOpenedAt(serverNow()); setPhase("open"); }
     else if (phase === "open") {
+      if (lockRef.current) return;
       if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
       else setPhase("revealed");
     } else goNext();
@@ -1382,9 +1532,19 @@ function Host({ onExit }) {
     const onKey = (e) => {
       if (e.target.closest && e.target.closest("input, textarea, select")) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      /* Selama peringatan terbuka, papan ketik hanya menjawab peringatan itu.
+         Tanpa ini, Spasi yang ditekan dua kali akan membuka peringatan lalu
+         melewatinya, persis kejadian yang ingin dicegah. */
+      if (askRef.current) {
+        if (e.key === "Escape") { e.preventDefault(); setAsk(null); }
+        else if (e.key === " " || e.key === "Enter") { e.preventDefault(); if (canDrive) runAsk(); }
+        else e.preventDefault();
+        return;
+      }
       const k = String(e.key).toLowerCase();
       if (e.key === " ") { e.preventDefault(); if (canDrive) advance(); }
       else if (k === "r" && phase === "open" && canDrive) {
+        if (lockRef.current) return;
         if (owedRef.current.length > 0) setAsk({ kind: "reveal" });
         else { echo.current = ""; setPhase("revealed"); }
       }
@@ -1401,7 +1561,8 @@ function Host({ onExit }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector, canDrive]);
+  }, [screen, phase, keyShown, roomId, send, advance, goNext, goPrev, openProjector, canDrive,
+    runAsk]);
 
   /* ---- setup ---- */
   if (screen === "setup") {
@@ -1426,6 +1587,9 @@ function Host({ onExit }) {
             <button className="link" onClick={() => loadRows(SAMPLE, "contoh-latihan")}>
               {t("Muat contoh latihan saja")}
             </button>
+            <p className="hint">
+              {t("Contohnya berisi lima inject dan enam unit, dan sengaja melewati setiap keadaan yang bisa muncul saat latihan sungguhan: jam yang berbeda antar unit, unit yang jendelanya habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot bertingkat lewat bintang maupun kurung siku, inject yang memakai jam bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit, dan satu inject dua bahasa.")}
+            </p>
 
             {/* Fasilitator kedua tidak memuat sheet. Ia masuk dengan kode dari
                 pemilik ruangan, dan kode itu yang menentukan haknya. */}
@@ -1515,6 +1679,9 @@ function Host({ onExit }) {
                   <Check label={t("Buka jawaban otomatis saat waktu habis")} checked={settings.autoReveal}
                     onChange={(v) => patchSettings({ autoReveal: v })}
                     hint={t("Menutup sesi menjawab dan memindahkan ruangan ke diskusi begitu waktu mencapai nol.")} />
+                  <Check label={t("Buka jawaban hanya setelah waktu habis")} checked={settings.lockReveal}
+                    onChange={(v) => patchSettings({ lockReveal: v })}
+                    hint={t("Mematikan tombol Buka jawaban selama masih ada sisa waktu, supaya tidak terpencet di tengah unit yang sedang mengetik. Kalau dibiarkan mati, tombolnya tetap bisa ditekan tapi memunculkan peringatan dulu.")} />
                   <Check label={t("Tampilkan peringkat")} checked={settings.leaderboard}
                     onChange={(v) => patchSettings({ leaderboard: v })}
                     hint={t("Memeringkat unit satu sama lain bisa membuat peserta defensif, bukan terbuka. Untuk latihan pertama, lebih aman dimatikan.")} />
@@ -1647,6 +1814,7 @@ function Host({ onExit }) {
           <b className="injno">{tf("Inject {0}", inject.id)}</b>
           <PhaseSteps phase={phase} onPick={canDrive ? (k) => {
             /* Menutup waktu menjawab dari sini pun harus lewat pintu yang sama. */
+            if (k === "revealed" && lockRef.current) return;
             if (k !== "open" && phase === "open" && owedRef.current.length > 0) {
               return setAsk({ kind: "phase", to: k });
             }
@@ -1674,6 +1842,13 @@ function Host({ onExit }) {
             title={t("Inject yang ditinggalkan dan masih bisa diselesaikan")}>
             {t("Susulan")} · {susulList.length}
           </button>
+          {canDrive && settings.mode === "auto" && (
+            <button className={`btn quiet pill ${paused ? "on" : ""}`}
+              title={t(paused ? "Jalankan lagi jam semua unit" : "Hentikan sementara jam semua unit")}
+              onClick={() => send({ t: "pause", roomId, on: !paused })}>
+              {paused ? t("Lanjutkan") : t("Jeda")}
+            </button>
+          )}
           <button className="btn quiet" onClick={openProjector} title={t("Buka tampilan proyektor")}>{t("Proyektor")}</button>
           <button className="btn quiet" onClick={() => setScreen("report")}>{t("Laporan")}</button>
         </>} />
@@ -1702,6 +1877,18 @@ function Host({ onExit }) {
             send({ t: "catchup", roomId, injectId: id });
           }}
           onClose={() => { setSusulOpen(false); setSusulAsk(null); }} />
+      )}
+
+      {paused > 0 && (
+        <div className="pausebar" role="status">
+          <b>{t("Latihan dijeda.")}</b>{" "}
+          {t("Semua jam berhenti, termasuk jendela susulan, dan jawaban tidak bisa dikirim sampai dilanjutkan.")}
+        </div>
+      )}
+
+      {ask && canDrive && (
+        <AskModal {...{ ask, model, activeIdx, unitOf }} owed={owedNow}
+          left={leftNowSec()} onCancel={() => setAsk(null)} onGo={runAsk} />
       )}
 
       {teamOpen && (
@@ -1765,6 +1952,8 @@ function Host({ onExit }) {
 
               <div className="actbar">
                 {phase === "briefing" && (<>
+                  <PhaseTimer since={phaseAt} label={t("Waktu baca")}
+                    target={tgt.briefing || 0} onTarget={(v) => setTarget("briefing", v)} />
                   <span className="msg">
                     {t(canDrive
                       ? "Sudah tampil di semua perangkat. Bacakan, lalu buka waktu menjawab."
@@ -1804,8 +1993,20 @@ function Host({ onExit }) {
                       : allIn ? t("Semua unit sudah menjawab")
                         : tf("Menunggu jawaban, {0} dari {1} unit sudah duduk", seatsHere.length, inject.roles.length)}
                   </span>
+                  {/* Menambah dan mengurangi berdiri berdampingan. Sebelumnya hanya ada
+                      penambah, dan satu satunya cara memendekkan jam yang terlanjur
+                      kepanjangan adalah mengetik ulang angkanya di tiap baris unit. */}
                   {canDrive && settings.mode === "auto" && (
                     <span className="addtime">
+                      <span className="unit">{t("Kurangi")}</span>
+                      {[300, 120, 60].map((sec) => (
+                        <button key={`m${sec}`} className="btn quiet pill"
+                          title={t(hasEssay(inject) ? "Mengurangi kedua jam" : "Mengurangi waktu menjawab")}
+                          onClick={() => {
+                            addTime(inject.id, -sec, false);
+                            if (hasEssay(inject)) addTime(inject.id, -sec, true);
+                          }}>&minus;{sec / 60}m</button>
+                      ))}
                       <span className="unit">{t("Tambah")}</span>
                       {[60, 120, 300].map((sec) => (
                         <button key={sec} className="btn quiet pill"
@@ -1817,14 +2018,24 @@ function Host({ onExit }) {
                       ))}
                     </span>
                   )}
+                  {/* Tombol ini dulu memanggil setPhase langsung, jadi ia satu satunya
+                      jalan keluar dari fase menjawab yang melewati peringatan. Sekarang
+                      ia lewat pintu yang sama dengan Spasi, R, dan daftar inject. */}
                   {canDrive && (
-                    <button className="btn" onClick={() => { echo.current = ""; setPhase("revealed"); }}>
+                    <button className="btn" disabled={revealLocked}
+                      title={revealLocked
+                        ? tf("Masih tersisa {0}. Pengaturan menahan tombol ini sampai waktunya habis.",
+                          fmt(leftNowSec() ?? 0))
+                        : ""}
+                      onClick={() => guard({ kind: "reveal" }, doReveal)}>
                       {t("Buka jawaban")}
                     </button>
                   )}
                 </>)}
 
                 {phase === "revealed" && (<>
+                  <PhaseTimer since={phaseAt} label={t("Lama diskusi")}
+                    target={tgt.revealed || 0} onTarget={(v) => setTarget("revealed", v)} />
                   <span className="msg">
                     {t(keyShown
                       ? "Kunci jawaban sudah tampil di semua layar."
@@ -1933,10 +2144,11 @@ function Host({ onExit }) {
                         {timed && phase === "open" && (<>
                           <UnitClock openedAt={openedAt} limit={win} />
                           <span className="taddslot">
-                            {canDrive && finishedMs == null && (
-                              <button className="btn quiet pill tadd"
-                                title={tf("Tambah satu menit untuk {0} saja", unitOf(r))}
-                                onClick={() => addUnitTime(r, 60)}>+1m</button>
+                            {canDrive && (
+                              <SetLeft now={win ? leftOfUnit(r) : null} unit={unitOf(r)}
+                                done={finishedMs != null}
+                                onSet={(v) => setUnitLeft(r, v)}
+                                onBump={(v) => addUnitTime(r, v)} />
                             )}
                           </span>
                         </>)}
@@ -1999,39 +2211,6 @@ function Host({ onExit }) {
                       ? "Anda menilai esai dan menulis catatan. Perpindahan inject dipegang fasilitator utama."
                       : "Anda memantau. Perpindahan inject dipegang fasilitator utama.")}
                   </span>
-                ) : ask ? (
-                  <span className="confirm">
-                    <span className="msg">
-                      {ask.kind === "reveal" || ask.kind === "phase"
-                        ? t("Tutup waktu menjawab sekarang?")
-                        : tf("Pindahkan semua ke inject {0}?",
-                          model.injects[ask.kind === "jump" ? ask.idx : activeIdx + 1]?.id)}
-                    </span>
-                    {owedNow.length > 0 && (
-                      <span className="owedwarn">
-                        <b>{tf("Belum selesai di inject ini: {0}.",
-                          owedNow.map(unitOf).join(", "))}</b>{" "}
-                        {ask.kind === "reveal" || ask.kind === "phase"
-                          ? t("Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.")
-                          : leftNowSec() === null
-                            ? t("Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.")
-                            : tf("Sisa waktu mereka {0} dan tidak hangus. Perangkat mereka akan menawarkan dua pilihan: selesaikan inject ini dulu, atau ikut pindah sekarang.", fmt(leftNowSec()))}{" "}
-                        {ask.kind === "reveal" || ask.kind === "phase" ? "" :
-                          t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
-                      </span>
-                    )}
-                    <button className="btn quiet" onClick={() => setAsk(null)}>{t("Batal")}</button>
-                    <button className="btn" onClick={() => {
-                      const a = ask; setAsk(null);
-                      if (!a) return;
-                      if (a.kind === "jump") doJump(a.idx);
-                      else if (a.kind === "next") goNext();
-                      else if (a.kind === "phase") { echo.current = ""; setPhase(a.to); }
-                      else doReveal();
-                    }}>
-                      {t(ask.kind === "reveal" || ask.kind === "phase" ? "Ya, tutup" : "Ya, lanjut")}
-                    </button>
-                  </span>
                 ) : activeIdx < model.injects.length - 1 ? (
                   <button className="btn" onClick={() => setAsk({ kind: "next" })}>{t("Inject berikutnya")}</button>
                 ) : (
@@ -2066,6 +2245,150 @@ function Host({ onExit }) {
    waktunya, dan unit yang sudah menjawab terkunci. Keduanya disebutkan di
    peringatan sebelum tombolnya bekerja, karena yang satu menghentikan jalannya
    latihan sebentar dan yang satu tidak bisa dibatalkan. */
+/* Jam fase untuk fasilitator: sudah berapa lama ruangan membaca skenario,
+   atau sudah berapa lama diskusi berjalan. Fase menjawab sudah punya cincin
+   hitung mundurnya sendiri, jadi jam ini hanya tampil di Briefing dan Diskusi.
+
+   Jamnya menghitung naik, bukan mundur, karena gunanya berjaga jaga: tidak ada
+   yang terkunci saat angkanya lewat. Target boleh dipasang kalau ingin diberi
+   tanda, dan angkanya berubah warna begitu target terlewati. Semua ini hanya
+   ada di layar fasilitator dan tidak menyentuh skor apa pun. Saat latihan
+   dijeda jamnya ikut berhenti, karena dihitung lewat serverNow yang sama. */
+function PhaseTimer({ since, label, target, onTarget }) {
+  const [now, setNow] = useState(() => serverNow());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(serverNow()), 500);
+    return () => clearInterval(iv);
+  }, []);
+  const el = since ? Math.max(0, Math.floor((now - since) / 1000)) : 0;
+  const over = target ? el - target : null;
+  const late = over != null && over >= 0;
+  return (
+    <span className={`ptimer ${late ? "over" : ""}`}>
+      <span className="plab">{label}</span>
+      <b className="mono">{fmt(el)}</b>
+      {target > 0 && (
+        <small className="mono">
+          {late ? tf("lewat {0}", fmt(over)) : tf("dari {0}", fmt(target))}
+        </small>
+      )}
+      <span className="ptgt" title={t("Pasang target supaya jamnya memberi tanda saat terlewati. Tekan lagi untuk melepasnya.")}>
+        {[60, 120, 180, 300].map((sec) => (
+          <button key={sec} className={`btn quiet pill ${target === sec ? "on" : ""}`}
+            onClick={() => onTarget(target === sec ? 0 : sec)}>{sec / 60}m</button>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+/* Isian sisa waktu untuk satu unit, dipakai saat inject sedang berjalan.
+
+   Isiannya sengaja tidak dikendalikan React. Angka yang ditampilkan sebagai
+   bayangan berubah tiap detik, dan kalau React ikut menyetel nilainya, angka
+   yang sedang diketik fasilitator akan tertimpa di tengah ketikan. Nilainya
+   dipakai saat Enter atau saat kotaknya ditinggalkan, lalu kotaknya kosong
+   lagi supaya bayangan sisa waktu yang baru terbaca. */
+function SetLeft({ now, unit, done, onSet, onBump }) {
+  const ref = useRef(null);
+  const clear = () => { if (ref.current) ref.current.value = ""; };
+  const apply = () => {
+    const el = ref.current;
+    if (!el) return;
+    const raw = el.value.trim();
+    el.value = "";
+    if (!raw) return;
+    /* Tanda di depan angka yang menentukan artinya. "90" berarti sisanya jadi
+       sembilan puluh detik, "-30" berarti dikurangi tiga puluh detik. Dua duanya
+       dibutuhkan: menyetel saat memberi jatah baru, menambah atau mengurangi
+       saat sekadar menggeser sedikit. */
+    const m = /^([+\u2212-]?)\s*(\d+)$/.exec(raw);
+    if (!m) return;
+    const n = Number(m[2]);
+    if (!Number.isFinite(n)) return;
+    if (m[1] === "+") onBump(n);
+    else if (m[1]) onBump(-n);
+    else onSet(n);
+  };
+  /* Unit yang sudah mengirim jawabannya tetap memegang kotak dan tombolnya,
+     hanya dimatikan dan diberi warna hijau. Dulu ketiganya dilepas begitu unit
+     selesai, dan barisnya langsung kehilangan tiga kolom sehingga kolom di
+     kanannya melompat dan tabelnya sulit dibaca sekilas. Dimatikan, bukan
+     sekadar diabaikan, karena mengubah jendela setelah jawabannya masuk akan
+     menggeser perhitungan poin yang sudah terlanjur dibukukan. */
+  return (
+    <>
+      <span className={`tlivebox ${done ? "done" : ""}`}>
+        <input ref={ref} className="tlive" type="text" inputMode="numeric"
+          disabled={done}
+          title={done ? tf("{0} sudah mengirim jawabannya, jendelanya tidak diubah lagi.", unit)
+            : tf("Sisa waktu {0}. Ketik angka untuk menyetel sisanya, atau -30 dan +30 untuk menggeser. Enter untuk menerapkan.", unit)}
+          aria-label={tf("Sisa waktu {0} dalam detik", unit)}
+          placeholder={now == null ? "∞" : String(now)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); apply(); ref.current?.blur(); }
+            if (e.key === "Escape") { e.preventDefault(); clear(); ref.current.blur(); }
+          }}
+          onBlur={apply} />
+        <span className="tlivesuf">{t("dtk")}</span>
+      </span>
+      {/* Menekan tombol ini tidak boleh membuat kotak di sebelahnya kehilangan
+          fokus lebih dulu, karena angka yang belum jadi akan ikut diterapkan
+          dan tombolnya menambah di atas angka itu. preventDefault menahan
+          perpindahan fokus, lalu isinya dibuang. */}
+      <button className={`btn quiet pill tadd ${done ? "done" : ""}`} disabled={done}
+        title={tf("Kurangi satu menit untuk {0} saja", unit)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { clear(); onBump(-60); }}>&minus;1m</button>
+      <button className={`btn quiet pill tadd ${done ? "done" : ""}`} disabled={done}
+        title={tf("Tambah satu menit untuk {0} saja", unit)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { clear(); onBump(60); }}>+1m</button>
+    </>
+  );
+}
+
+/* Peringatan sebelum waktu menjawab ditutup atau ruangan berpindah inject.
+
+   Sebelumnya peringatan ini menempel di bilah navigasi, di dasar halaman yang
+   panjang. Fasilitator yang menekan Spasi sambil melihat bagian atas layar
+   tidak pernah melihatnya, jadi perpindahan terasa terjadi tanpa konfirmasi.
+   Sekarang ia berdiri di tengah layar dan menahan papan ketik sampai dijawab. */
+function AskModal({ ask, model, activeIdx, owed, unitOf, left, onCancel, onGo }) {
+  const closing = ask.kind === "reveal" || ask.kind === "phase";
+  const target = model.injects[ask.kind === "jump" ? ask.idx : activeIdx + 1];
+  return (
+    <div className="scrim mid" onClick={onCancel}>
+      <aside className="panel ask" onClick={(e) => e.stopPropagation()} role="alertdialog"
+        aria-label={t(closing ? "Tutup waktu menjawab" : "Pindah inject")}>
+        <div className="phead">
+          <h2>{closing ? t("Tutup waktu menjawab sekarang?")
+            : tf("Pindahkan semua ke inject {0}?", target?.id ?? "?")}</h2>
+        </div>
+        {owed.length > 0 ? (
+          <p className="owedwarn">
+            <b>{tf("Belum selesai di inject ini: {0}.", owed.map(unitOf).join(", "))}</b>{" "}
+            {closing
+              ? t("Menutup waktu menjawab menghentikan mereka juga. Sisa waktunya tetap tersimpan dan inject ini bisa diselesaikan lewat Susulan, tapi mereka tidak bisa melanjutkan sambil ruangan membahas inject ini, karena pembahasannya akan terdengar.")
+              : left === null
+                ? t("Inject ini tidak punya batas waktu, jadi jendelanya tetap terbuka untuk mereka.")
+                : tf("Sisa waktu mereka {0} dan tidak hangus. Inject ini tetap terbuka di perangkat mereka, berdampingan dengan inject yang baru.", fmt(left))}{" "}
+            {closing ? "" : t("Inject ini juga tetap bisa dibuka lagi lewat Susulan, selama kuncinya belum dibacakan.")}
+          </p>
+        ) : (
+          <p className="hint">{t("Semua unit sudah mengirim jawaban.")}</p>
+        )}
+        <div className="surow">
+          <button className="btn quiet" onClick={onCancel}>{t("Batal")} · Esc</button>
+          <button className="btn" onClick={onGo}>
+            {t(closing ? "Ya, tutup" : "Ya, lanjut")} · {t("Spasi")}
+          </button>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 function SusulPanel({ susulList, unitOf, roleIdx, canDrive, susulAsk, susulErr,
   catchup, inject, onAsk, onCancel, onRun, onClose }) {
   useEffect(() => {
@@ -2712,6 +3035,8 @@ function Participant() {
      nomor inject yang perangkat ini pilih untuk diselesaikan dulu. */
   const [carry, setCarry] = useState({});
   const [stay, setStay] = useState(null);
+  /* Jeda dari fasilitator. Nol berarti berjalan. */
+  const [paused, setPaused] = useState(0);
   const [histOpen, setHistOpen] = useState(false);
   const [booted, setBooted] = useState(false);
   const [evicted, setEvicted] = useState(false);
@@ -2739,12 +3064,14 @@ function Participant() {
       if (m.ran) setRan(m.ran);
       if (m.keys) setKeys(m.keys);
       setCarry(m.carry || {});
+      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
       setMsg(""); setTaken(null); setEvicted(false);
     } else if (m.t === "codeok") { setPeek(m); setMsg(""); }
     else if (m.t === "seattaken") { setTaken(m); setMsg(""); }
     else if (m.t === "state") {
       setState({ activeIdx: m.activeIdx, phase: m.phase, catchup: !!m.catchup,
         openedAt: m.openedAt, limit: m.limit, elimit: m.elimit, keyShown: !!m.keyShown });
+      setPaused(m.paused || 0); setPauseMark(m.paused || 0);
       if (m.ran) setRan(m.ran);
       if (m.carry) setCarry(m.carry);
     }
@@ -2765,6 +3092,7 @@ function Participant() {
       setMsg("Terkirim."); setTimeout(() => setMsg(""), 1800);
     }
     else if (m.t === "locked") setMsg("Jawaban sudah ditutup.");
+    else if (m.t === "paused") setMsg("Latihan sedang dijeda, jawaban belum bisa dikirim.");
     else if (m.t === "timeup") setMsg("Waktu untuk pertanyaan ini sudah habis.");
     else if (m.t === "nosuch") { setPeek(null); setMsg("Tidak ada latihan dengan kode itu."); }
     else if (m.t === "key") {
@@ -2829,6 +3157,10 @@ function Participant() {
         && (x.inj.questions || []).some((q) => !me?.answers?.[q.qid]));
   }, [carry, deck, roomIdx, me]);
   const stayOn = carryMine.find((x) => String(x.id) === String(stay)) || null;
+  /* Pemberitahuan sekali saat ruangan berpindah sementara unit ini belum
+     selesai. Tanpa ini perpindahan hanya terasa sebagai layar yang berubah
+     sendiri, dan peserta tidak tahu injectnya masih terbuka. */
+  const [moved, setMoved] = useState(null);
   const stayRef = useRef(null);
   useEffect(() => { stayRef.current = stay; }, [stay]);
   const seenIdx = useRef(roomIdx);
@@ -2846,7 +3178,14 @@ function Participant() {
     if (held && carryMine.some((x) => String(x.id) === String(held))) return;
     const left = carryMine.find((x) => x.idx === was);
     setStay(left ? left.id : null);
-  }, [roomIdx, carryMine, onCatchup]);
+    if (left) setMoved({ from: left.inj.id, to: deck?.injects?.[roomIdx]?.id ?? "?" });
+  }, [roomIdx, carryMine, onCatchup, deck]);
+  /* Jendela yang tertinggal bisa mati sendiri saat waktunya habis. Kalau itu
+     terjadi, pemberitahuannya ikut hilang supaya tidak menunjuk ke inject yang
+     sudah tidak bisa diisi lagi. */
+  useEffect(() => {
+    if (moved && !carryMine.some((x) => String(x.inj.id) === String(moved.from))) setMoved(null);
+  }, [carryMine, moved]);
 
   const viewIdx = stayOn ? stayOn.idx : roomIdx;
   const phase = stayOn ? "open" : (state?.phase || "lobby");
@@ -3020,6 +3359,30 @@ function Participant() {
         <HistoryPanel injects={history} answers={me.answers} keys={keys} pick={pick}
           onClose={() => setHistOpen(false)} />
       )}
+      {paused > 0 && (
+        <div className="pausebar" role="status">
+          <b>{t("Latihan dijeda.")}</b>{" "}
+          {t("Waktu berhenti dan jawaban belum bisa dikirim. Tunggu aba aba fasilitator.")}
+        </div>
+      )}
+
+      {moved && (
+        <div className="scrim mid" onClick={() => setMoved(null)}>
+          <aside className="panel ask" onClick={(e) => e.stopPropagation()} role="alertdialog"
+            aria-label={t("Ruangan berpindah inject")}>
+            <div className="phead">
+              <h2>{tf("Ruangan sudah lanjut ke inject {0}.", moved.to)}</h2>
+            </div>
+            <p className="owedwarn">
+              <b>{tf("Inject {0} Anda masih terbuka.", moved.from)}</b>{" "}
+              {t("Sisa waktunya tetap berjalan, jadi kerjakan sekarang juga kalau masih mau mengisinya. Kedua inject ada di baris pilihan tepat di bawah ini, dan Anda bisa berpindah bolak balik tanpa kehilangan apa pun.")}
+            </p>
+            <div className="surow">
+              <button className="btn wide" onClick={() => setMoved(null)}>{t("Mengerti")}</button>
+            </div>
+          </aside>
+        </div>
+      )}
       <main className="pmain">
         <div className="pinner">
           {phase === "lobby" && (
@@ -3036,27 +3399,51 @@ function Participant() {
               lenyap, dan kartu ini yang menawarkan pindah. Sisa waktunya nyata:
               jamnya berjalan sejak inject itu dibuka, jadi tidak ada unit yang
               memperoleh waktu tambahan dengan bertahan di sini. */}
-          {stayOn && (
-            <div className="staycard">
-              <b>{tf("Ruangan sudah lanjut ke inject {0}.",
-                deck?.injects?.[roomIdx]?.id ?? "?")}</b>
-              <p>
-                {tf("Anda masih mengerjakan inject {0}, dan sisa waktunya tetap berjalan.", stayOn.inj.id)}{" "}
-                {t("Selesaikan dulu di sini, atau ikut pindah sekarang. Kalau pindah, jawaban inject ini yang belum terkirim tidak akan tercatat.")}
+          {/* ---- dua inject terbuka sekaligus ----
+
+              Unit yang tertinggal tidak lagi harus memilih antara inject lama
+              dan inject baru. Keduanya berdiri di baris ini dengan jamnya
+              masing masing yang berjalan bersamaan, dan satu ketukan berpindah
+              di antaranya tanpa menghilangkan apa pun, karena yang diketik
+              disimpan per pertanyaan.
+
+              Dibuat sebagai baris tab, bukan dua panel bersebelahan, karena
+              peserta memegang ponsel: dua kolom pertanyaan di layar selebar itu
+              tidak terbaca, sementara dua jam yang terlihat sekaligus justru
+              yang dibutuhkan untuk memutuskan mana yang dikerjakan dulu. */}
+          {carryMine.length > 0 && phase !== "lobby" && (
+            <>
+              <div className="itabs" role="tablist" aria-label={t("Inject yang terbuka")}>
+                <button role="tab" aria-selected={!stayOn} onClick={() => setStay(null)}
+                  className={`itab ${stayOn ? "" : "on"}`}>
+                  <span className="ilab">{tf("Inject {0}", deck?.injects?.[roomIdx]?.id ?? "?")}</span>
+                  <small>{t("sedang berjalan")}</small>
+                  {autoMode && state?.phase === "open" && (
+                    <UnitClock openedAt={state?.openedAt}
+                      limit={Math.max(windowOf(deck?.injects?.[roomIdx]?.id),
+                        ewindowOf(deck?.injects?.[roomIdx]?.id))} />
+                  )}
+                </button>
+                {carryMine.map((x) => (
+                  <button key={x.id} role="tab" aria-selected={stayOn?.id === x.id}
+                    onClick={() => setStay(x.id)}
+                    className={`itab late ${stayOn?.id === x.id ? "on" : ""}`}>
+                    <span className="ilab">{tf("Inject {0}", x.inj.id)}</span>
+                    <small>{t("tertinggal")}</small>
+                    {autoMode && (
+                      <UnitClock openedAt={x.at}
+                        limit={Math.max(windowOf(x.inj.id), ewindowOf(x.inj.id))} />
+                    )}
+                  </button>
+                ))}
+              </div>
+              <p className="itabnote">
+                {stayOn
+                  ? tf("Anda sedang mengisi inject {0} yang tertinggal. Ruangan sudah membahas inject {1}.",
+                    stayOn.inj.id, deck?.injects?.[roomIdx]?.id ?? "?")
+                  : t("Inject yang tertinggal masih bisa dibuka lagi lewat baris di atas selama waktunya belum habis. Jawaban yang sudah terkirim tersimpan.")}
               </p>
-              <button className="btn wide" onClick={() => setStay(null)}>
-                {tf("Ikut ke inject {0} sekarang", deck?.injects?.[roomIdx]?.id ?? "?")}
-              </button>
-            </div>
-          )}
-          {!stayOn && carryMine.length > 0 && (
-            <div className="staycard back">
-              <b>{tf("Inject {0} masih terbuka untuk unit Anda.", carryMine[0].inj.id)}</b>
-              <p>{t("Waktunya masih berjalan. Kembali ke sana kalau ingin menyelesaikannya.")}</p>
-              <button className="btn quiet wide" onClick={() => setStay(carryMine[0].id)}>
-                {tf("Kembali ke inject {0}", carryMine[0].inj.id)}
-              </button>
-            </div>
+            </>
           )}
           {!stayOn && state?.catchup && (
             <div className="staycard back">
@@ -3146,7 +3533,10 @@ function Participant() {
                        inject ini ditinggalkan sudah ada yang terdengar di
                        ruangan. Yang belum menjawab tetap bisa mengisi. */
                     const frozen = frozenAll && !!sent;
-                    const shut = qUp || frozen;
+                    /* Saat latihan dijeda, tidak ada yang bisa dikirim. Server pun
+                       menolaknya, jadi tombol yang mati di sini hanya membuat
+                       penolakan itu terlihat sebelum peserta terlanjur menekan. */
+                    const shut = qUp || frozen || paused > 0;
                     const toggle = (i) => {
                       const next = cur.includes(i)
                         ? cur.filter((x) => x !== i)
@@ -3452,6 +3842,7 @@ function Screen() {
   const [keys, setKeys] = useState({});
   /* Nomor inject yang sedang dilempar fasilitator ke layar ini, atau null. */
   const [recap, setRecap] = useState(null);
+  const [pausedOn, setPausedOn] = useState(false);
 
   /* Proyektor menampilkan kedua bahasa bertumpuk lewat Dual: satu layar untuk
      seluruh ruangan, jadi tidak ada satu bahasa yang harus dipilih. */
@@ -3460,10 +3851,12 @@ function Screen() {
     if (m.t === "screened") {
       setDeck(m.deck); setCodes(m.codes); setState(m.state); setSettings(m.settings);
       if (m.keys) setKeys(m.keys);
+      setPauseMark(m.paused || 0); setPausedOn(!!m.paused);
       setRecap(m.recap ?? null);
     } else if (m.t === "state") {
       setState({ activeIdx: m.activeIdx, phase: m.phase, openedAt: m.openedAt,
         limit: m.limit, keyShown: !!m.keyShown, catchup: !!m.catchup });
+      setPauseMark(m.paused || 0); setPausedOn(!!m.paused);
     } else if (m.t === "roster") setPeople(m.people || []);
     else if (m.t === "recap") setRecap(m.injectId ?? null);
     else if (m.t === "settings") setSettings(m.settings);
@@ -3521,9 +3914,10 @@ function Screen() {
             {t("Rekap inject sebelumnya")}
           </span>
         ) : (
-          <span className={`projphase ${phase}`}>
+          <span className={`projphase ${pausedOn ? "paused" : phase}`}>
             <span className="pulse" />
-            {state.catchup && phase === "open" ? t("Susulan, sisa waktu")
+            {pausedOn ? t("Dijeda")
+              : state.catchup && phase === "open" ? t("Susulan, sisa waktu")
               : t(phase === "lobby" ? "Menunggu"
                 : phase === "briefing" ? "Baca skenario"
                   : phase === "open" ? "Sedang menjawab"
@@ -4016,6 +4410,11 @@ html,body{background:var(--ink)}
 /* ---------- header ---------- */
 .bar{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:62px;background:var(--slab);
   border-bottom:1px solid var(--edge2);position:sticky;top:0;z-index:10;flex-wrap:wrap}
+/* Pita jeda menempel tepat di bawah bilah atas dan ikut menggulir bersamanya,
+   jadi keadaan "sedang dijeda" tidak pernah hilang dari pandangan. */
+.pausebar{position:sticky;top:62px;z-index:9;padding:9px 16px;font-size:12.5px;line-height:1.5;
+  color:var(--warn);background:var(--warn-soft);border-bottom:1px solid var(--edge2)}
+.pausebar b{font-weight:800}
 .brand{display:flex;align-items:center;gap:11px;font-size:14px;min-width:0}
 .wordmark{font-family:var(--disp);font-weight:800;font-size:17px;letter-spacing:-.035em}
 .barright{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex-wrap:wrap}
@@ -4364,6 +4763,13 @@ html,body{background:var(--ink)}
   position:relative;z-index:31;
   border-left:1px solid var(--edge2);box-shadow:var(--shadow)}
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+/* Peringatan berdiri di tengah layar, bukan menempel di tepi seperti panel
+   lain, supaya tidak bisa terlewat betapapun halaman sedang digulir. */
+.scrim.mid{justify-content:center;align-items:center;background:rgba(10,9,6,.62)}
+.panel.ask{width:min(560px,calc(100% - 32px));height:auto;max-height:86vh;border-radius:16px;
+  border:1px solid var(--edge2);padding:20px 22px 18px}
+.panel.ask .phead h2{font-size:18px;line-height:1.3}
+.panel.ask .owedwarn{margin:10px 0 2px;font-size:13px;line-height:1.6;color:var(--warn)}
 /* ---------- panel rekap inject ---------- */
 /* ---------- konteks inject sebelumnya di layar peserta ---------- */
 .prevctx{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
@@ -4406,8 +4812,39 @@ html,body{background:var(--ink)}
 .tclock.urgent{color:var(--warn)}
 .tclock.done{color:var(--faint)}
 .tclock.none{font-size:11.5px;font-weight:600;color:var(--faint);min-width:54px}
-.taddslot{min-width:44px;display:flex;justify-content:flex-end}
+.taddslot{min-width:184px;display:flex;justify-content:flex-end;align-items:center;gap:5px}
 .tadd{padding:3px 9px;font-size:11.5px}
+/* Kotak sisa waktu saat berjalan. Bayangan angkanya adalah sisa saat ini, jadi
+   fasilitator bisa membacanya tanpa mengetik apa pun. */
+/* Jam baca dan jam diskusi. Angkanya cukup besar untuk dibaca sekilas dari
+   samping laptop, dan berubah ke warna peringatan saat target terlewati. */
+.ptimer{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;border-radius:14px;background:var(--slab);
+  box-shadow:inset 0 0 0 1px var(--edge2)}
+.ptimer .plab{font-size:10.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--faint)}
+.ptimer b{font-size:22px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums;
+  color:var(--txt)}
+.ptimer small{font-size:11.5px;color:var(--faint)}
+.ptimer .ptgt{display:inline-flex;gap:4px}
+.ptimer .ptgt .btn{padding:2px 8px;font-size:11px}
+.ptimer .ptgt .btn.on{background:var(--signal);color:var(--signal-ink);box-shadow:none}
+.ptimer.over{box-shadow:inset 0 0 0 1.5px var(--warn-edge);background:var(--warn-soft)}
+.ptimer.over b,.ptimer.over small{color:var(--warn)}
+.tlivebox{position:relative;display:inline-flex;align-items:center}
+.tlive{width:74px;padding:3px 26px 3px 6px;font-size:12px;text-align:right;
+  font-variant-numeric:tabular-nums}
+.tlive::placeholder{color:var(--faint);opacity:1}
+.tlivesuf{position:absolute;right:7px;font-size:10px;font-weight:700;color:var(--faint);
+  pointer-events:none}
+/* Unit yang sudah selesai: kotak dan tombolnya tetap di tempatnya, hijau dan
+   mati, jadi lebar barisnya tidak berubah saat sebuah unit mengirim jawaban. */
+.tlivebox.done .tlive{color:var(--live);border-color:var(--live-edge);
+  background:var(--live-soft);opacity:1;cursor:default}
+.tlivebox.done .tlive::placeholder{color:var(--live);opacity:.85}
+.tlivebox.done .tlivesuf{color:var(--live);opacity:.8}
+.tadd.done{color:var(--live);border-color:var(--live-edge);background:var(--live-soft);
+  opacity:1;cursor:default}
 .tstate{min-width:112px;text-align:right}
 .tracker.briefing .tname{flex:1}
 .tracker.briefing .tclock{margin-left:auto}
@@ -4450,6 +4887,25 @@ html,body{background:var(--ink)}
 .staycard.back{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
 .staycard.back b{color:var(--ink)}
 .staycard.back p{margin-bottom:10px}
+
+/* Baris tab inject di layar peserta. Dua jendela yang terbuka berdiri
+   bersebelahan dengan jamnya masing masing, jadi peserta melihat sisa waktu
+   keduanya tanpa berpindah dulu. */
+.itabs{display:flex;gap:8px;margin:0 0 10px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.itab{flex:1 1 0;min-width:148px;display:flex;flex-direction:column;align-items:flex-start;
+  gap:2px;padding:10px 12px;border-radius:14px;text-align:left;
+  background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2)}
+.itab .ilab{font-family:var(--disp);font-size:14px;font-weight:800;letter-spacing:-.02em;
+  color:var(--dim)}
+.itab small{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--faint)}
+.itab .tclock{margin-top:3px;font-size:13px}
+.itab.on{background:var(--live-soft);box-shadow:inset 0 0 0 1.5px var(--live-edge)}
+.itab.on .ilab{color:var(--txt)}
+.itab.late{box-shadow:inset 0 0 0 1px var(--warn-edge);background:var(--warn-soft)}
+.itab.late .ilab,.itab.late small{color:var(--warn)}
+.itab.late.on{box-shadow:inset 0 0 0 1.5px var(--warn)}
+.itabnote{margin:0 0 16px;font-size:12px;line-height:1.55;color:var(--faint)}
 
 .recaplist{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .recaplist li{background:var(--slab);box-shadow:inset 0 0 0 1px var(--edge2);border-radius:14px;
@@ -4593,6 +5049,8 @@ html,body{background:var(--ink)}
   letter-spacing:.14em;text-transform:uppercase;color:var(--live)}
 .projphase .pulse{margin:0;width:12px;height:12px}
 .projphase.revealed{color:var(--signal-text)}
+.projphase.paused{color:var(--warn)}
+.projphase.paused .pulse{animation:none;background:var(--warn)}
 .projbody{flex:1;display:flex;flex-direction:column;gap:24px;padding:30px 38px 34px}
 .projlobby{text-align:center;padding:5vh 0 0}
 .projlobby h2{font-size:40px}
@@ -4745,6 +5203,46 @@ html,body{background:var(--ink)}
    tidak pernah membuat layar kosong. Penanda {0} adalah sisipan angka atau
    nama, *tebal*, ~angka~ dan `kode` adalah potongan yang diberi gaya. */
 const EN = {
+  /* b46: jeda jam, peringatan yang berdiri di tengah layar, dan dua inject
+     terbuka sekaligus di perangkat peserta. */
+  "Jeda": "Pause",
+  "Lanjutkan": "Resume",
+  "Hentikan sementara jam semua unit": "Stop every unit's clock for now",
+  "Jalankan lagi jam semua unit": "Start every unit's clock again",
+  "Latihan dijeda.": "The exercise is paused.",
+  "Semua jam berhenti, termasuk jendela susulan, dan jawaban tidak bisa dikirim sampai dilanjutkan.": "Every clock has stopped, catch-up windows included, and no answer can be sent until you resume.",
+  "Waktu berhenti dan jawaban belum bisa dikirim. Tunggu aba aba fasilitator.": "The clock has stopped and answers cannot be sent yet. Wait for the facilitator.",
+  "Latihan sedang dijeda, jawaban belum bisa dikirim.": "The exercise is paused, so answers cannot be sent yet.",
+  "Dijeda": "Paused",
+  "Tutup waktu menjawab": "Close the answering window",
+  "Pindah inject": "Move to another inject",
+  "Sisa waktu mereka {0} dan tidak hangus. Inject ini tetap terbuka di perangkat mereka, berdampingan dengan inject yang baru.": "They have {0} left and it is not forfeited. This inject stays open on their device, alongside the new one.",
+  "Sisa waktu {0} dalam detik": "Time left for {0}, in seconds",
+  "Sisa waktu {0}. Ketik angka untuk menyetel sisanya, atau -30 dan +30 untuk menggeser. Enter untuk menerapkan.": "Time left for {0}. Type a number to set the time left, or -30 and +30 to shift it. Enter applies it.",
+  "dtk": "sec",
+  "Waktu baca": "Reading time",
+  "Lama diskusi": "Discussion time",
+  "lewat {0}": "{0} over",
+  "dari {0}": "of {0}",
+  "Pasang target supaya jamnya memberi tanda saat terlewati. Tekan lagi untuk melepasnya.": "Set a target so the clock flags it when passed. Press again to clear it.",
+  "Buka jawaban hanya setelah waktu habis": "Open answers only once time runs out",
+  "Mematikan tombol Buka jawaban selama masih ada sisa waktu, supaya tidak terpencet di tengah unit yang sedang mengetik. Kalau dibiarkan mati, tombolnya tetap bisa ditekan tapi memunculkan peringatan dulu.": "Disables the Open answers button while time is left, so it cannot be hit while a unit is still typing. Left off, the button still works but asks first.",
+  "Masih tersisa {0}. Pengaturan menahan tombol ini sampai waktunya habis.": "{0} still left. Settings hold this button until time runs out.",
+  "Kurangi": "Take off",
+  "Mengurangi kedua jam": "Takes time off both clocks",
+  "Mengurangi waktu menjawab": "Takes time off the answering window",
+  "Contohnya berisi lima inject dan enam unit, dan sengaja melewati setiap keadaan yang bisa muncul saat latihan sungguhan: jam yang berbeda antar unit, unit yang jendelanya habis lebih dulu lalu tertinggal, esai dengan jamnya sendiri, bobot bertingkat lewat bintang maupun kurung siku, inject yang memakai jam bawaan, inject tanpa batas waktu, inject yang hanya menanyai satu unit, dan satu inject dua bahasa.": "The sample holds five injects and six units, and deliberately walks through every situation a real exercise can produce: units on different clocks, a unit whose window closes first and is left behind, an essay on its own clock, tiered weights written with stars and with brackets, an inject on the default clock, an inject with no time limit, an inject that asks a single unit, and one inject in two languages.",
+  "{0} sudah mengirim jawabannya, jendelanya tidak diubah lagi.": "{0} has sent its answer, so its window is no longer changed.",
+  "Kurangi satu menit untuk {0} saja": "Take one minute off {0} alone",
+  "Ruangan berpindah inject": "The room moved to another inject",
+  "Inject {0} Anda masih terbuka.": "Your inject {0} is still open.",
+  "Sisa waktunya tetap berjalan, jadi kerjakan sekarang juga kalau masih mau mengisinya. Kedua inject ada di baris pilihan tepat di bawah ini, dan Anda bisa berpindah bolak balik tanpa kehilangan apa pun.": "Its clock keeps running, so fill it in now if you still want to. Both injects sit in the row just below, and you can move between them without losing anything.",
+  "Mengerti": "Got it",
+  "Inject yang terbuka": "Injects open to you",
+  "sedang berjalan": "running now",
+  "tertinggal": "left behind",
+  "Anda sedang mengisi inject {0} yang tertinggal. Ruangan sudah membahas inject {1}.": "You are filling in inject {0}, the one you were left behind on. The room has moved to inject {1}.",
+  "Inject yang tertinggal masih bisa dibuka lagi lewat baris di atas selama waktunya belum habis. Jawaban yang sudah terkirim tersimpan.": "The inject you were left behind on can be reopened from the row above while its time lasts. Answers already sent are kept.",
   /* ---- waktu per unit ---- */
   "detik": "seconds",
   "Waktu pilihan {0}": "Choice time for {0}",
@@ -4863,7 +5361,6 @@ const EN = {
   "dari {0} kursi": "of {0} seats",
   "dari {0} poin yang tersedia untuk unit Anda": "of {0} points available to your unit",
   "Debrief": "Debrief",
-  "detik": "seconds",
   "Detik": "Seconds",
   "Di latihan ini memang tidak sama, jadi poin mentah akan menguntungkan yang ditanya lebih banyak.": "In this exercise they are not the same, so raw points would favour whoever was asked more.",
   "Dibuat internal dengan bantuan AI": "Built in house with AI assistance",

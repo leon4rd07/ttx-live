@@ -24,7 +24,7 @@ const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
 /* Versi server, dikirim ke layar fasilitator dan ditampilkan di sampingnya.
    Separuh fitur susulan ada di sini, jadi tanpa penanda ini tidak ada cara
    melihat bahwa yang terpasang adalah tampilan baru di atas server lama. */
-const SBUILD = "b45";
+const SBUILD = "b47";
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no I, O, 0, 1
 
 /* Optional facilitator passcode. Unset means anyone reaching /host can run an
@@ -139,6 +139,11 @@ function longestLimit(room, inj) {
    daripada yang dijadwalkan untuk injectnya, jadi nilai antar unit tetap
    sebanding. */
 
+/* Waktu yang dipakai semua hitungan ruangan ini. Saat latihan dijeda, waktu
+   berhenti di satu titik, jadi tidak ada satu pun jendela yang terus menyusut
+   sementara ruangan sedang menunggu. */
+const nowOf = (room) => (room && room.pausedAt) || Date.now();
+
 const injById = (room, injId) =>
   room.deck.injects.find((i) => String(i.id) === String(injId));
 
@@ -154,7 +159,8 @@ function owedBy(room, inj) {
    jendela yang sudah lewat tidak tercatat lebih panjang daripada izinnya. */
 function usedOf(room, injId, openedAt) {
   const limit = longestLimit(room, injById(room, injId)) * 1000;
-  const run = Math.max(0, Date.now() - (openedAt || Date.now()));
+  const now = nowOf(room);
+  const run = Math.max(0, now - (openedAt || now));
   return limit ? Math.min(run, limit) : run;
 }
 
@@ -174,7 +180,7 @@ function sweepCarry(room) {
   for (const [injId, at] of Object.entries(room.carry)) {
     const inj = injById(room, injId);
     const limit = longestLimit(room, inj) * 1000;
-    const dead = !inj || (limit && Date.now() - at > limit + 800)
+    const dead = !inj || (limit && nowOf(room) - at > limit + 800)
       || !!(room.keys || {})[injId] || !owedBy(room, inj).length;
     if (dead) {
       room.spent[injId] = usedOf(room, injId, at);
@@ -186,7 +192,7 @@ function sweepCarry(room) {
 
 /* Satu bentuk pesan keadaan, supaya setiap jalur mengirim medan yang sama. */
 const stateMsg = (room) => ({ ...room.state, ran: Object.keys(room.ran || {}),
-  carry: sweepCarry(room), spent: room.spent || {},
+  carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0,
   keyed: Object.keys(room.keys || {}) });
 
 /* Who may do what. The facilitator who opened the room owns it and hands out
@@ -278,7 +284,7 @@ function armReveal(room) {
   clearReveal(room.id);
   const inj = room.deck.injects[room.state.activeIdx];
   const limit = longestLimit(room, inj);
-  if (!room.settings.autoReveal || !limit) return;
+  if (!room.settings.autoReveal || !limit || room.pausedAt) return;
   /* Susulan berjalan dengan sisa waktu, jadi hitungannya dari jam yang sedang
      berjalan, bukan dari sekarang. Untuk inject biasa keduanya sama. */
   const run = Math.max(0, Date.now() - (room.state.openedAt || Date.now()));
@@ -286,7 +292,7 @@ function armReveal(room) {
   revealTimers.set(room.id, setTimeout(() => {
     const r = rooms.get(room.id);
     if (!r || r.state.phase !== "open") return;
-    r.state = { ...r.state, phase: "revealed", keyShown: false };
+    r.state = { ...r.state, phase: "revealed", keyShown: false, phaseAt: Date.now() };
     toRoom(r.id, { t: "state", ...r.state });
     toRoom(r.id, { t: "roster", people: roster(r) }, true);
     markSnapshot();
@@ -541,7 +547,7 @@ wss.on("connection", (ws) => {
         send(ws, { t: "hosted", roomId: id, codes, settings, times: room.times,
           etimes: room.etimes, state: room.state, role: "owner",
           ownerKey: room.ownerKey, hostCodes: room.hostCodes, ran: [], recap: null,
-          carry: {}, spent: {}, keyed: [], sbuild: SBUILD,
+          carry: {}, spent: {}, keyed: [], paused: 0, sbuild: SBUILD,
           utimes: room.utimes || {}, uetimes: room.uetimes || {} });
         pushHosts(room);
         markSnapshot();
@@ -561,7 +567,7 @@ wss.on("connection", (ws) => {
           state: byId.state, role: "owner", ownerKey: byId.ownerKey,
           hostCodes: byId.hostCodes || {}, ran: Object.keys(byId.ran || {}),
           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
-          keyed: Object.keys(byId.keys || {}), sbuild: SBUILD });
+          keyed: Object.keys(byId.keys || {}), paused: byId.pausedAt || 0, sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(byId) });
         pushHosts(byId);
         break;
@@ -615,7 +621,7 @@ wss.on("connection", (ws) => {
           utimes: room.utimes || {}, uetimes: room.uetimes || {}, state: room.state,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
           recap: room.recap || null, carry: sweepCarry(room), spent: room.spent || {},
-          sbuild: SBUILD });
+          paused: room.pausedAt || 0, sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(room) });
         if (room.state.keyShown) sendKey(room);
         pushHosts(room);
@@ -663,6 +669,35 @@ wss.on("connection", (ws) => {
          offset against these replies and counts in server time instead. */
       case "time": {
         send(ws, { t: "time", c: m.c, s: Date.now() });
+        break;
+      }
+
+      /* ---- jeda seluruh jam ----
+         Jam di ruangan ini dihitung dari selisih waktu, bukan dari pencacah yang
+         berdetak, jadi menjeda berarti membekukan titik acuannya dan melanjutkan
+         berarti menggeser semua titik mulai sejauh lamanya jeda. Yang digeser
+         bukan hanya inject yang sedang berjalan, tapi juga tiap jendela susulan
+         yang masih hidup, kalau tidak jendela itu habis diam diam selama ruangan
+         berhenti. */
+      case "pause": {
+        if (!byId || !canDrive(ws)) return;
+        const on = !!m.on;
+        if (on === !!byId.pausedAt) return;
+        if (on) {
+          byId.pausedAt = Date.now();
+          clearReveal(byId.id);
+        } else {
+          const d = Math.max(0, Date.now() - byId.pausedAt);
+          byId.pausedAt = 0;
+          if (byId.state?.openedAt) byId.state.openedAt += d;
+          if (byId.state?.phaseAt) byId.state.phaseAt += d;
+          byId.carry = byId.carry || {};
+          for (const k of Object.keys(byId.carry)) byId.carry[k] += d;
+          if (byId.state?.phase === "open") armReveal(byId);
+        }
+        toRoom(byId.id, { t: "state", ...stateMsg(byId) });
+        markDirty(byId.id);
+        markSnapshot();
         break;
       }
 
@@ -721,7 +756,7 @@ wss.on("connection", (ws) => {
           utimes: room.utimes || {}, uetimes: room.uetimes || {},
           me: room.people[pid],
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
-          carry: sweepCarry(room), spent: room.spent || {} });
+          carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0 });
         if (room.state.keyShown) sendKey(room); // joined after the key went out
         markDirty(room.id);
         markSnapshot();
@@ -741,7 +776,7 @@ wss.on("connection", (ws) => {
           settings: room.settings, times: room.times || {}, etimes: room.etimes || {},
           utimes: room.utimes || {}, uetimes: room.uetimes || {}, me,
           ran: Object.keys(room.ran || {}), keys: room.keys || {},
-          carry: sweepCarry(room), spent: room.spent || {} });
+          carry: sweepCarry(room), spent: room.spent || {}, paused: room.pausedAt || 0 });
         if (room.state.keyShown) sendKey(room);
         markDirty(room.id);
         break;
@@ -757,7 +792,7 @@ wss.on("connection", (ws) => {
           state: byId.state, codes: byId.codes,
           ran: Object.keys(byId.ran || {}), keys: byId.keys || {},
           recap: byId.recap || null, carry: sweepCarry(byId), spent: byId.spent || {},
-          sbuild: SBUILD });
+          paused: byId.pausedAt || 0, sbuild: SBUILD });
         send(ws, { t: "roster", people: roster(byId) });
         if (byId.state.keyShown) sendKey(byId);
         break;
@@ -820,7 +855,7 @@ wss.on("connection", (ws) => {
         }
         /* Membuka sebuah inject lewat jalur biasa berarti memberi jendela penuh
            lagi, bukan menyambung. Yang menyambung sisa waktu hanya susulan. */
-        const openedAt = m.phase === "open" ? Date.now() : byId.state.openedAt;
+        const openedAt = m.phase === "open" ? nowOf(byId) : byId.state.openedAt;
         const inj0 = byId.deck.injects[m.activeIdx];
         if (m.phase === "open" && inj0) {
           delete byId.spent[inj0.id];
@@ -841,7 +876,13 @@ wss.on("connection", (ws) => {
             toRoom(byId.id, { t: "roster", people: roster(byId) }, true);
           }
         }
-        byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt,
+        /* Titik mulai fase yang sedang berjalan, untuk jam baca dan jam diskusi
+           di layar fasilitator. Hanya diperbarui kalau fase atau injectnya benar
+           benar berganti, supaya pesan state yang sama dari co-host tidak
+           mengembalikan jamnya ke nol. */
+        const moved = m.phase !== byId.state.phase || m.activeIdx !== byId.state.activeIdx;
+        const phaseAt = moved || !byId.state.phaseAt ? nowOf(byId) : byId.state.phaseAt;
+        byId.state = { activeIdx: m.activeIdx, phase: m.phase, openedAt, phaseAt,
           keyShown: false,
           /* Angka ini dipakai proyektor, yang menampilkan semua unit sekaligus,
              jadi yang berarti baginya adalah jendela yang paling lambat menutup.
@@ -874,7 +915,8 @@ wss.on("connection", (ws) => {
 
         const inj = onActive ? act : injById(room, want);
         const openedAt = onActive ? room.state.openedAt : carriedAt;
-        const elapsed = openedAt ? Date.now() - openedAt : 0;
+        if (room.pausedAt) return send(ws, { t: "paused" });
+        const elapsed = openedAt ? nowOf(room) - openedAt : 0;
         /* Jendela bawaan dan susulan hanya menerima jawaban pertama. Tanpa batas
            ini, unit yang sudah selesai bisa memperbaiki jawabannya dengan apa
            yang sudah terdengar di ruangan sejak inject itu ditinggalkan. */
@@ -982,7 +1024,7 @@ wss.on("connection", (ws) => {
            semua perangkat langsung menunjukkan sisanya dan penilaian memakai
            total waktu berpikir, bukan hanya bagian terakhirnya. */
         byId.state = { activeIdx: idx, phase: "open", keyShown: false, catchup: true,
-          openedAt: Date.now() - (byId.spent[id] || 0),
+          openedAt: nowOf(byId) - (byId.spent[id] || 0), phaseAt: nowOf(byId),
           limit: longestLimit(byId, inj), elimit: essayLimitFor(byId, inj.id, null) };
         toRoom(byId.id, { t: "state", ...stateMsg(byId) });
         armReveal(byId);
